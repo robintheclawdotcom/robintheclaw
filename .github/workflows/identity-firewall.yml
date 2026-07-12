@@ -22,3 +22,5 @@ jobs:
         run: bash scripts/check-no-leaks.sh
         env:
           IDENTITY_DENYLIST: ${{ secrets.IDENTITY_DENYLIST }}
+      - name: Commit identity
+        run: bash scripts/check-git-identity.sh --range HEAD

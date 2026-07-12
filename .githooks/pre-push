@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+zero="0000000000000000000000000000000000000000"
+
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue
+
+  bash scripts/check-no-leaks.sh --ref "$local_sha"
+
+  if [ "$remote_sha" = "$zero" ]; then
+    bash scripts/check-git-identity.sh --range "$local_sha"
+  else
+    bash scripts/check-git-identity.sh --range "$remote_sha..$local_sha"
+  fi
+done

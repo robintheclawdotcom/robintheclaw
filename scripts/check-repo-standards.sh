@@ -13,10 +13,17 @@ req=(
   MAINTAINERS.md
   SUPPORT.md
   RELEASING.md
+  AGENTS.md
+  .githooks/pre-commit
+  .githooks/pre-push
+  scripts/check-git-identity.sh
+  scripts/check-no-leaks.sh
+  scripts/setup-git-hooks.sh
   .github/CODEOWNERS
   .github/PULL_REQUEST_TEMPLATE.md
   .github/dependabot.yml
   .github/workflows/ci.yml
+  .github/workflows/identity-firewall.yml
 )
 
 miss=0
