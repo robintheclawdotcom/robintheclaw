@@ -15,6 +15,9 @@ out/
 cache/
 broadcast/
 
+# rust build artifacts
+target/
+
 # signal measurement output
 signal/data/
 signal/scan.log
