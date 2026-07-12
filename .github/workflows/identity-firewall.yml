@@ -1,0 +1,24 @@
+name: Identity firewall
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Fails the build if tracked files contain absolute home paths, key material, or any pattern in
+# the IDENTITY_DENYLIST secret. The denylist is supplied at runtime and never lives in the tree,
+# so the public repository can screen for private strings without containing them.
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Leak scan
+        run: bash scripts/check-no-leaks.sh
+        env:
+          IDENTITY_DENYLIST: ${{ secrets.IDENTITY_DENYLIST }}

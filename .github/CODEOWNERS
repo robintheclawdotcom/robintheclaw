@@ -1,0 +1,8 @@
+# Default owners for everything in the repo. Create the @robintheclawdotcom/maintainers team
+# (or replace with a specific handle) so review requests route automatically.
+* @robintheclawdotcom/maintainers
+
+/contracts/ @robintheclawdotcom/maintainers
+/verifier/  @robintheclawdotcom/maintainers
+/.github/   @robintheclawdotcom/maintainers
+/SECURITY.md @robintheclawdotcom/maintainers

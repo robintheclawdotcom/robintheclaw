@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Format check
+        run: forge fmt --check
+      - name: Build
+        run: forge build --sizes
+      - name: Test
+        run: forge test -vvv
+
+  verifier:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: verifier
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm test
+
+  standards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Repo standards
+        run: bash scripts/check-repo-standards.sh
+      - name: Leak scan
+        run: bash scripts/check-no-leaks.sh
+        env:
+          IDENTITY_DENYLIST: ${{ secrets.IDENTITY_DENYLIST }}
