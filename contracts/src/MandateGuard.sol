@@ -9,7 +9,7 @@ pragma solidity 0.8.28;
 ///         change the mandate or pull the kill switch.
 contract MandateGuard {
     address public immutable owner;
-    address public immutable executor;
+    address public executor;
 
     uint256 public windowNotionalCap;
     uint64 public windowLength;
@@ -20,6 +20,7 @@ contract MandateGuard {
 
     mapping(address => mapping(bytes4 => bool)) public allowed;
 
+    event ExecutorSet(address indexed executor);
     event TargetAllowed(address indexed target, bytes4 indexed selector, bool ok);
     event CapUpdated(uint256 cap, uint64 window);
     event HaltSet(bool halted);
@@ -44,6 +45,12 @@ contract MandateGuard {
         windowNotionalCap = cap_;
         windowLength = window_;
         windowStart = block.timestamp;
+    }
+
+    function setExecutor(address executor_) external onlyOwner {
+        require(executor_ != address(0), "zero addr");
+        executor = executor_;
+        emit ExecutorSet(executor_);
     }
 
     function setAllowed(address target, bytes4 selector, bool ok) external onlyOwner {
