@@ -1,0 +1,17 @@
+{
+  "name": "@robin/verifier",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Recompute and verify the agent's anchored trade-log record from published data.",
+  "scripts": {
+    "demo": "node src/demo.mjs",
+    "test": "node src/demo.mjs"
+  },
+  "dependencies": {
+    "viem": "^2.55.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
