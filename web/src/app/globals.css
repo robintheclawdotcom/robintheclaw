@@ -57,6 +57,8 @@ main { min-height: 100vh; background: var(--bg); padding: clamp(18px, 2vw, 32px)
 .theme-toggle { padding: 5px 11px; }
 .theme-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
 .icon-link { justify-content: center; width: 32px; border-radius: 6px; text-decoration: none; }
+.github-mark { width: 16px; height: 16px; filter: invert(1); }
+[data-theme="light"] .github-mark { filter: none; }
 .menu-trigger { display: none; width: 38px; height: 34px; padding: 7px 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: transparent; }
 .menu-trigger span { display: block; width: 20px; height: 2px; margin: 3px auto; border-radius: 999px; background: var(--text-secondary); }
 .mobile-navigation { position: fixed; z-index: 20; inset: 0; }

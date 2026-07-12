@@ -255,7 +255,9 @@ export default function Home() {
             <button className="theme-toggle" onClick={toggleTheme} aria-label="Toggle color theme">
               <span className="theme-dot" />{theme}
             </button>
-            <a className="icon-link" href="https://github.com/robintheclawdotcom/robintheclaw" target="_blank" rel="noreferrer" aria-label="GitHub">⌘</a>
+            <a className="icon-link" href="https://github.com/robintheclawdotcom/robintheclaw" target="_blank" rel="noreferrer" aria-label="GitHub">
+              <img className="github-mark" src="/icons/github-mark.svg" alt="" aria-hidden="true" />
+            </a>
             <a className="icon-link" href="https://x.com/RobinTheClaw" target="_blank" rel="noreferrer" aria-label="X">𝕏</a>
           </nav>
           <button
