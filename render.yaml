@@ -1,8 +1,12 @@
 services:
   - type: web
-    name: robin-the-claw-site
-    runtime: static
+    name: robintheclaw
+    runtime: node
+    plan: starter
+    region: virginia
     rootDir: web
     buildCommand: npm ci && npm run build
-    staticPublishPath: out
-    pullRequestPreviewsEnabled: true
+    startCommand: npm run start
+    healthCheckPath: /
+    previews:
+      generation: automatic

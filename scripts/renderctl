@@ -1,0 +1,58 @@
+#!/usr/bin/env zsh
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+config="$root/.renderctl.json"
+workspace="$(jq -r '.workspace' "$config")"
+token_file="$root/$(jq -r '.tokenFile' "$config")"
+
+if [ ! -r "$token_file" ]; then
+  print -u2 "Render token file is unavailable: ${token_file#$root/}"
+  exit 1
+fi
+
+api_get() {
+  curl --fail-with-body --silent --show-error \
+    --header "Authorization: Bearer $(<"$token_file")" \
+    --header 'Accept: application/json' \
+    "https://api.render.com$1"
+}
+
+api_request() {
+  curl --fail-with-body --silent --show-error \
+    --request "$1" \
+    --header "Authorization: Bearer $(<"$token_file")" \
+    --header 'Accept: application/json' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@$3" \
+    "https://api.render.com$2"
+}
+
+has_workspace() {
+  api_get '/v1/owners' | jq -e --arg workspace "$workspace" \
+    '[.[] | .owner | select(.id == $workspace)] | length == 1' >/dev/null
+}
+
+case "${1:-}" in
+  status)
+    has_workspace
+    print "$workspace"
+    ;;
+  guard)
+    has_workspace
+    ;;
+  api-get)
+    shift
+    has_workspace
+    api_get "$1"
+    ;;
+  api-request)
+    shift
+    has_workspace
+    api_request "$1" "$2" "$3"
+    ;;
+  *)
+    print -u2 'usage: scripts/renderctl {status|guard|api-get path|api-request method path payload}'
+    exit 64
+    ;;
+esac
