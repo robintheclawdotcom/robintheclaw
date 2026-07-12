@@ -25,8 +25,11 @@ The strategy is market-neutral and disciplined; the proof is public.
 ```
 config/      canonical chain + venue addresses (Robinhood Chain, Uniswap v4, Stock Tokens)
 contracts/   Foundry workspace (MandateGuard, AttestationAnchor; vault + verifier next)
+engine/      deterministic basis, sizing, risk, and neutral-plan engine
 signal/      read-only basis scanner (measurement before execution)
 sdk/         TypeScript client (later)
+verifier/    recompute-the-record tool
+web/         public Next.js site and verifier interface
 docs/        design + verification notes
 ```
 
@@ -49,6 +52,17 @@ cd contracts && forge test -vv
 
 Nothing here moves money yet, and no contract is deployed. The tradable universe is the 21
 Stock Tokens that also have a live perp.
+
+## Public site
+
+The public site lives in `web/`. It is a static Next.js export, so it can be deployed to a CDN
+without exposing the execution runtime or its credentials.
+
+```bash
+cd web
+npm ci
+npm run build
+```
 
 ## Honest scope
 

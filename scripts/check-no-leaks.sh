@@ -57,6 +57,8 @@ scan_literal() {
 scan_regex "absolute home path" '/(Users|home)/[A-Za-z0-9._-]+/'
 scan_regex "private key block" 'BEGIN [A-Z ]*PRIVATE KEY'
 scan_regex "hardcoded hex secret" '(secret|priv|private)[_-]?key["'"'"' ]*[:=][ "'"'"']*0x[0-9a-fA-F]{64}'
+scan_regex "Cloudflare API token" 'cfut_[A-Za-z0-9]+'
+scan_regex "Render API key" 'rnd_[A-Za-z0-9]+'
 
 scan_literal "local home directory" "${HOME:-}"
 scan_literal "local account name" "$(id -un)"
