@@ -24,7 +24,9 @@ contract MandateGuard {
     event TargetAllowed(address indexed target, bytes4 indexed selector, bool ok);
     event CapUpdated(uint256 cap, uint64 window);
     event HaltSet(bool halted);
-    event Checked(address indexed target, bytes4 indexed selector, uint256 notional, uint256 windowSpent);
+    event Checked(
+        address indexed target, bytes4 indexed selector, uint256 notional, uint256 windowSpent
+    );
 
     error NotOwner();
     error NotExecutor();

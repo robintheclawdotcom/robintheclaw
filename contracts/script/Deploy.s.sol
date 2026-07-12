@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.28;
 
-import {Script, console2} from "forge-std/Script.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {MandateGuard} from "../src/MandateGuard.sol";
-import {StrategyVault} from "../src/StrategyVault.sol";
-import {AttestationAnchor} from "../src/AttestationAnchor.sol";
+import { Script, console2 } from "forge-std/Script.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { MandateGuard } from "../src/MandateGuard.sol";
+import { StrategyVault } from "../src/StrategyVault.sol";
+import { AttestationAnchor } from "../src/AttestationAnchor.sol";
 
 /// @notice Deploys the Robin the Claw core and wires the mandate. Reads config from env with
 ///         safe defaults so it also runs as a pure simulation (`forge script`) with no chain.
@@ -31,7 +31,9 @@ contract Deploy is Script {
 
         guard.setExecutor(address(vault));
         // allowlist the Universal Router's execute(bytes,bytes[],uint256) entrypoint
-        guard.setAllowed(UNIVERSAL_ROUTER, bytes4(keccak256("execute(bytes,bytes[],uint256)")), true);
+        guard.setAllowed(
+            UNIVERSAL_ROUTER, bytes4(keccak256("execute(bytes,bytes[],uint256)")), true
+        );
 
         vm.stopBroadcast();
 

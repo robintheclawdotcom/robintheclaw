@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.28;
 
-import {Test} from "forge-std/Test.sol";
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {StrategyVault} from "../src/StrategyVault.sol";
-import {MandateGuard} from "../src/MandateGuard.sol";
+import { Test } from "forge-std/Test.sol";
+import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { StrategyVault } from "../src/StrategyVault.sol";
+import { MandateGuard } from "../src/MandateGuard.sol";
 
 contract MockUSDG is ERC20 {
     constructor() ERC20("Global Dollar", "USDG") {
@@ -82,7 +82,9 @@ contract StrategyVaultTest is Test {
         MockDex evil = new MockDex();
         bytes memory data = abi.encodeWithSelector(swapSel, 1);
         vm.prank(agent);
-        vm.expectRevert(abi.encodeWithSelector(MandateGuard.NotAllowed.selector, address(evil), swapSel));
+        vm.expectRevert(
+            abi.encodeWithSelector(MandateGuard.NotAllowed.selector, address(evil), swapSel)
+        );
         vault.execute(address(evil), data, 1);
     }
 

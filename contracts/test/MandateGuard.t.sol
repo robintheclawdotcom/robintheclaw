@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.28;
 
-import {Test} from "forge-std/Test.sol";
-import {MandateGuard} from "../src/MandateGuard.sol";
+import { Test } from "forge-std/Test.sol";
+import { MandateGuard } from "../src/MandateGuard.sol";
 
 contract MandateGuardTest is Test {
     MandateGuard guard;
@@ -32,7 +32,9 @@ contract MandateGuardTest is Test {
 
     function test_rejectsUnlistedTarget() public {
         vm.prank(vault);
-        vm.expectRevert(abi.encodeWithSelector(MandateGuard.NotAllowed.selector, address(0xBAD), sel));
+        vm.expectRevert(
+            abi.encodeWithSelector(MandateGuard.NotAllowed.selector, address(0xBAD), sel)
+        );
         guard.check(address(0xBAD), sel, 1);
     }
 
