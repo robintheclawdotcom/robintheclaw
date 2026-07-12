@@ -8,6 +8,7 @@ services:
     buildCommand: npm ci && npm run build
     startCommand: npm run start
     healthCheckPath: /
+    renderSubdomainPolicy: disabled
     domains:
       - robintheclaw.com
     previews:
