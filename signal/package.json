@@ -1,0 +1,13 @@
+{
+  "name": "@robin/signal",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Read-only basis and funding scanner for the tradable universe.",
+  "scripts": {
+    "scan": "node src/basis.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

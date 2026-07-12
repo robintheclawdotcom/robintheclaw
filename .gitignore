@@ -1,0 +1,20 @@
+node_modules/
+.env
+.env.local
+dist/
+*.log
+.DS_Store
+
+# secrets / private strategy core (never public)
+keys/
+*.key
+private-core/
+
+# foundry build artifacts
+out/
+cache/
+broadcast/
+
+# signal measurement output
+signal/data/
+signal/scan.log

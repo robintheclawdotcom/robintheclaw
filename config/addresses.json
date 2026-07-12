@@ -1,0 +1,63 @@
+{
+  "chain": {
+    "name": "Robinhood Chain",
+    "mainnet": {
+      "chainId": 4663,
+      "rpc": "https://rpc.mainnet.chain.robinhood.com",
+      "sequencerFeed": "wss://feed.mainnet.chain.robinhood.com",
+      "explorer": "https://robinhoodchain.blockscout.com"
+    },
+    "testnet": {
+      "chainId": 46630,
+      "rpc": "https://rpc.testnet.chain.robinhood.com",
+      "explorer": "https://explorer.testnet.chain.robinhood.com"
+    }
+  },
+  "core": {
+    "USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "WETH": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+    "Permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+    "Multicall": "0x2cAC2D899eCC914d704FeaAE33ac1bF36277DaD1"
+  },
+  "uniswapV4": {
+    "PoolManager": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+    "Quoter": "0x8dc178efb8111bb0973dd9d722ebeff267c98f94",
+    "StateView": "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b",
+    "UniversalRouter": "0x8876789976decbfcbbbe364623c63652db8c0904",
+    "PositionManager": "0x58daec3116aae6d93017baaea7749052e8a04fa7"
+  },
+  "perp": {
+    "venue": "lighter",
+    "api": "https://mainnet.zklighter.elliot.ai",
+    "collateral": "USDG",
+    "fundingIntervalHours": 1
+  },
+  "stockTokens": {
+    "AAPL": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
+    "AMD": "0x86923f96303D656E4aa86D9d42D1e57ad2023fdC",
+    "AMZN": "0x12f190a9F9d7D37a250758b26824B97CE941bF54",
+    "BABA": "0xad25Ac6C84D497db898fa1E8387bf6Af3532a1c4",
+    "BE": "0x822CC93fFD030293E9842c30BBD678F530701867",
+    "COIN": "0x6330D8C3178a418788dF01a47479c0ce7CCF450b",
+    "CRCL": "0xdF0992E440dD0be65BD8439b609d6D4366bf1CB5",
+    "CRWV": "0x5f10A1C971B69e47e059e1dC91901B59b3fB49C3",
+    "GOOGL": "0x2e0847E8910a9732eB3fb1bb4b70a580ADAD4FE3",
+    "INTC": "0xc72b96e0E48ecd4DC75E1e45396e26300BC39681",
+    "META": "0xc0D6457C16Cc70d6790Dd43521C899C87ce02f35",
+    "MSFT": "0xe93237C50D904957Cf27E7B1133b510C669c2e74",
+    "MU": "0xfF080c8ce2E5feadaCa0Da81314Ae59D232d4afD",
+    "NVDA": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+    "ORCL": "0xb0992820E760d836549ba69BC7598b4af75dEE03",
+    "PLTR": "0x894E1EC2D74FFE5AEF8Dc8A9e84686acCB964F2A",
+    "SNDK": "0xB90A19fF0Af67f7779afF50A882A9CfF42446400",
+    "SPCX": "0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa",
+    "TSLA": "0x322F0929c4625eD5bAd873c95208D54E1c003b2d",
+    "QQQ": "0xD5f3879160bc7c32ebb4dC785F8a4F505888de68",
+    "SPY": "0x117cc2133c37B721F49dE2A7a74833232B3B4C0C"
+  },
+  "universe": [
+    "AAPL", "AMD", "AMZN", "BABA", "BE", "COIN", "CRCL", "CRWV", "GOOGL",
+    "INTC", "META", "MSFT", "MU", "NVDA", "ORCL", "PLTR", "QQQ", "SNDK",
+    "SPCX", "SPY", "TSLA"
+  ]
+}
