@@ -243,7 +243,7 @@ export default function Home() {
           {view === "home" ? (
             <div className="home-view">
               <section className="welcome">
-                <img src="/robin-the-claw-logo.jpg" alt="Robin the Claw pixel logo" />
+                <img src="/brand/logo.jpg" alt="Robin the Claw pixel logo" />
                 <div>
                   <h1><span>✻</span> Robin the Claw</h1>
                   <p>Bounded, verifiable delta-neutral RWA trading on Robinhood Chain.</p>
