@@ -6,7 +6,8 @@
   "description": "Recompute and verify the agent's anchored trade-log record from published data.",
   "scripts": {
     "demo": "node src/demo.mjs",
-    "test": "node src/demo.mjs"
+    "test": "node src/demo.mjs && node src/record.test.mjs",
+    "verify:testnet-proof": "node src/verify-testnet-proof.mjs"
   },
   "dependencies": {
     "viem": "^2.55.1"

@@ -37,7 +37,13 @@ pub struct NeutralPlan {
 /// legs (not notional), so a move in the underlying cancels and the captured edge is the basis on
 /// those shares. Perp rich (basis > 0) means long spot / short perp; perp cheap means the reverse.
 pub fn build(signal: &BasisSignal, per_leg_notional_usd: f64) -> Option<NeutralPlan> {
-    if signal.spot_price <= 0.0 || signal.perp_mark <= 0.0 || per_leg_notional_usd <= 0.0 {
+    if !signal.spot_price.is_finite()
+        || !signal.perp_mark.is_finite()
+        || !per_leg_notional_usd.is_finite()
+        || signal.spot_price <= 0.0
+        || signal.perp_mark <= 0.0
+        || per_leg_notional_usd <= 0.0
+    {
         return None;
     }
 
@@ -121,5 +127,10 @@ mod tests {
     #[test]
     fn zero_size_is_none() {
         assert!(build(&sig(Direction::PerpRich, 200.0, 202.0), 0.0).is_none());
+    }
+
+    #[test]
+    fn non_finite_size_is_none() {
+        assert!(build(&sig(Direction::PerpRich, 200.0, 202.0), f64::NAN).is_none());
     }
 }

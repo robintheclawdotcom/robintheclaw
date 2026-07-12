@@ -21,7 +21,7 @@ const cacheFile = join(root, "signal", "data", "poolkeys.json");
 
 const client = createPublicClient({ transport: http(cfg.chain.mainnet.rpc) });
 const STATE_VIEW = getAddress(cfg.uniswapV4.StateView);
-const USDG = getAddress(cfg.core.USDG);
+const USDG = getAddress(cfg.deployment.mainnet.asset);
 const ZERO_HOOKS = "0x0000000000000000000000000000000000000000";
 // fallback fee/tickSpacing combos for names with no discovery cache entry
 const FALLBACK = [

@@ -16,7 +16,7 @@ const cacheFile = join(root, "signal", "data", "poolkeys.json");
 
 const client = createPublicClient({ transport: http(cfg.chain.mainnet.rpc) });
 const POOL_MANAGER = getAddress(cfg.uniswapV4.PoolManager);
-const USDG = getAddress(cfg.core.USDG);
+const USDG = getAddress(cfg.deployment.mainnet.asset);
 
 const initEvent = {
   type: "event",
@@ -34,7 +34,9 @@ const initEvent = {
 };
 
 async function discover(symbol) {
-  const token = getAddress(cfg.stockTokens[symbol]);
+  const tokenAddress = cfg.stockTokens[symbol];
+  if (!tokenAddress) return { symbol, error: "unknown symbol" };
+  const token = getAddress(tokenAddress);
   const [c0, c1] = token.toLowerCase() < USDG.toLowerCase() ? [token, USDG] : [USDG, token];
   let logs;
   try {
@@ -60,11 +62,13 @@ async function discover(symbol) {
 
 const names = process.argv.slice(2).length ? process.argv.slice(2) : cfg.universe;
 const cache = existsSync(cacheFile) ? JSON.parse(readFileSync(cacheFile, "utf8")) : {};
+let failed = false;
 
 for (const s of names) {
   const r = await discover(s);
   if (r.error) {
-    console.log(`  ${s.padEnd(6)} getLogs failed: ${r.error}`);
+    console.error(`  ${s.padEnd(6)} discovery failed: ${r.error}`);
+    failed = true;
     continue;
   }
   if (!r.found) {
@@ -79,3 +83,4 @@ for (const s of names) {
 mkdirSync(dirname(cacheFile), { recursive: true });
 writeFileSync(cacheFile, JSON.stringify(cache, null, 2));
 console.log(`\ncache -> ${cacheFile.replace(root + "/", "")}`);
+if (failed) process.exitCode = 1;

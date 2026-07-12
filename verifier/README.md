@@ -20,13 +20,13 @@ inclusion proof.
 
 ## Pieces
 
-- `record.mjs` — canonical, integer-scaled encoding of one delta-neutral trade (spot leg + perp
+- `record.mjs`: canonical, integer-scaled encoding of one delta-neutral trade (spot leg + perp
   leg + basis + residual delta). Deterministic: no floats enter the hash.
-- `merkle.mjs` — order-preserving keccak256 Merkle tree (a trade log is a sequence, so pairs are
+- `merkle.mjs`: order-preserving keccak256 Merkle tree (a trade log is a sequence, so pairs are
   not sorted). Root plus inclusion proofs.
-- `batch.mjs` — `prove(records)` produces the root and the `AttestationAnchor.anchor` args;
+- `batch.mjs`: `prove(records)` produces the root and the `AttestationAnchor.anchor` args;
   `verify(records, root)` recomputes and compares.
-- `onchain.mjs` — reads the root the agent actually anchored (`AttestationAnchor.latest` /
+- `onchain.mjs`: reads the root the agent actually anchored (`AttestationAnchor.latest` /
   `batches`) and compares it to the recomputed root, closing the loop against the chain.
 
 ## Verifying a live batch
@@ -42,6 +42,17 @@ const result = await verifyAgainstChain({
 });
 // result.ok === true only if the published records reproduce the on-chain root
 ```
+
+## Testnet proof deployment
+
+The tracked testnet proof deployment has no execution venue and therefore cannot place a trade.
+Its single synthetic fixture proves only the vault-to-anchor-to-verifier path:
+
+```bash
+npm run verify:testnet-proof
+```
+
+The fixture explicitly declares that it is not a fill or performance record.
 
 ## Design note
 

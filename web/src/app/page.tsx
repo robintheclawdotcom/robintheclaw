@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { testnetProof } from "../lib/testnet-proof";
 
-type DocId = "overview" | "signal" | "contracts" | "verifier" | "engine";
+type DocId = "overview" | "signal" | "contracts" | "verifier" | "engine" | "testnet";
 
 const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }> = {
   overview: {
@@ -57,9 +58,9 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
         </p>
         <h2>Current scope</h2>
         <p>
-          It is not yet an ERC-4626 public vault and it does not execute live trades. Position
-          accounting, actual-outflow enforcement, the perp adapter, and testnet integration are
-          the next contract boundaries to complete.
+          It is not an ERC-4626 public vault and it does not execute live trades. The testnet
+          proof deployment has no allowed venue at all; position accounting, actual-outflow
+          enforcement, and a verified perp adapter remain required before any execution path.
         </p>
         <div className="code-block"><span>$</span> cd contracts && forge test -vv</div>
       </>
@@ -81,6 +82,30 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
           withholding records or turn an unproven strategy into an investment product.
         </p>
         <div className="code-block"><span>$</span> cd verifier && npm test</div>
+      </>
+    ),
+  },
+  testnet: {
+    file: "deployments/testnet-proof.json",
+    title: "Testnet proof",
+    body: (
+      <>
+        <p>
+          The deployed testnet vault has no allowlisted execution target. Its first anchored batch
+          is a disclosed synthetic fixture that proves only the custody-to-attestation-to-verifier
+          path; it is not a fill, position, or performance record.
+        </p>
+        <h2>Independent check</h2>
+        <p>
+          The public root can be read from the anchor and reproduced from the tracked fixture with
+          the verifier command. The record and the chain commitment must agree exactly.
+        </p>
+        <div className="code-block"><span>$</span> cd verifier && npm run verify:testnet-proof</div>
+        <p>
+          <a href={`${testnetProof.explorer}/tx/${testnetProof.transaction}`} target="_blank" rel="noreferrer">
+            View the testnet anchor transaction ↗
+          </a>
+        </p>
       </>
     ),
   },
@@ -195,7 +220,7 @@ export default function Home() {
       <section className="terminal">
         <header className="titlebar">
           <div className="window-controls" aria-hidden="true"><span /><span /><span /></div>
-          <div className="terminal-title">robin@claw — /public — zsh</div>
+          <div className="terminal-title">robin@claw · /public · zsh</div>
           <nav className="desktop-nav" aria-label="Primary navigation">
             <button className={view === "home" ? "nav-active" : ""} onClick={openHome}>home</button>
             <button className={view === "docs" ? "nav-active" : ""} onClick={openDocs}>docs</button>
@@ -271,13 +296,27 @@ export default function Home() {
                 <small>Open source trust surface · execution remains testnet-first.</small>
               </section>
 
+              <section className="proof-status">
+                <Prompt>robin verify --testnet</Prompt>
+                <div className="proof-panel">
+                  <div>
+                    <span className="proof-label">testnet proof</span>
+                    <strong>verified synthetic batch · sequence {testnetProof.sequence}</strong>
+                    <p>Anchor, vault, and verifier agree. No execution venue is allowlisted.</p>
+                  </div>
+                  <a href={`${testnetProof.explorer}/tx/${testnetProof.transaction}`} target="_blank" rel="noreferrer">
+                    inspect on chain ↗
+                  </a>
+                </div>
+              </section>
+
               <section>
                 <Prompt>robin --components</Prompt>
                 <div className="cards">
                   <article><span>[ signal ]</span><h2>Basis scanner</h2><p>Discovers v4 pools, compares spot with live perps, and records the spread before execution exists.</p></article>
-                  <article><span>[ engine ]</span><h2>Decision gates</h2><p>Deterministic basis, sizing, risk, and neutrality checks turn an observation into a plan—or reject it.</p></article>
+                  <article><span>[ engine ]</span><h2>Decision gates</h2><p>Deterministic basis, sizing, risk, and neutrality checks turn an observation into a plan or reject it.</p></article>
                   <article><span>[ contracts ]</span><h2>Bounded custody</h2><p>An allowlisted, capped, haltable execution boundary limits what an agent may attempt.</p></article>
-                  <article><span>[ verifier ]</span><h2>Recompute the record</h2><p>Published batches resolve to an on-chain Merkle commitment that anyone can independently verify.</p></article>
+                  <article><span>[ verifier ]</span><h2>Recompute the record</h2><p>A live testnet proof confirms published records resolve to an on-chain commitment.</p></article>
                 </div>
               </section>
 

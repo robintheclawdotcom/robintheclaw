@@ -1,0 +1,37 @@
+{
+  "observation": {
+    "symbol": "NVDA",
+    "spot_price": 212,
+    "perp_mark": 214,
+    "spot_liquidity": 10000000000000000,
+    "age_secs": 4
+  },
+  "basis": {
+    "entry_bps": 30,
+    "min_liquidity": 100000000000000,
+    "max_age_secs": 60
+  },
+  "sizing": {
+    "bankroll_usd": 100000,
+    "expected_return": 0.004,
+    "return_vol": 0.02,
+    "kelly_fraction": 0.25,
+    "max_position_pct": 0.0001,
+    "correlated": false,
+    "drawdown_pct": 0
+  },
+  "risk_state": {
+    "bankroll_usd": 100000,
+    "daily_pnl_usd": 0,
+    "weekly_high_usd": 100000,
+    "gross_open_usd": 0,
+    "kill_switch": null
+  },
+  "risk_limits": {
+    "max_entry_notional": 25,
+    "max_bankroll_fraction_per_entry": 0.01,
+    "max_gross_exposure_fraction": 0.1,
+    "daily_drawdown_kill": 0.03,
+    "weekly_drawdown_kill": 0.08
+  }
+}

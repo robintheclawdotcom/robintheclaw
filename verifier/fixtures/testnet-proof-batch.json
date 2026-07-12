@@ -1,0 +1,21 @@
+{
+  "network": "robinhood-testnet",
+  "kind": "attestation-pipeline-proof",
+  "disclaimer": "Synthetic fixture for testing the verification path. It is not a trade, fill, or performance record.",
+  "records": [
+    {
+      "seq": 0,
+      "ts": 1783886400000,
+      "symbol": "TEST",
+      "side": "open",
+      "spotToken": "0x5AaeB5a094F0EA6dBE685B2b69e56c112e4568BF",
+      "spotAmount": 1,
+      "spotPriceUsd": 1,
+      "perpMarketId": 0,
+      "perpSize": -1,
+      "perpMark": 1,
+      "basisBps": 0,
+      "netDeltaUsd": 0
+    }
+  ]
+}

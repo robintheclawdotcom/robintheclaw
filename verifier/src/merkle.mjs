@@ -25,6 +25,9 @@ export function buildRoot(leaves) {
 
 /// Sibling path proving `index` is in the tree, for on-chain / independent inclusion checks.
 export function proof(leaves, index) {
+  if (!Number.isInteger(index) || index < 0 || index >= leaves.length) {
+    throw new Error("proof index is out of range");
+  }
   const path = [];
   let idx = index;
   let level = leaves.slice();

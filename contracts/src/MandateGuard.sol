@@ -41,6 +41,7 @@ contract MandateGuard {
 
     constructor(address owner_, address executor_, uint256 cap_, uint64 window_) {
         require(owner_ != address(0) && executor_ != address(0), "zero addr");
+        require(cap_ > 0, "cap=0");
         require(window_ > 0, "window=0");
         owner = owner_;
         executor = executor_;
@@ -56,6 +57,8 @@ contract MandateGuard {
     }
 
     function setAllowed(address target, bytes4 selector, bool ok) external onlyOwner {
+        require(target.code.length > 0, "target has no code");
+        require(selector != bytes4(0), "selector=0");
         allowed[target][selector] = ok;
         emit TargetAllowed(target, selector, ok);
     }

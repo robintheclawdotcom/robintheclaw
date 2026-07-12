@@ -1,0 +1,15 @@
+{
+  "network": "robinhood-testnet",
+  "chainId": 46630,
+  "purpose": "custody and attestation proof only; no execution venue is configured",
+  "asset": "0x5AaeB5a094F0EA6dBE685B2b69e56c112e4568BF",
+  "mandateGuard": "0x95956E12ea7465106bc09608F7f9b610b421054F",
+  "strategyVault": "0x14d4ba7c3A7394e94C394289B867EFA5C930abc4",
+  "attestationAnchor": "0xa108d3c7E057C74e03d89d388DFC24d6C42B6507",
+  "owner": "0x93393D58D6FC240C0fb25Cd454a36d36b4E5521E",
+  "agent": "0xB614B34D6102F60c402e2AeCca36c338975f9280",
+  "deployedAt": "2026-07-12",
+  "deploymentTransaction": "0xbda575391cf0bb8fd3f5b735d1fdc652a6b5441be98440e50779764209a43b91",
+  "proofTransaction": "0x5353b982fe39d358a9d5ebfb98188109804fba0e3dcb9026024ad9bda6293b76",
+  "proofRoot": "0x1a995a3c2df8fda417f78cbf0a5b02c040018e0c28dfcae4dfe4acce63e73209"
+}

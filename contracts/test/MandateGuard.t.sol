@@ -4,14 +4,19 @@ pragma solidity 0.8.28;
 import { Test } from "forge-std/Test.sol";
 import { MandateGuard } from "../src/MandateGuard.sol";
 
+contract MockTarget {
+    function swap(bytes calldata) external { }
+}
+
 contract MandateGuardTest is Test {
     MandateGuard guard;
     address owner = makeAddr("owner");
     address vault = makeAddr("vault"); // the executor
-    address target = makeAddr("dex");
-    bytes4 sel = bytes4(keccak256("swap(bytes)"));
+    address target;
+    bytes4 sel = MockTarget.swap.selector;
 
     function setUp() public {
+        target = address(new MockTarget());
         guard = new MandateGuard(owner, vault, 1_000e6, 1 days);
         vm.prank(owner);
         guard.setAllowed(target, sel, true);
@@ -69,5 +74,11 @@ contract MandateGuardTest is Test {
         vm.prank(vault);
         vm.expectRevert(MandateGuard.NotOwner.selector);
         guard.setHalted(true);
+    }
+
+    function test_rejectsTargetWithoutCode() public {
+        vm.prank(owner);
+        vm.expectRevert("target has no code");
+        guard.setAllowed(makeAddr("externallyOwned"), sel, true);
     }
 }

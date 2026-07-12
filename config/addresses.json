@@ -13,6 +13,21 @@
       "explorer": "https://explorer.testnet.chain.robinhood.com"
     }
   },
+  "deployment": {
+    "mainnet": {
+      "chainId": 4663,
+      "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "universalRouter": "0x8876789976decbfcbbbe364623c63652db8c0904",
+      "status": "verified"
+    },
+    "testnet": {
+      "chainId": 46630,
+      "asset": null,
+      "universalRouter": null,
+      "status": "blocked",
+      "reason": "No canonical testnet USDG or execution venue has been verified."
+    }
+  },
   "core": {
     "USDG": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
     "WETH": "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",

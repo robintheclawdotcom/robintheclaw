@@ -58,29 +58,45 @@ fn deny(reason: String) -> RiskCheck {
     }
 }
 
-/// Reject an entry that trips the kill switch, exceeds the per-entry caps, or would push gross
-/// exposure past its ceiling.
-pub fn check_order(state: &RiskState, limits: &RiskLimits, notional: f64) -> RiskCheck {
+/// Reject an entry's total gross notional when it trips the kill switch, exceeds the caps, or
+/// would push the book past its gross-exposure ceiling.
+pub fn check_order(state: &RiskState, limits: &RiskLimits, gross_notional: f64) -> RiskCheck {
+    if !gross_notional.is_finite() || gross_notional <= 0.0 {
+        return deny("gross notional must be positive and finite".to_string());
+    }
+    if !state.bankroll_usd.is_finite()
+        || !state.gross_open_usd.is_finite()
+        || state.bankroll_usd <= 0.0
+        || state.gross_open_usd < 0.0
+        || !limits.max_entry_notional.is_finite()
+        || !limits.max_bankroll_fraction_per_entry.is_finite()
+        || !limits.max_gross_exposure_fraction.is_finite()
+        || limits.max_entry_notional <= 0.0
+        || !(0.0..=1.0).contains(&limits.max_bankroll_fraction_per_entry)
+        || !(0.0..=1.0).contains(&limits.max_gross_exposure_fraction)
+    {
+        return deny("invalid risk state or limits".to_string());
+    }
     if let Some(r) = &state.kill_switch {
         return deny(format!("kill switch active: {r}"));
     }
-    if notional > limits.max_entry_notional {
+    if gross_notional > limits.max_entry_notional {
         return deny(format!(
-            "notional ${notional:.2} exceeds per-entry cap ${:.2}",
+            "gross notional ${gross_notional:.2} exceeds per-entry cap ${:.2}",
             limits.max_entry_notional
         ));
     }
     let max_from_bankroll = state.bankroll_usd * limits.max_bankroll_fraction_per_entry;
-    if notional > max_from_bankroll {
+    if gross_notional > max_from_bankroll {
         return deny(format!(
-            "notional ${notional:.2} exceeds {:.1}% of bankroll (${max_from_bankroll:.2})",
+            "gross notional ${gross_notional:.2} exceeds {:.1}% of bankroll (${max_from_bankroll:.2})",
             limits.max_bankroll_fraction_per_entry * 100.0
         ));
     }
     let max_exposure = state.bankroll_usd * limits.max_gross_exposure_fraction;
-    if state.gross_open_usd + notional > max_exposure {
+    if state.gross_open_usd + gross_notional > max_exposure {
         return deny(format!(
-            "gross ${:.2} + ${notional:.2} exceeds {:.1}% cap (${max_exposure:.2})",
+            "gross ${:.2} + ${gross_notional:.2} exceeds {:.1}% cap (${max_exposure:.2})",
             state.gross_open_usd,
             limits.max_gross_exposure_fraction * 100.0
         ));
@@ -184,5 +200,11 @@ mod tests {
         s.gross_open_usd = 50.0;
         record_close(&mut s, 30.0);
         assert!((s.gross_open_usd - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn non_finite_notional_is_rejected() {
+        let s = RiskState::new(1_000.0);
+        assert!(!check_order(&s, &RiskLimits::default(), f64::NAN).allowed);
     }
 }

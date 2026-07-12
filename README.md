@@ -12,19 +12,19 @@ Agentic trading reached a wide audience through connect-your-AI products, but th
 custodial and opaque: you trust the agent's word for what it did. Robin the Claw inverts that.
 The strategy is market-neutral and disciplined; the proof is public.
 
-- **Bounded** — the agent trades only through a mandate enforced on-chain (`MandateGuard`):
+- **Bounded:** the agent trades only through a mandate enforced on-chain (`MandateGuard`):
   allowlisted venues and selectors, a per-window notional cap, and a kill switch. A call outside
   the mandate reverts.
-- **Provable** — every batch of trades is Merkle-rooted and anchored on-chain (`AttestationAnchor`),
+- **Provable:** every batch of trades is Merkle-rooted and anchored on-chain (`AttestationAnchor`),
   append-only. Anyone recomputes the record from chain state.
-- **Disciplined** — market-neutral, quarter-Kelly sizing, strategy selected on out-of-sample
+- **Disciplined:** market-neutral, quarter-Kelly sizing, strategy selected on out-of-sample
   performance. Reasoning stays out of the execution hot path.
 
 ## Layout
 
 ```
-config/      canonical chain + venue addresses (Robinhood Chain, Uniswap v4, Stock Tokens)
-contracts/   Foundry workspace (MandateGuard, AttestationAnchor; vault + verifier next)
+config/      canonical chain + venue addresses and deployment readiness gates
+contracts/   Foundry workspace (MandateGuard, StrategyVault, AttestationAnchor)
 engine/      deterministic basis, sizing, risk, and neutral-plan engine
 signal/      read-only basis scanner (measurement before execution)
 sdk/         TypeScript client (later)
@@ -37,8 +37,8 @@ docs/        design + verification notes
 
 Early. What runs today:
 
-- `contracts/` compiles and tests green (`forge test`): the mandate bound and the attestation
-  anchor with their access-control, cap, window-roll, and append-only invariants.
+- `contracts/` compiles and tests green (`forge test`): the mandate, custody vault, and
+  attestation anchor enforce access control, cap/window, append-only, and agent-to-anchor paths.
 - `signal/` reads the live perp book for the tradable universe and reports each name's basis
   (perp mark vs index) in bps, appending to a JSONL series for later analysis.
 
@@ -50,8 +50,9 @@ cd signal && node src/basis.mjs
 cd contracts && forge test -vv
 ```
 
-Nothing here moves money yet, and no contract is deployed. The tradable universe is the 21
-Stock Tokens that also have a live perp.
+Nothing here moves money yet, and no contract is deployed. The testnet deployment gate is
+intentionally blocked until a canonical asset and execution venue are verified. The tradable
+universe is the 21 Stock Tokens that also have a live perp.
 
 ## Public site
 

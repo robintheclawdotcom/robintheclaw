@@ -9,23 +9,32 @@ is reproducible and can be replayed against the on-chain record.
 cargo test
 ```
 
+## Replay a decision
+
+The CLI takes an immutable JSON input and returns either an approved two-leg plan or a structured
+decline. It never talks to a chain, exchange, or wallet.
+
+```bash
+cargo run --bin plan -- fixtures/plan-input.json
+```
+
 ## The pipeline
 
 `plan_trade` runs four gates in order, cheapest first, and returns nothing (with no state change)
 if any of them declines:
 
-1. **basis** (`basis.rs`) — is this a real, tradeable spread? The observation must be fresh, backed
+1. **basis** (`basis.rs`): is this a real, tradeable spread? The observation must be fresh, backed
    by real pool liquidity, and past the entry threshold. A wide basis on a thin or stale pool is a
    pricing artifact, not a spread you can close into, so it is rejected.
-2. **sizing** (`sizing.rs`) — continuous-return Kelly, `f* = mu / sigma^2`, off the expected
+2. **sizing** (`sizing.rs`): continuous-return Kelly, `f* = mu / sigma^2`, off the expected
    holding-period return and its volatility (not a win probability, because this is not a binary
    bet). The fractional-Kelly result is capped per position, then cut by a correlation penalty and
    a drawdown circuit breaker. The penalties apply after the cap on purpose: a drawdown must
    shrink the position even when Kelly wanted more.
-3. **risk** (`risk.rs`) — per-entry, bankroll-fraction, and gross-exposure limits, plus a daily and
+3. **risk** (`risk.rs`): per-entry, bankroll-fraction, and gross-exposure limits, plus a daily and
    weekly drawdown kill switch. In-memory here; the on-chain `MandateGuard` enforces the same
    spirit at the contract boundary.
-4. **neutral** (`neutral.rs`) — build the two matched legs. Share quantity is matched across legs
+4. **neutral** (`neutral.rs`): build the two matched legs. Share quantity is matched across legs
    (not notional), so a move in the underlying cancels and the captured edge is the basis on those
    shares. Perp rich means long spot and short perp; perp cheap means the reverse. The residual
    delta is zero by construction.

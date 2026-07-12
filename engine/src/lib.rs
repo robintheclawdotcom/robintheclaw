@@ -25,6 +25,35 @@ pub struct TradePlan {
     pub plan: NeutralPlan,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionInput {
+    pub observation: BasisObservation,
+    pub basis: BasisConfig,
+    pub sizing: SizingInput,
+    pub risk_state: RiskState,
+    pub risk_limits: RiskLimits,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionStage {
+    Basis,
+    Sizing,
+    Risk,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum Decision {
+    Approved {
+        plan: TradePlan,
+    },
+    Declined {
+        stage: DecisionStage,
+        reason: String,
+    },
+}
+
 /// Full pipeline: evaluate the basis, size it by Kelly, clear it against risk limits, and build
 /// the neutral legs. Returns None, with no state change, whenever any stage declines: no
 /// tradeable basis, no positive edge, a risk limit, or an unbuildable plan. The order of the
@@ -43,16 +72,64 @@ pub fn plan_trade(
         return None;
     }
 
-    if !risk::check_order(risk_state, risk_limits, sizing.notional_usd).allowed {
+    let plan = neutral::build(&signal, sizing.notional_usd)?;
+    if !risk::check_order(risk_state, risk_limits, plan.gross_notional_usd).allowed {
         return None;
     }
 
-    let plan = neutral::build(&signal, sizing.notional_usd)?;
     Some(TradePlan {
         signal,
         sizing,
         plan,
     })
+}
+
+/// Produces a serializable decision record for an observation. A decline is a normal outcome:
+/// callers persist it alongside approved plans so an operator can audit why no order was sent.
+pub fn decide(input: &DecisionInput) -> Decision {
+    let Some(signal) = basis::evaluate(&input.observation, &input.basis) else {
+        return Decision::Declined {
+            stage: DecisionStage::Basis,
+            reason: "basis observation did not satisfy the entry gates".to_string(),
+        };
+    };
+
+    let sizing = sizing::size(&input.sizing);
+    if sizing.skip || sizing.notional_usd <= 0.0 {
+        return Decision::Declined {
+            stage: DecisionStage::Sizing,
+            reason: sizing.reason,
+        };
+    }
+
+    let Some(plan) = neutral::build(&signal, sizing.notional_usd) else {
+        return Decision::Declined {
+            stage: DecisionStage::Basis,
+            reason: "unable to construct a neutral plan".to_string(),
+        };
+    };
+
+    let risk = risk::check_order(
+        &input.risk_state,
+        &input.risk_limits,
+        plan.gross_notional_usd,
+    );
+    if !risk.allowed {
+        return Decision::Declined {
+            stage: DecisionStage::Risk,
+            reason: risk
+                .reason
+                .unwrap_or_else(|| "risk check declined the order".to_string()),
+        };
+    }
+
+    Decision::Approved {
+        plan: TradePlan {
+            signal,
+            sizing,
+            plan,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -75,7 +152,7 @@ mod tests {
             expected_return: 0.004,
             return_vol: 0.02,
             kelly_fraction: 0.25,
-            max_position_pct: 0.0002, // keep the sized notional under the default per-entry cap
+            max_position_pct: 0.0001, // the total two-leg gross remains below the default cap
             correlated: false,
             drawdown_pct: 0.0,
         }
@@ -120,6 +197,38 @@ mod tests {
             &good_sizing(),
             &s,
             &RiskLimits::default()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn decision_records_risk_decline() {
+        let input = DecisionInput {
+            observation: good_obs(),
+            basis: BasisConfig::default(),
+            sizing: good_sizing(),
+            risk_state: RiskState::new(1_000.0),
+            risk_limits: RiskLimits::default(),
+        };
+        assert!(matches!(
+            decide(&input),
+            Decision::Declined {
+                stage: DecisionStage::Risk,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn risk_gate_uses_both_legs() {
+        let mut sizing = good_sizing();
+        sizing.max_position_pct = 0.0002;
+        assert!(plan_trade(
+            &good_obs(),
+            &BasisConfig::default(),
+            &sizing,
+            &RiskState::new(100_000.0),
+            &RiskLimits::default(),
         )
         .is_none());
     }

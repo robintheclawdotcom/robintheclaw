@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.28;
 
+import { IAttestationAnchor } from "./interfaces/IAttestationAnchor.sol";
+
 /// @title AttestationAnchor
 /// @notice Append-only registry of Merkle roots committing an agent's trade-log batches.
 ///         Anyone reads a root and recomputes the record off-chain; the publisher can only
 ///         append in strict sequence, never rewrite history. One anchor per strategy vault.
-contract AttestationAnchor {
+contract AttestationAnchor is IAttestationAnchor {
     struct Batch {
         bytes32 root;
         uint64 sequence;
@@ -29,7 +31,7 @@ contract AttestationAnchor {
         publisher = publisher_;
     }
 
-    function anchor(bytes32 root, uint64 sequence, uint64 tradeCount) external {
+    function anchor(bytes32 root, uint64 sequence, uint64 tradeCount) external override {
         if (msg.sender != publisher) revert NotPublisher();
         if (root == bytes32(0)) revert EmptyRoot();
         uint64 expected = head + 1;

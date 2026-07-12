@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { MandateGuard } from "./MandateGuard.sol";
+import { IAttestationAnchor } from "./interfaces/IAttestationAnchor.sol";
 
 /// @title StrategyVault
 /// @notice Custodies USDG and executes the agent's trades, but only ones the MandateGuard
@@ -20,15 +21,22 @@ contract StrategyVault {
     MandateGuard public immutable guard;
     address public immutable owner;
     address public agent;
+    IAttestationAnchor public attestationAnchor;
 
     event AgentSet(address indexed agent);
     event Funded(address indexed from, uint256 amount);
     event Defunded(address indexed to, uint256 amount);
     event Executed(address indexed target, bytes4 indexed selector, uint256 notional);
+    event AttestationAnchorSet(address indexed anchor);
+    event BatchAnchored(bytes32 indexed root, uint64 indexed sequence, uint64 tradeCount);
 
     error NotOwner();
     error NotAgent();
     error CallFailed(bytes reason);
+    error InvalidCalldata();
+    error InvalidTarget();
+    error AnchorAlreadySet();
+    error InvalidAnchor();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -50,12 +58,20 @@ contract StrategyVault {
         emit AgentSet(agent_);
     }
 
+    function setAttestationAnchor(IAttestationAnchor anchor_) external onlyOwner {
+        if (address(attestationAnchor) != address(0)) revert AnchorAlreadySet();
+        if (address(anchor_).code.length == 0) revert InvalidAnchor();
+        attestationAnchor = anchor_;
+        emit AttestationAnchorSet(address(anchor_));
+    }
+
     function fund(uint256 amount) external onlyOwner {
         asset.safeTransferFrom(msg.sender, address(this), amount);
         emit Funded(msg.sender, amount);
     }
 
     function defund(address to, uint256 amount) external onlyOwner {
+        if (to == address(0)) revert InvalidTarget();
         asset.safeTransfer(to, amount);
         emit Defunded(to, amount);
     }
@@ -68,12 +84,22 @@ contract StrategyVault {
         returns (bytes memory)
     {
         if (msg.sender != agent) revert NotAgent();
+        if (data.length < 4) revert InvalidCalldata();
+        if (target.code.length == 0) revert InvalidTarget();
         bytes4 selector = bytes4(data);
         guard.check(target, selector, notional);
         (bool ok, bytes memory result) = target.call(data);
         if (!ok) revert CallFailed(result);
         emit Executed(target, selector, notional);
         return result;
+    }
+
+    function anchorBatch(bytes32 root, uint64 sequence, uint64 tradeCount) external {
+        if (msg.sender != agent) revert NotAgent();
+        IAttestationAnchor anchor_ = attestationAnchor;
+        if (address(anchor_) == address(0)) revert InvalidAnchor();
+        anchor_.anchor(root, sequence, tradeCount);
+        emit BatchAnchored(root, sequence, tradeCount);
     }
 
     function balance() external view returns (uint256) {

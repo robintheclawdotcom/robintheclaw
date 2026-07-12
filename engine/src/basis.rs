@@ -46,7 +46,7 @@ pub struct BasisSignal {
 }
 
 pub fn basis_bps(spot: f64, perp: f64) -> f64 {
-    if spot <= 0.0 {
+    if !spot.is_finite() || !perp.is_finite() || spot <= 0.0 {
         return 0.0;
     }
     (perp - spot) / spot * 10_000.0
@@ -56,7 +56,21 @@ pub fn basis_bps(spot: f64, perp: f64) -> f64 {
 /// threshold there is nothing to capture net of costs; a stale or thin observation is rejected
 /// because its wide basis is a pricing artifact rather than a spread you can close into.
 pub fn evaluate(obs: &BasisObservation, cfg: &BasisConfig) -> Option<BasisSignal> {
-    if obs.spot_price <= 0.0 || obs.perp_mark <= 0.0 {
+    if !obs.spot_price.is_finite()
+        || !obs.perp_mark.is_finite()
+        || !obs.spot_liquidity.is_finite()
+        || !obs.age_secs.is_finite()
+        || !cfg.entry_bps.is_finite()
+        || !cfg.min_liquidity.is_finite()
+        || !cfg.max_age_secs.is_finite()
+        || obs.spot_price <= 0.0
+        || obs.perp_mark <= 0.0
+        || obs.spot_liquidity < 0.0
+        || obs.age_secs < 0.0
+        || cfg.entry_bps <= 0.0
+        || cfg.min_liquidity < 0.0
+        || cfg.max_age_secs <= 0.0
+    {
         return None;
     }
     if obs.age_secs > cfg.max_age_secs {
@@ -133,5 +147,12 @@ mod tests {
         let mut o = obs(212.0, 214.0);
         o.spot_liquidity = 1e12;
         assert!(evaluate(&o, &cfg).is_none());
+    }
+
+    #[test]
+    fn non_finite_values_are_rejected() {
+        let mut o = obs(212.0, 214.0);
+        o.spot_price = f64::NAN;
+        assert!(evaluate(&o, &BasisConfig::default()).is_none());
     }
 }

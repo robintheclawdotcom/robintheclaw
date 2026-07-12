@@ -1,66 +1,38 @@
-## Foundry
+# Contracts
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+`MandateGuard` bounds each execution to an approved target and selector, a rolling notional cap,
+and a kill switch. `StrategyVault` provides single-owner custody and only allows its agent to
+execute against that mandate. `AttestationAnchor` stores append-only Merkle roots; the vault is
+its only publisher, so the agent anchors through the same custody boundary.
 
-Foundry consists of:
+This is not a public deposit vault. It has no share or NAV accounting and must not receive funds
+from anyone other than its configured owner.
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+## Local checks
 
-## Documentation
-
-https://book.getfoundry.sh/
-
-## Usage
-
-### Build
-
-```shell
-$ forge build
+```sh
+forge fmt --check
+forge test -vvv
+forge build --sizes
 ```
 
-### Test
+## Deployment gate
 
-```shell
-$ forge test
+`script/Deploy.s.sol` requires `OWNER`, `AGENT`, and `ASSET`. It never supplies an asset or venue
+address by default. `UNIVERSAL_ROUTER` is optional; when omitted, the deployed vault has no
+execution venue allowlisted. Supply only chain-verified values and deploy with the owner key:
+
+```sh
+OWNER=0x... AGENT=0x... ASSET=0x... \
+forge script script/Deploy.s.sol:Deploy --rpc-url "$RPC_URL" --private-key "$OWNER_KEY" --broadcast
 ```
 
-### Format
+The testnet asset and router are deliberately unconfigured in `config/addresses.json`. Do not
+replace that gate with an assumed address.
 
-```shell
-$ forge fmt
-```
+## Isolated testnet proof path
 
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+`script/DeployTestnet.s.sol` deploys a clearly named `tUSDG` test asset and a vault with no
+allowlisted venue. It exists to verify owner/agent roles, custody, and on-chain attestations; it
+cannot execute a trade. Use it only on Robinhood testnet and record its addresses in a local,
+ignored deployment file.
