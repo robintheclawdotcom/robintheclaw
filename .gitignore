@@ -5,6 +5,8 @@ dist/
 .next/
 *.log
 .DS_Store
+.harden-skill/
+web/public/docs/
 
 # secrets / private strategy core (never public)
 keys/

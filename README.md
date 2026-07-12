@@ -65,6 +65,12 @@ npm ci
 npm run build
 ```
 
+## Developer documentation
+
+The full specification lives in [docs/index.md](docs/index.md). The website copies that source
+set during its build so the public documentation and repository documentation describe the same
+system boundaries.
+
 ## Honest scope
 
 - This is not a returns product. The edge in a market-neutral basis trade is thin and temporary,

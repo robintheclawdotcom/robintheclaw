@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { testnetProof } from "../lib/testnet-proof";
 
-type DocId = "overview" | "signal" | "contracts" | "verifier" | "engine" | "testnet";
+type DocId = "overview" | "signal" | "contracts" | "verifier" | "engine" | "testnet" | "architecture" | "developer" | "operations" | "security" | "venues";
 
 const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }> = {
   overview: {
@@ -106,6 +106,7 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
             View the testnet anchor transaction ↗
           </a>
         </p>
+        <PublishedDoc file="testnet-proof.md" />
       </>
     ),
   },
@@ -128,7 +129,33 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
       </>
     ),
   },
+  architecture: { file: "docs/architecture.md", title: "Architecture", body: <PublishedDoc file="architecture.md" /> },
+  developer: { file: "docs/developer-guide.md", title: "Developer guide", body: <PublishedDoc file="developer-guide.md" /> },
+  operations: { file: "docs/operations.md", title: "Operations", body: <PublishedDoc file="operations.md" /> },
+  security: { file: "docs/security-model.md", title: "Security model", body: <PublishedDoc file="security-model.md" /> },
+  venues: { file: "docs/venue-gates.md", title: "Venue gates", body: <PublishedDoc file="venue-gates.md" /> },
 };
+
+function PublishedDoc({ file }: { file: string }) {
+  const [content, setContent] = useState<string>();
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`/docs/${file}`, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`documentation request failed (${response.status})`);
+        return response.text();
+      })
+      .then(setContent)
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setContent(error instanceof Error ? error.message : "documentation request failed");
+      });
+    return () => controller.abort();
+  }, [file]);
+
+  return <pre className="published-doc">{content ?? "loading documentation…"}</pre>;
+}
 
 function Prompt({ children }: { children: React.ReactNode }) {
   return (
