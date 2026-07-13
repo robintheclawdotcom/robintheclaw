@@ -19,6 +19,9 @@ req=(
   scripts/check-git-identity.sh
   scripts/check-no-leaks.sh
   scripts/setup-git-hooks.sh
+  runtime/Cargo.toml
+  runtime/migrations/0001_capture.sql
+  runtime/src/bin/collector.rs
   .github/CODEOWNERS
   .github/PULL_REQUEST_TEMPLATE.md
   .github/dependabot.yml

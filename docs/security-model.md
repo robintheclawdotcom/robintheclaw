@@ -7,6 +7,7 @@
 - Venue credentials and any collateral held outside the vault.
 - Integrity of the disclosed trade-log record.
 - Availability of the owner halt action and public verification path.
+- Integrity and confidentiality of raw market evidence, research datasets, and shadow records.
 
 ## Trust boundaries
 
@@ -24,6 +25,8 @@ of unobserved market data.
 - Canonical integer-scaled records with finite/range validation before hashing.
 - Testnet proof vault with no execution target.
 - Ignored secret paths and a repository leak scan before release.
+- Private worker-only R2 credentials and a no-public-IP research database.
+- Runtime contains no signer, wallet material, or venue write client.
 
 ## Known limitations
 
@@ -45,3 +48,7 @@ can make an absence of a matching publication visible to observers.
 6. Human per-trade approval for the first capped mainnet experiments.
 
 Until all six exist, the correct production mode is no execution.
+
+The generic vault call path is not a production venue adapter. Before any live deployment it must
+be replaced with typed, venue-specific intent enforcement that binds asset, route, recipient,
+maximum input, minimum output, deadline, and slippage to each call.

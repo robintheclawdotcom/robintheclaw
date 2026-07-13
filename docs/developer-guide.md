@@ -4,6 +4,7 @@
 
 - Node.js 20 or newer for `signal/`, `verifier/`, and `web/`.
 - Rust stable for `engine/`.
+- Rust stable for the private `runtime/` collector.
 - Foundry with Solidity 0.8.28 for `contracts/`.
 - Public Robinhood Chain RPC access. The checked-in RPC URLs require no API key.
 
@@ -18,6 +19,7 @@ Run these from the repository root after a clean dependency install:
 node config/validate.mjs
 (cd contracts && forge fmt --check && forge test -vvv)
 (cd engine && cargo fmt --check && cargo clippy -- -D warnings && cargo test)
+(cd runtime && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test)
 (cd verifier && npm test)
 (cd web && npm ci && npm run build)
 ./scripts/check-no-leaks.sh
@@ -49,6 +51,21 @@ cargo run --bin plan -- fixtures/plan-input.json
 The CLI prints a JSON decision. `approved` contains matched spot/perp legs; `declined` identifies
 the basis, sizing, or risk stage. Inputs must be finite. The gross risk check includes both legs.
 Do not treat the fixture's synthetic expected return or volatility as production calibration.
+
+## High-frequency research runtime
+
+`runtime/` is a private worker, not a trading bot. It records Lighter public WebSocket events and
+Robinhood Chain blocks, gas prices, and PoolManager logs. Its raw evidence archive is Cloudflare
+R2; its normalized state is Render Postgres. See [research runtime](research-runtime.md) for the
+schema, source behavior, and managed environment requirements.
+
+```sh
+cd runtime
+cargo test
+```
+
+The process refuses to start without a database and R2 configuration. It does not accept a wallet,
+private key, or venue write credential.
 
 ## Contract deployment modes
 

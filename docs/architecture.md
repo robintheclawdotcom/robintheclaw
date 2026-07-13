@@ -11,6 +11,7 @@ so an observation cannot become an execution merely because a process has a key.
 | Component | Responsibility | Trust level | May move value |
 | --- | --- | --- | --- |
 | `signal/` | Reads Uniswap v4 and Lighter public market data; writes local JSONL observations. | Untrusted input | No |
+| `runtime/` | Captures high-frequency market and chain evidence, stores immutable raw payloads, and creates only shadow lifecycles. | Private research input | No |
 | `engine/` | Produces deterministic approved/declined plans from supplied JSON. | Pure computation | No |
 | `contracts/` | Holds one owner's asset and bounds calls made by the configured agent. | On-chain enforcement | Only after an owner allowlists a contract and selector |
 | `verifier/` | Canonicalizes disclosed records, computes Merkle roots, and compares roots with chain state. | Public verification | No |
@@ -19,10 +20,13 @@ so an observation cannot become an execution merely because a process has a key.
 ## Data and control flow
 
 ```text
-public market data
+public market and chain data
        |
        v
-signal observation -> deterministic engine -> approved or declined plan
+private runtime -> raw R2 archive + Postgres snapshots -> shadow lifecycle
+       |                                                |
+       v                                                v
+signal observation ----------------------------> deterministic engine
                                                     |
                                                     v
                                     future, separately verified executor
@@ -33,8 +37,8 @@ signal observation -> deterministic engine -> approved or declined plan
 published records -> verifier -> Merkle root -> StrategyVault.anchorBatch -> AttestationAnchor
 ```
 
-The executor does not exist yet. The diagram shows the intended boundary, not an enabled order
-path. A live order system must use a separately reviewed adapter and must never bypass the vault.
+The executor does not exist yet. Shadow output is not an execution path. A live order system must
+use separately reviewed typed adapters and must never bypass the vault.
 
 ## Contract relationships
 

@@ -26,6 +26,7 @@ The strategy is market-neutral and disciplined; the proof is public.
 config/      canonical chain + venue addresses and deployment readiness gates
 contracts/   Foundry workspace (MandateGuard, StrategyVault, AttestationAnchor)
 engine/      deterministic basis, sizing, risk, and neutral-plan engine
+runtime/     private high-frequency capture and shadow-execution runtime
 signal/      read-only basis scanner (measurement before execution)
 sdk/         TypeScript client (later)
 verifier/    recompute-the-record tool
@@ -41,6 +42,8 @@ Early. What runs today:
   attestation anchor enforce access control, cap/window, append-only, and agent-to-anchor paths.
 - `signal/` reads the live perp book for the tradable universe and reports each name's basis
   (perp mark vs index) in bps, appending to a JSONL series for later analysis.
+- `runtime/` captures public Lighter and Robinhood Chain evidence into private managed stores. It
+  has no signing capability and does not create live orders.
 
 ```bash
 # read the live basis across the universe

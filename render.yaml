@@ -13,3 +13,40 @@ services:
       - robintheclaw.com
     previews:
       generation: automatic
+  - type: worker
+    name: robin-research-collector
+    runtime: rust
+    plan: starter
+    region: virginia
+    rootDir: runtime
+    buildCommand: cargo build --release --bin collector
+    startCommand: ./target/release/collector
+    autoDeploy: yes
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: robin-research
+          property: connectionString
+      - key: RUNTIME_CONFIG
+        value: ../config/addresses.json
+      - key: RUST_LOG
+        value: info
+      - key: R2_BUCKET
+        sync: false
+      - key: AWS_ENDPOINT_URL
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_REGION
+        value: auto
+databases:
+  - name: robin-research
+    databaseName: robin_research
+    user: robin_runtime
+    plan: basic-1gb
+    region: virginia
+    ipAllowList: []
+previews:
+  generation: none

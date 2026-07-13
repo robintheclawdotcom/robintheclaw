@@ -34,6 +34,14 @@ commit, reaches `live`, and that `https://robintheclaw.com` returns the new publ
 The public site is static documentation. It must not receive execution keys, exchange credentials,
 wallet material, or private strategy thresholds.
 
+The private collector is a separate Render worker named `robin-research-collector`. It has no
+public URL. Its Postgres database allows no public IPs, and its R2 credentials are worker-only
+managed secrets. Before provisioning or changing either service, run `./scripts/renderctl guard`.
+
+Do not deploy the worker until `R2_BUCKET`, `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, and
+`AWS_SECRET_ACCESS_KEY` have been configured in managed settings. A failed archive write is a
+source-health incident; do not substitute a local persistent disk for the immutable raw archive.
+
 ## Incident actions
 
 | Event | Immediate action | Follow-up |
@@ -42,6 +50,7 @@ wallet material, or private strategy thresholds.
 | Agent key exposure | Halt, rotate agent, and revoke any venue-specific credentials. | Reconcile all pending orders and anchors. |
 | Owner key exposure | Treat custody as compromised; move assets only after a reviewed incident plan. | Deploy a new owner/vault boundary. |
 | Signal API outage or stale feed | Do not create plans or orders. | Restore source health and document the gap. |
+| Runtime archive or database failure | Stop treating captures as complete; preserve logs and mark the source degraded. | Restore both stores, reconcile gaps, and create a new dataset boundary. |
 | Verifier mismatch | Stop publication claims and preserve the raw records. | Identify canonicalization, batch, or deployment mismatch before resuming. |
 
 No process may clear a chain halt without the owner. A software restart is not an incident remedy.

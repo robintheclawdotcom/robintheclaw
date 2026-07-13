@@ -12,6 +12,7 @@ measurement, deterministic decisioning, custody boundaries, and public verificat
 - [Security model](security-model.md): assets, trust boundaries, threats, and controls.
 - [Testnet proof](testnet-proof.md): the deployed no-execution proof path and independent check.
 - [Venue gates](venue-gates.md): what must be verified before any order path exists.
+- [Research runtime](research-runtime.md): private high-frequency capture, raw evidence, and shadow execution.
 
 ## Non-negotiable operating rules
 
@@ -22,3 +23,4 @@ measurement, deterministic decisioning, custody boundaries, and public verificat
 4. A verifier result proves that disclosed records match a commitment. It does not prove a return,
    fill quality, or strategy edge.
 5. Secrets belong in ignored local files or managed secret storage. They are never committed.
+6. The research runtime has no signing capability and no configuration switch for live trading.

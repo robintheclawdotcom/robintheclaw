@@ -44,6 +44,7 @@
   "perp": {
     "venue": "lighter",
     "api": "https://mainnet.zklighter.elliot.ai",
+    "websocket": "wss://mainnet.zklighter.elliot.ai/stream?readonly=true",
     "collateral": "USDG",
     "fundingIntervalHours": 1
   },

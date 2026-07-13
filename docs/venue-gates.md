@@ -39,3 +39,16 @@ An owner may consider adding a target only after all of the following are comple
 
 The absence of any item keeps the venue blocked. There is no override based on a promising basis
 observation.
+
+## Research and shadow gates
+
+The runtime may capture public data continuously. It may not turn that data into a live order.
+Before a strategy enters paired shadow execution, it must have a registered hypothesis, immutable
+dataset snapshot, verified executable spot and perp quote sources, and a cost model that includes
+fees, gas, funding, impact, and quote age.
+
+Before any mainnet deployment is considered, retain at least 180 calendar days of capture and 60
+continuous shadow days covering off-hours, weekends, volatile windows, and low-liquidity windows.
+Require embargoed walk-forward results, adjusted significance of at least 3.0, positive
+lower-confidence net return, bounded capacity, partial-fill and unwind tests, independent contract
+audit, and operational key review. These are additive to the execution enablement checklist.
