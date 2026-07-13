@@ -1,4 +1,4 @@
-use crate::{Finality, MarketEventKind, RawMarketEvent};
+use crate::{CanonicalState, Finality, MarketEventKind, RawMarketEvent, SourceIdentity};
 use anyhow::Context;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -65,20 +65,33 @@ impl ChainFeed {
                         .call("eth_getBlockByNumber", json!([tag, false]))
                         .await?;
                     let gas_price = self.call("eth_gasPrice", json!([])).await?;
-                    let hash = block["hash"].as_str().map(ToOwned::to_owned);
+                    let hash = block["hash"]
+                        .as_str()
+                        .context("chain block has no hash")?
+                        .to_string();
+                    let parent_hash = block["parentHash"]
+                        .as_str()
+                        .context("chain block has no parent hash")?
+                        .to_string();
                     let raw = serde_json::to_vec(&json!({
                         "block": block,
                         "gas_price": gas_price,
                     }))?;
-                    let mut event = RawMarketEvent::from_wire(
+                    let mut event = RawMarketEvent::from_source(
                         "robinhood_chain",
                         CONNECTOR_VERSION,
+                        SourceIdentity::new(
+                            "canonical",
+                            format!("block:{hash}"),
+                            Some(number.to_string()),
+                        )?,
                         MarketEventKind::ChainBlock,
                         raw,
                     )?;
                     event.block_number = Some(number as i64);
-                    event.block_hash = hash.clone();
-                    event.source_sequence = Some(number.to_string());
+                    event.block_hash = Some(hash.clone());
+                    event.parent_block_hash = Some(parent_hash);
+                    event.canonical_state = CanonicalState::Canonical;
                     event.finality = Finality::Confirmed;
                     handle(event).await?;
 
@@ -97,15 +110,26 @@ impl ChainFeed {
                         .context("eth_getLogs result is not an array")?
                     {
                         let raw = serde_json::to_vec(log)?;
-                        let mut event = RawMarketEvent::from_wire(
+                        let log_index = log["logIndex"]
+                            .as_str()
+                            .context("chain log has no log index")?;
+                        let transaction_hash = log["transactionHash"]
+                            .as_str()
+                            .context("chain log has no transaction hash")?;
+                        let mut event = RawMarketEvent::from_source(
                             "robinhood_chain",
                             CONNECTOR_VERSION,
+                            SourceIdentity::new(
+                                "canonical",
+                                format!("log:{hash}:{transaction_hash}:{log_index}"),
+                                Some(format!("{number}:{log_index}")),
+                            )?,
                             MarketEventKind::PoolState,
                             raw,
                         )?;
                         event.block_number = Some(number as i64);
-                        event.block_hash = hash.clone();
-                        event.source_sequence = log["logIndex"].as_str().map(ToOwned::to_owned);
+                        event.block_hash = Some(hash.clone());
+                        event.canonical_state = CanonicalState::Canonical;
                         event.finality = Finality::Confirmed;
                         handle(event).await?;
                     }

@@ -3,7 +3,10 @@ use robin_runtime::storage::{MarketStatsFeature, Store};
 use robin_runtime::{chain::ChainFeed, lighter::LighterFeed, MarketEventKind};
 use serde::Deserialize;
 use std::{env, fs, time::Duration};
-use tokio::{time::sleep, try_join};
+use tokio::{
+    time::{interval, sleep, MissedTickBehavior},
+    try_join,
+};
 use tracing::{error, info, warn};
 
 #[derive(Deserialize)]
@@ -182,7 +185,39 @@ async fn main() -> anyhow::Result<()> {
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
     };
-    try_join!(lighter_loop, chain_loop)?;
+    let archive_loop = async {
+        let mut maintenance = interval(Duration::from_secs(60 * 60));
+        maintenance.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        maintenance.tick().await;
+        loop {
+            tokio::select! {
+                _ = maintenance.tick() => {
+                    let day = chrono::Utc::now().date_naive() - chrono::Days::new(1);
+                    if let Err(error) = store.publish_daily_manifest(day).await {
+                        error!(%error, %day, "daily archive manifest failed");
+                    }
+                    if let Err(error) = store.purge_archived_staging().await {
+                        error!(%error, "archive staging cleanup failed");
+                    }
+                }
+                result = store.archive_pending(10_000) => match result {
+                    Ok(Some(receipt)) => info!(
+                        object_key = receipt.object_key,
+                        events = receipt.event_count,
+                        "archived raw event segment"
+                    ),
+                    Ok(None) => sleep(Duration::from_secs(2)).await,
+                    Err(error) => {
+                        error!(%error, "raw event archival failed");
+                        sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            }
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    };
+    try_join!(lighter_loop, chain_loop, archive_loop)?;
     Ok(())
 }
 

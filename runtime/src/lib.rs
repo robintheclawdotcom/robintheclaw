@@ -5,9 +5,12 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
 use uuid::Uuid;
 
+pub mod archive;
 pub mod chain;
 pub mod lighter;
 pub mod storage;
+
+pub const EVENT_SCHEMA_VERSION: &str = "1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +49,7 @@ impl MarketEventKind {
 pub enum Finality {
     Pending,
     Confirmed,
+    L1Posted,
     Finalized,
     NotApplicable,
 }
@@ -55,16 +59,73 @@ impl Finality {
         match self {
             Self::Pending => "pending",
             Self::Confirmed => "confirmed",
+            Self::L1Posted => "l1_posted",
             Self::Finalized => "finalized",
             Self::NotApplicable => "not_applicable",
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalState {
+    Canonical,
+    Orphaned,
+    NotApplicable,
+}
+
+impl CanonicalState {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Canonical => "canonical",
+            Self::Orphaned => "orphaned",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceIdentity {
+    pub session: String,
+    pub event_id: String,
+    pub sequence: Option<String>,
+}
+
+impl SourceIdentity {
+    pub fn new(
+        session: impl Into<String>,
+        event_id: impl Into<String>,
+        sequence: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let identity = Self {
+            session: session.into(),
+            event_id: event_id.into(),
+            sequence,
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        for (name, value) in [("session", &self.session), ("event_id", &self.event_id)] {
+            anyhow::ensure!(!value.is_empty(), "source {name} cannot be empty");
+            anyhow::ensure!(value.len() <= 256, "source {name} exceeds 256 bytes");
+            anyhow::ensure!(
+                !value.chars().any(char::is_control),
+                "source {name} contains control characters"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawMarketEvent {
     pub id: Uuid,
+    pub schema_version: String,
     pub source: String,
+    pub source_session: String,
+    pub source_event_id: String,
     pub connector_version: String,
     pub kind: MarketEventKind,
     pub symbol: Option<String>,
@@ -73,6 +134,8 @@ pub struct RawMarketEvent {
     pub source_sequence: Option<String>,
     pub block_number: Option<i64>,
     pub block_hash: Option<String>,
+    pub parent_block_hash: Option<String>,
+    pub canonical_state: CanonicalState,
     pub finality: Finality,
     pub payload_sha256: String,
     pub payload: Value,
@@ -80,6 +143,40 @@ pub struct RawMarketEvent {
 }
 
 impl RawMarketEvent {
+    pub fn from_source(
+        source: impl Into<String>,
+        connector_version: impl Into<String>,
+        identity: SourceIdentity,
+        kind: MarketEventKind,
+        raw: impl Into<Vec<u8>>,
+    ) -> anyhow::Result<Self> {
+        identity.validate()?;
+        let raw = raw.into();
+        let payload = serde_json::from_slice(&raw)?;
+        let payload_sha256 = sha256(&raw);
+        Ok(Self {
+            id: Uuid::new_v4(),
+            schema_version: EVENT_SCHEMA_VERSION.to_string(),
+            source: source.into(),
+            source_session: identity.session,
+            source_event_id: identity.event_id,
+            connector_version: connector_version.into(),
+            kind,
+            symbol: None,
+            source_timestamp_ms: None,
+            received_at: Utc::now(),
+            source_sequence: identity.sequence,
+            block_number: None,
+            block_hash: None,
+            parent_block_hash: None,
+            canonical_state: CanonicalState::NotApplicable,
+            finality: Finality::NotApplicable,
+            payload_sha256,
+            payload,
+            raw,
+        })
+    }
+
     pub fn from_wire(
         source: impl Into<String>,
         connector_version: impl Into<String>,
@@ -87,34 +184,21 @@ impl RawMarketEvent {
         raw: impl Into<Vec<u8>>,
     ) -> anyhow::Result<Self> {
         let raw = raw.into();
-        let payload = serde_json::from_slice(&raw)?;
-        let mut hash = Sha256::new();
-        hash.update(&raw);
-        Ok(Self {
-            id: Uuid::new_v4(),
-            source: source.into(),
-            connector_version: connector_version.into(),
+        let digest = sha256(&raw);
+        Self::from_source(
+            source,
+            connector_version,
+            SourceIdentity::new("legacy", format!("payload:{digest}"), None)?,
             kind,
-            symbol: None,
-            source_timestamp_ms: None,
-            received_at: Utc::now(),
-            source_sequence: None,
-            block_number: None,
-            block_hash: None,
-            finality: Finality::NotApplicable,
-            payload_sha256: hex::encode(hash.finalize()),
-            payload,
             raw,
-        })
-    }
-
-    pub fn object_key(&self) -> String {
-        let day = self.received_at.format("%Y-%m-%d");
-        format!(
-            "raw/{}/{}/{}/{}.json.zst",
-            self.source, self.connector_version, day, self.payload_sha256
         )
     }
+}
+
+pub fn sha256(bytes: &[u8]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(bytes);
+    hex::encode(hash.finalize())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,5 +581,12 @@ mod tests {
         );
         assert!(result.spot.unwrap().fee_usd.is_finite());
         assert!(result.perp.unwrap().fee_usd.is_finite());
+    }
+
+    #[test]
+    fn source_identity_rejects_empty_and_control_values() {
+        assert!(SourceIdentity::new("", "event-1", None).is_err());
+        assert!(SourceIdentity::new("session-1", "event\n1", None).is_err());
+        assert!(SourceIdentity::new("session-1", "event-1", Some("7".to_string())).is_ok());
     }
 }
