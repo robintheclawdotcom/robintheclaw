@@ -15,6 +15,26 @@ export function AgentButton({ dashboard }: { dashboard: DashboardSnapshot }) {
   const queryClient = useQueryClient();
   const agent = dashboard.agent;
   const action = agentAction(agent);
+  const [commandId, setCommandId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!agent || action?.kind !== "command") {
+      setCommandId(null);
+      return;
+    }
+    setCommandId(api.pendingAgentCommand(agent.id, action.command));
+  }, [action, agent, api]);
+  const commandStatus = useQuery({
+    queryKey: ["agent-command", agent?.id, commandId],
+    queryFn: () => api.getAgentCommand(agent!.id, commandId!),
+    enabled: Boolean(agent && commandId),
+    refetchInterval: (query) => terminalCommand(query.state.data?.status) ? false : 1_000,
+  });
+  useEffect(() => {
+    if (!terminalCommand(commandStatus.data?.status)) return;
+    setCommandId(null);
+    void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    void queryClient.invalidateQueries({ queryKey: ["agent-readiness"] });
+  }, [commandStatus.data?.status, queryClient]);
   const mutation = useMutation<unknown, Error>({
     mutationFn: () => {
       if (!action) throw new Error("This lifecycle state has no manual transition.");
@@ -24,7 +44,11 @@ export function AgentButton({ dashboard }: { dashboard: DashboardSnapshot }) {
       if (action.kind === "paper") return api.updatePaperAgent(agent.id, action.status);
       return api.agentCommand(agent.id, action.command);
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
+      if (action?.kind === "command") {
+        const command = result as AgentCommandRecord;
+        if (!terminalCommand(command.status)) setCommandId(command.id);
+      }
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       void queryClient.invalidateQueries({ queryKey: ["agent-readiness"] });
     },
@@ -33,10 +57,13 @@ export function AgentButton({ dashboard }: { dashboard: DashboardSnapshot }) {
   if (!action) return null;
   return (
     <div className="inline-action">
-      <button className="button button-primary" disabled={mutation.isPending} onClick={() => mutation.mutate()}>
-        {mutation.isPending ? "Updating…" : action.label}
+      <button className="button button-primary" disabled={mutation.isPending || Boolean(commandId)} onClick={() => mutation.mutate()}>
+        {mutation.isPending ? "Updating…" : commandId ? "Command pending…" : action.label}
       </button>
+      {commandStatus.data && !terminalCommand(commandStatus.data.status) && <small aria-live="polite">{commandStatus.data.command}: {commandStatus.data.status}</small>}
+      {commandStatus.data?.errorReason && <span className="field-error" role="alert">{commandStatus.data.errorReason}</span>}
       {mutation.error && <span className="field-error" role="alert">{mutation.error.message}</span>}
+      {commandStatus.error && <><span className="field-error" role="alert">{commandStatus.error.message}</span><button className="button button-quiet" onClick={() => void commandStatus.refetch()}>Retry command status</button></>}
     </div>
   );
 }
@@ -64,6 +91,7 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
     queryFn: () => api.agentReadiness(agent!.id),
     enabled: hasAccount,
     retry: false,
+    refetchInterval: agent && matchesProvisioning(agent.status) ? 5_000 : false,
   });
   const lighter = useMutation({
     mutationFn: () => {
@@ -120,9 +148,10 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
       const key = deploymentStorageKey(robinhoodBinding.requestId);
       let transactionHash = readTransactionHashes(key)[0];
       if (!transactionHash) {
-        transactionHash = await smartWallet.executeMainnetCall(action, robinhoodBinding.ownerAddress);
-        window.localStorage.setItem(key, JSON.stringify([transactionHash]));
-        setRobinhoodTransactionHash(transactionHash);
+        transactionHash = await smartWallet.executeMainnetCall(action, robinhoodBinding.ownerAddress, (submitted) => {
+          window.localStorage.setItem(key, JSON.stringify([submitted]));
+          setRobinhoodTransactionHash(submitted);
+        });
       }
       const binding = await api.confirmRobinhood(agent.id, {
         requestId: robinhoodBinding.requestId,
@@ -169,6 +198,11 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
     }
     setSubmittedOwnerActions(readTransactionHashes(key));
   }, [currentCommand]);
+  useEffect(() => {
+    if (!terminalCommand(currentCommand?.status)) return;
+    void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    void queryClient.invalidateQueries({ queryKey: ["agent-readiness"] });
+  }, [currentCommand?.status, queryClient]);
   const ownerAction = useMutation({
     mutationFn: async () => {
       if (!currentCommand || currentCommand.status !== "awaiting_signature" || !currentCommand.ownerActions.length) {
@@ -184,10 +218,15 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
       const hashes = readTransactionHashes(key);
       for (const [index, action] of currentCommand.ownerActions.entries()) {
         if (hashes[index]) continue;
-        const hash = await smartWallet.executeMainnetCall({ to: action.to, data: action.data, value: action.value }, action.from);
-        hashes[index] = hash;
-        window.localStorage.setItem(key, JSON.stringify(hashes));
-        setSubmittedOwnerActions([...hashes]);
+        await smartWallet.executeMainnetCall(
+          { to: action.to, data: action.data, value: action.value },
+          action.from,
+          (submitted) => {
+            hashes[index] = submitted;
+            window.localStorage.setItem(key, JSON.stringify(hashes));
+            setSubmittedOwnerActions([...hashes]);
+          },
+        );
       }
     },
     onSuccess: () => {
@@ -225,6 +264,8 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
           </article>
         ))}
       </div>
+      {state?.validUntil && <small>Readiness evidence valid until {new Date(state.validUntil).toLocaleString()}.</small>}
+      {state?.blockers.length ? <small role="status">Blocked by: {state.blockers.map(formatReadinessBlocker).join(", ")}.</small> : null}
       {agent.status === "setup" ? (
         <small>Set up the execution account before linking venues or funding capital.</small>
       ) : (
@@ -235,7 +276,7 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
             <label>Lighter change nonce<input inputMode="numeric" value={lighterNonce} onChange={(event) => setLighterNonce(event.target.value)} /></label>
           </div><div className="button-row">
             <button className="button button-secondary" disabled={lighter.isPending} onClick={() => lighter.mutate()}>{lighter.isPending ? "Requesting…" : "Request Lighter provisioning"}</button>
-            {lighterBinding?.status === "awaiting_signature" && <button className="button button-primary" disabled={lighterConfirm.isPending} onClick={() => lighterConfirm.mutate()}>{lighterConfirm.isPending ? "Verifying…" : "Sign Lighter association"}</button>}
+            {(lighterBinding?.status === "awaiting_signature" || lighterBinding?.status === "verifying") && lighterBinding.associationPayload && <button className="button button-primary" disabled={lighterConfirm.isPending} onClick={() => lighterConfirm.mutate()}>{lighterConfirm.isPending ? "Verifying…" : lighterBinding.status === "verifying" ? "Retry Lighter verification" : "Sign Lighter association"}</button>}
             <button className="button button-secondary" disabled={robinhood.isPending} onClick={() => robinhood.mutate()}>{robinhood.isPending ? "Preparing…" : "Prepare Robinhood deployment"}</button>
             {robinhoodBinding?.status === "awaiting_signature" && robinhoodBinding.robinhoodDeploymentAction && <button className="button button-primary" disabled={robinhoodDeploy.isPending || smartWallet.pending} onClick={() => robinhoodDeploy.mutate()}>{robinhoodDeploy.isPending ? "Confirming…" : robinhoodTransactionHash ? "Retry finality check" : "Deploy with owner ETH"}</button>}
           </div></>}
@@ -264,6 +305,10 @@ function matchesProvisioning(status: AgentStatus) {
 
 function terminalCommand(status?: AgentCommandRecord["status"]) {
   return status === "completed" || status === "rejected" || status === "failed";
+}
+
+function formatReadinessBlocker(blocker: string) {
+  return blocker.replaceAll("_", " ");
 }
 
 function deploymentStorageKey(requestId: string) {

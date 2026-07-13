@@ -135,6 +135,10 @@ export class AppApi {
     return result;
   }
 
+  pendingAgentCommand(agentId: string, command: AgentCommand): string | null {
+    return this.readPendingCommand(this.commandStorageKey(agentId, command))?.commandId ?? null;
+  }
+
   activity(cursor?: string): Promise<ActivityPage> {
     const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
     return this.request(`/v1/activity${query}`);
