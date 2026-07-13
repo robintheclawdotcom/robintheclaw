@@ -42,7 +42,7 @@ type AuthContextValue = {
   embeddedAddress: `0x${string}` | null;
   login: () => void;
   logout: () => Promise<void>;
-  linkWallet: () => Promise<void>;
+  linkWallet: () => void;
   unlinkWallet: (address: string) => Promise<void>;
   linkEmail: () => void;
   linkPasskey: () => void;
@@ -186,7 +186,7 @@ function LiveSession({ children }: { children: React.ReactNode }) {
     embeddedAddress: embeddedWallet?.address as `0x${string}` | null,
     login: () => privy.login(),
     logout: async () => { await privy.logout(); },
-    linkWallet: async () => { await privy.linkWallet({ walletChainType: "ethereum-only" }); },
+    linkWallet: () => privy.linkWallet({ walletChainType: "ethereum-only" }),
     unlinkWallet: async (address) => { await privy.unlinkWallet(address); },
     linkEmail: () => privy.linkEmail(),
     linkPasskey: () => privy.linkPasskey({ name: "Robin recovery" }),
@@ -224,7 +224,7 @@ function MockSession({ children }: { children: React.ReactNode }) {
     embeddedAddress: "0x1111111111111111111111111111111111111111",
     login: () => { window.localStorage.removeItem("robin:e2e-auth"); setAuthenticated(true); },
     logout: async () => { window.localStorage.setItem("robin:e2e-auth", "logged-out"); setAuthenticated(false); },
-    linkWallet: async () => setAccounts((current) => current.some((wallet) => wallet.address === "0x3333333333333333333333333333333333333333") ? current : current.concat({ address: "0x3333333333333333333333333333333333333333", label: "Phantom", embedded: false })),
+    linkWallet: () => setAccounts((current) => current.some((wallet) => wallet.address === "0x3333333333333333333333333333333333333333") ? current : current.concat({ address: "0x3333333333333333333333333333333333333333", label: "Phantom", embedded: false })),
     unlinkWallet: async (address) => setAccounts((current) => current.filter((wallet) => wallet.address.toLowerCase() !== address.toLowerCase())),
     linkEmail: () => undefined,
     linkPasskey: () => undefined,
@@ -252,7 +252,7 @@ function UnconfiguredSession({ children }: { children: React.ReactNode }) {
     embeddedAddress: null,
     login: () => undefined,
     logout: async () => undefined,
-    linkWallet: async () => undefined,
+    linkWallet: () => undefined,
     unlinkWallet: async () => undefined,
     linkEmail: () => undefined,
     linkPasskey: () => undefined,

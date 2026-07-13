@@ -27,11 +27,6 @@ export default function OnboardingPage() {
     mutationFn: () => api.syncWallets(),
     onSuccess: (data) => queryClient.setQueryData(["me"], data),
   });
-  const linkWallet = useMutation({
-    mutationFn: async () => { await auth.linkWallet(); return api.syncWallets(); },
-    onSuccess: (data) => queryClient.setQueryData(["me"], data),
-  });
-
   useEffect(() => {
     const next = `${auth.hasRecovery}:${auth.accounts.length}`;
     if (!identityVersion.current) {
@@ -136,7 +131,7 @@ export default function OnboardingPage() {
         </Step>
         <Step number="3" title="Funding wallets" complete={me.wallets.length > 0} optional>
           <p>{me.wallets.length} wallet{me.wallets.length === 1 ? "" : "s"} linked. Connect a supported wallet now or after setup.</p>
-          <div className="button-row"><button className="button button-secondary" disabled={linkWallet.isPending} onClick={() => linkWallet.mutate()}>{linkWallet.isPending ? "Linking…" : "Link wallet"}</button><button className="button button-quiet" disabled={sync.isPending} onClick={() => sync.mutate()}>Refresh</button></div>
+          <div className="button-row"><button className="button button-secondary" onClick={auth.linkWallet}>Link wallet</button><button className="button button-quiet" disabled={sync.isPending} onClick={() => sync.mutate()}>Refresh</button></div>
         </Step>
         <Step number="4" title="Personal vault" complete={false}>
           <p>A sponsored batch creates your vault and funds its initial test balance.</p>
@@ -154,7 +149,6 @@ export default function OnboardingPage() {
         </section>
       )}
       {error && phase !== "delayed" && <ErrorNotice error={error} />}
-      {linkWallet.error && <ErrorNotice error={linkWallet.error} />}
     </>
   );
 }
