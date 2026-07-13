@@ -141,6 +141,21 @@ fn accepts_a_well_formed_acknowledgement() {
 }
 
 #[test]
+fn subscribed_order_book_payload_is_the_initial_snapshot() {
+    let text = SNAPSHOT.replacen("update/order_book", "subscribed/order_book", 1);
+    let frame = order_book_frame(&text);
+    let mut book = OrderBook::default();
+    book.apply(&frame.channel, &frame.order_book).unwrap();
+    assert_eq!(book.nonce(), Some(9182390020));
+}
+
+#[test]
+fn subscribed_trade_snapshot_does_not_require_a_top_level_timestamp() {
+    let text = TRADE.replacen("update/trade", "subscribed/trade", 1);
+    assert!(matches!(parse_frame(&text).unwrap(), Frame::Trade(_)));
+}
+
+#[test]
 fn rejects_an_acknowledgement_without_a_channel() {
     assert!(matches!(
         validate_ack(ACK_MALFORMED),
