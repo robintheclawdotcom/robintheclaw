@@ -247,11 +247,12 @@ export default function Home() {
       <section className="terminal">
         <header className="titlebar">
           <div className="window-controls" aria-hidden="true"><span /><span /><span /></div>
-          <div className="terminal-title">robin@claw · /public · zsh</div>
           <nav className="desktop-nav" aria-label="Primary navigation">
             <button className={view === "home" ? "nav-active" : ""} onClick={openHome}>home</button>
             <button className={view === "docs" ? "nav-active" : ""} onClick={openDocs}>docs</button>
-            <span className="nav-divider" />
+          </nav>
+          <div className="terminal-title">robin@claw · /public · zsh</div>
+          <div className="desktop-actions">
             <button className="theme-toggle" onClick={toggleTheme} aria-label="Toggle color theme">
               <span className="theme-dot" />{theme}
             </button>
@@ -259,7 +260,7 @@ export default function Home() {
               <img className="github-mark" src="/icons/github-mark.svg" alt="" aria-hidden="true" />
             </a>
             <a className="icon-link" href="https://x.com/RobinTheClaw" target="_blank" rel="noreferrer" aria-label="X">𝕏</a>
-          </nav>
+          </div>
           <button
             className="menu-trigger"
             aria-label="Open navigation menu"

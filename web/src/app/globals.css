@@ -44,15 +44,13 @@ main { min-height: 100vh; background: var(--bg); padding: clamp(18px, 2vw, 32px)
 .terminal { width: 100%; min-height: calc(100vh - 36px); margin: 0 auto; display: flex; flex-direction: column; background: var(--terminal); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; }
 .titlebar { display: flex; align-items: center; gap: 16px; padding: 11px 16px; background: var(--titlebar); border-bottom: 1px solid var(--border); }
 .window-controls { display: flex; gap: 8px; }
-.window-controls span { width: 12px; height: 12px; border-radius: 50%; background: #e05a4a; }
-.window-controls span:nth-child(2) { background: #e0a83a; }
-.window-controls span:nth-child(3) { background: #5aa86a; }
+.window-controls span { width: 12px; height: 12px; border-radius: 50%; background: #b8b8b8; }
 .terminal-title { flex: 1; min-width: 120px; text-align: center; color: var(--muted); font-size: 12px; }
 .desktop-nav { display: flex; align-items: center; gap: 6px; }
 .desktop-nav button { position: relative; border: 0; border-radius: 6px; padding: 6px 10px; color: var(--text-secondary); background: transparent; font-size: 13px; }
 .desktop-nav button:hover { background: var(--panel); }
 .nav-active::after { position: absolute; right: 10px; bottom: 1px; left: 10px; height: 2px; border-radius: 999px; background: var(--accent); content: ""; }
-.nav-divider { width: 1px; height: 18px; margin: 0 4px; background: var(--border-strong); }
+.desktop-actions { display: flex; align-items: center; gap: 6px; }
 .theme-toggle, .icon-link { display: flex; align-items: center; gap: 7px; min-height: 32px; border: 1px solid var(--border-strong); color: var(--muted); }
 .theme-toggle { padding: 5px 11px; }
 .theme-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
@@ -139,7 +137,7 @@ footer a { font-size: 13px; }
 @keyframes drawer-in { from { opacity: 0; transform: translateX(-18px); } to { opacity: 1; transform: translateX(0); } }
 
 @media (max-width: 960px) {
-  .desktop-nav { display: none; }
+  .desktop-nav, .desktop-actions { display: none; }
   .menu-trigger { display: block; }
   .docs-view aside { display: none; }
   .docs-view { max-width: 680px; }
