@@ -231,7 +231,8 @@ func (d Dispatch) validate(now time.Time) error {
 	}
 	state := d.AccountState
 	if state.ExecutionAccountID != d.ExecutionAccountID || state.AgentID != d.AgentID ||
-		state.StrategyManifestSHA256 != StrategyManifestSHA256 || stale(state.ObservedAtMS, now) {
+		state.StrategyManifestSHA256 != StrategyManifestSHA256 || state.LighterAccountIndex == 0 ||
+		state.LighterAPIKeyIndex < 4 || stale(state.ObservedAtMS, now) {
 		return errors.New("account state identity mismatch")
 	}
 	if !state.LighterNonceAligned || !state.RobinhoodNonceAligned || state.UnknownLighterOrders ||

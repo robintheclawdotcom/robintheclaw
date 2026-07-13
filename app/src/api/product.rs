@@ -411,7 +411,7 @@ pub async fn lighter_link_request(
         .map_err(ApiError::internal)?;
     let api_key_index = u8::try_from(state.config.lighter_api_key_index)
         .ok()
-        .filter(|index| (2..=254).contains(index))
+        .filter(|index| (4..=254).contains(index))
         .ok_or_else(|| {
             ApiError::ServiceUnavailable("Lighter API key policy is invalid.".to_string())
         })?;

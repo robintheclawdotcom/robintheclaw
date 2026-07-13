@@ -318,7 +318,7 @@ func validIntentID(value string) bool {
 
 func validateSignedTransaction(value signedTransaction, executionID, intentID string) error {
 	if value.ExecutionAccountID != executionID || value.IntentID != intentID || value.AccountIndex <= 0 ||
-		value.APIKeyIndex < 2 || value.APIKeyIndex > 254 || value.CredentialVersion <= 0 ||
+		value.APIKeyIndex < 4 || value.APIKeyIndex > 254 || value.CredentialVersion <= 0 ||
 		value.TxType == 0 || value.TxHash == "" || !json.Valid(value.TxInfo) {
 		return errors.New("invalid signed transaction identity")
 	}

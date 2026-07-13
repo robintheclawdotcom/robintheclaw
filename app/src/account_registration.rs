@@ -51,7 +51,7 @@ impl AccountRegistration {
             || self.strategy_manifest_sha256
                 != "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a"
             || self.lighter_account_index <= 0
-            || !(2..=254).contains(&self.lighter_api_key_index)
+            || !(4..=254).contains(&self.lighter_api_key_index)
             || !valid_address(&self.robinhood_owner)
             || !valid_address(&self.robinhood_vault)
             || !valid_address(&self.robinhood_signer)
@@ -435,6 +435,14 @@ mod tests {
         let digest = value.binding_sha256.clone();
         value.robinhood_signer = "0x4444444444444444444444444444444444444444".into();
         assert_ne!(digest, value.calculate_binding_sha256());
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn reserved_lighter_api_key_is_rejected() {
+        let mut value = registration();
+        value.lighter_api_key_index = 3;
+        value.binding_sha256 = value.calculate_binding_sha256();
         assert!(value.validate().is_err());
     }
 

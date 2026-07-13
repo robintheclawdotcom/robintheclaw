@@ -7,7 +7,7 @@ CREATE TABLE coordinator_account_registrations (
         strategy_manifest_sha256 = '4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a'
     ),
     lighter_account_index bigint NOT NULL CHECK (lighter_account_index > 0),
-    lighter_api_key_index smallint NOT NULL CHECK (lighter_api_key_index BETWEEN 2 AND 254),
+    lighter_api_key_index smallint NOT NULL CHECK (lighter_api_key_index BETWEEN 4 AND 254),
     robinhood_owner text NOT NULL CHECK (robinhood_owner ~ '^0x[0-9a-f]{40}$'),
     robinhood_vault text NOT NULL CHECK (robinhood_vault ~ '^0x[0-9a-f]{40}$'),
     robinhood_signer text NOT NULL CHECK (robinhood_signer ~ '^0x[0-9a-f]{40}$'),

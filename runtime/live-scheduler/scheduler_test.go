@@ -340,6 +340,21 @@ func TestSchedulerPinsReviewedLighterMarket(t *testing.T) {
 	}
 }
 
+func TestSchedulerRejectsReservedLighterAPIKey(t *testing.T) {
+	now, private, public := testClockAndKey(t)
+	dispatch := validDispatch(t, now, "account-api-key", "agent-api-key")
+	dispatch.AccountState.LighterAPIKeyIndex = 3
+	sealApproval(t, dispatch)
+	store := newMemoryStore(dispatch)
+	service := mustScheduler(t, store, &quoteStub{private: private, now: now}, &runnerStub{}, public, now)
+	if err := service.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.states[store.key(*dispatch)] != "blocked" {
+		t.Fatal("reserved Lighter API key was not blocked")
+	}
+}
+
 func validDispatch(t *testing.T, now time.Time, account, agent string) *Dispatch {
 	t.Helper()
 	dispatch := &Dispatch{
@@ -358,7 +373,7 @@ func validDispatch(t *testing.T, now time.Time, account, agent string) *Dispatch
 		},
 		AccountState: AccountState{
 			ExecutionAccountID: account, AgentID: agent, StrategyManifestSHA256: StrategyManifestSHA256,
-			LighterAccountIndex: 1, LighterAPIKeyIndex: 2, LighterMarketIndex: testMarket, LighterNonceAligned: true,
+			LighterAccountIndex: 1, LighterAPIKeyIndex: 4, LighterMarketIndex: testMarket, LighterNonceAligned: true,
 			CollateralMicros: 20_000_000, MaintenanceMarginMicros: 10_000_000,
 			RobinhoodVault: "0x1111111111111111111111111111111111111111", RobinhoodSigner: "0x2222222222222222222222222222222222222222",
 			RobinhoodNonceAligned: true, NAVMicros: 50_000_000, Flat: true, SpotDecimals: 18, SpotConfigVersion: 1,

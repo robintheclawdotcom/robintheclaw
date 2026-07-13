@@ -72,6 +72,22 @@ func TestSignerSurfaceHasNoAssetMovementRoute(t *testing.T) {
 	}
 }
 
+func TestReservedAPIKeyIndexIsRejected(t *testing.T) {
+	transaction := signedTransaction{
+		ExecutionAccountID: "account-canary-1",
+		AccountIndex:       7,
+		APIKeyIndex:        3,
+		CredentialVersion:  1,
+		IntentID:           "intent-1",
+		TxType:             14,
+		TxHash:             "0x01",
+		TxInfo:             json.RawMessage(`{"AccountIndex":7,"ApiKeyIndex":3}`),
+	}
+	if validateSignedTransaction(transaction, transaction.ExecutionAccountID, transaction.IntentID) == nil {
+		t.Fatal("reserved API key index was accepted")
+	}
+}
+
 func TestSignedRequestIsAcceptedOnce(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	server := authTestServer(now)
@@ -208,12 +224,12 @@ func TestProvisionerCrossAccountSubstitutionFailsClosed(t *testing.T) {
 		*response = signedTransaction{
 			ExecutionAccountID: "22222222-2222-4222-8222-222222222222",
 			AccountIndex:       42,
-			APIKeyIndex:        3,
+			APIKeyIndex:        4,
 			CredentialVersion:  1,
 			IntentID:           request.IntentID,
 			TxType:             14,
 			TxHash:             "0x01",
-			TxInfo:             json.RawMessage(`{"AccountIndex":42,"ApiKeyIndex":3}`),
+			TxInfo:             json.RawMessage(`{"AccountIndex":42,"ApiKeyIndex":4}`),
 		}
 		return nil
 	}}
@@ -236,12 +252,12 @@ func TestSignerUsesRotatedCredentialWithoutSecretConfiguration(t *testing.T) {
 		*response = signedTransaction{
 			ExecutionAccountID: request.ExecutionAccountID,
 			AccountIndex:       42,
-			APIKeyIndex:        3,
+			APIKeyIndex:        4,
 			CredentialVersion:  version,
 			IntentID:           request.IntentID,
 			TxType:             14,
 			TxHash:             fmt.Sprintf("0x%02d", version),
-			TxInfo:             json.RawMessage(`{"AccountIndex":42,"ApiKeyIndex":3}`),
+			TxInfo:             json.RawMessage(`{"AccountIndex":42,"ApiKeyIndex":4}`),
 		}
 		return nil
 	}}
@@ -311,12 +327,12 @@ func authTestServer(now time.Time) *signerServer {
 			*response = signedTransaction{
 				ExecutionAccountID: request.ExecutionAccountID,
 				AccountIndex:       7,
-				APIKeyIndex:        2,
+				APIKeyIndex:        4,
 				CredentialVersion:  1,
 				IntentID:           request.IntentID,
 				TxType:             14,
 				TxHash:             "0x01",
-				TxInfo:             json.RawMessage(`{"AccountIndex":7,"ApiKeyIndex":2}`),
+				TxInfo:             json.RawMessage(`{"AccountIndex":7,"ApiKeyIndex":4}`),
 			}
 			return nil
 		}},

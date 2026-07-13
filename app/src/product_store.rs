@@ -919,7 +919,7 @@ impl ProductStore {
             ));
         }
         let owner = normalize_address(&link.owner_address)?;
-        if link.account_index <= 0 || !(2..=254).contains(&link.api_key_index) {
+        if link.account_index <= 0 || !(4..=254).contains(&link.api_key_index) {
             return Err(anyhow!(
                 "Lighter provisioner returned an invalid account binding"
             ));

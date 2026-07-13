@@ -2,7 +2,7 @@ ALTER TABLE execution_account_bindings
     ADD COLUMN provider_request_id uuid,
     ADD COLUMN lighter_account_index bigint CHECK (lighter_account_index IS NULL OR lighter_account_index > 0),
     ADD COLUMN lighter_api_key_index smallint CHECK (
-        lighter_api_key_index IS NULL OR lighter_api_key_index BETWEEN 2 AND 254
+        lighter_api_key_index IS NULL OR lighter_api_key_index BETWEEN 4 AND 254
     ),
     ADD COLUMN robinhood_vault_address text;
 

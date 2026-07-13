@@ -179,7 +179,7 @@ impl PairIntent {
             return Err(PairIntentError::IdentityMismatch);
         }
         if self.lighter_account_index == 0
-            || !(2..=254).contains(&self.lighter_api_key_index)
+            || !(4..=254).contains(&self.lighter_api_key_index)
             || !valid_address(&self.robinhood_vault)
             || !valid_address(&self.robinhood_signer)
             || self.robinhood_vault == self.robinhood_signer
@@ -451,7 +451,7 @@ mod tests {
             risk_version: CANARY_RISK_VERSION.into(),
             strategy_manifest_sha256: BASIS_AAPL_V1_MANIFEST_SHA256.into(),
             lighter_account_index: 7,
-            lighter_api_key_index: 2,
+            lighter_api_key_index: 4,
             robinhood_vault: "0x0000000000000000000000000000000000000002".into(),
             robinhood_signer: "0x0000000000000000000000000000000000000003".into(),
             symbol: "AAPL".into(),
@@ -504,6 +504,17 @@ mod tests {
     #[test]
     fn valid_canary_intent_passes() {
         assert_eq!(intent().validate(), Ok(()));
+    }
+
+    #[test]
+    fn reserved_lighter_api_key_is_rejected() {
+        let mut value = intent();
+        value.lighter_api_key_index = 3;
+        value.derive_identifiers().unwrap();
+        assert_eq!(
+            value.validate(),
+            Err(PairIntentError::InvalidAccountBinding)
+        );
     }
 
     #[test]
