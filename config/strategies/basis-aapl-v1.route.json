@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "strategyVersion": "basis-aapl-v1",
+  "chainId": 4663,
+  "spot": {
+    "venue": "robinhood-chain-mainnet",
+    "direction": "long",
+    "settlementAsset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "stockToken": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
+    "router": "0x8876789976dEcBfCbBbe364623C63652db8C0904",
+    "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+    "pool": {
+      "currency0": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "currency1": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
+      "fee": 3000,
+      "tickSpacing": 60,
+      "hooks": "0x0000000000000000000000000000000000000000"
+    }
+  },
+  "perp": {
+    "venue": "lighter-mainnet",
+    "symbol": "AAPL",
+    "direction": "short",
+    "collateral": "USDC",
+    "entryOrder": "immediate-or-cancel"
+  }
+}

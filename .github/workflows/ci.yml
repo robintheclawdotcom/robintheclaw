@@ -131,6 +131,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
       - name: Repository policy
         run: bash scripts/check-repo-standards.sh
       - name: Blueprint policy
@@ -138,7 +139,7 @@ jobs:
       - name: Mainnet activation policy
         run: |
           node --test config/validate-live-policy.test.mjs
-          node config/validate-live-policy.mjs
+          bash scripts/validate-mainnet-release.sh
       - name: Leak scan
         run: bash scripts/check-no-leaks.sh
         env:

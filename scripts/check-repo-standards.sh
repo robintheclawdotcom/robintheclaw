@@ -23,8 +23,13 @@ req=(
   scripts/setup-git-hooks.sh
   scripts/validate-blueprint.rb
   config/mainnet-live-policy.json
+  config/strategies/basis-aapl-v1.manifest.json
+  config/strategies/basis-aapl-v1.oracle-policy.json
+  config/strategies/basis-aapl-v1.risk-policy.json
+  config/strategies/basis-aapl-v1.route.json
   config/validate-live-policy.mjs
   config/validate-live-policy.test.mjs
+  scripts/validate-mainnet-release.sh
   runtime/Cargo.toml
   runtime/migrations/0001_capture.sql
   runtime/src/bin/collector.rs

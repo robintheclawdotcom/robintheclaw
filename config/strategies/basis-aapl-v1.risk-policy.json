@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "strategyVersion": "basis-aapl-v1",
+  "maxLegNotionalMicros": 25000000,
+  "maxGrossNotionalMicros": 50000000,
+  "maxDailyTurnoverMicros": 50000000,
+  "maxLeveragePpm": 1000000,
+  "maxActiveEpisodesPerAccount": 1,
+  "minimumMaintenanceMarginCoveragePpm": 2000000,
+  "maximumAuthenticatedStateAgeMs": 5000,
+  "maximumExecutableQuoteAgeMs": 5000,
+  "entryDirection": "long_spot_short_perp",
+  "perpFirst": true,
+  "ambiguousSendBlocksGlobalEntry": true
+}

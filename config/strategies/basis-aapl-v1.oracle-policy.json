@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "strategyVersion": "basis-aapl-v1",
+  "marketReference": {
+    "interface": "chainlink-v3",
+    "addressPinnedByFactory": true,
+    "codeHashPinnedByFactory": true,
+    "positiveAnswerRequired": true,
+    "completedRoundRequired": true,
+    "stockTokenPauseChecked": true,
+    "stableUiMultiplierRequired": true
+  },
+  "sequencerHealth": {
+    "publisherCount": 3,
+    "quorum": 2,
+    "maxAgeSeconds": 60,
+    "freshDisagreementMeansDown": true
+  }
+}
