@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
 use uuid::Uuid;
 
+pub mod agents;
 pub mod archive;
 pub mod chain;
 pub mod lighter;

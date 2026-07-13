@@ -19,6 +19,12 @@ export const vault = {
   status: "ready", createdAt: "2026-07-13T10:00:00Z", updatedAt: "2026-07-13T10:00:00Z",
 };
 
+export const agent = {
+  id: "agent-id", strategyVersion: "basis-paper-v1", mode: "paper" as const,
+  status: "running" as const, createdAt: "2026-07-13T10:00:00Z", updatedAt: "2026-07-13T10:00:00Z",
+  evaluations: 42, candidates: 3, lastEvaluatedAt: "2026-07-13T10:04:00Z",
+};
+
 export function me(withVault = true) {
   return {
     user: { id: "user-id", privyDid: "did:privy:test-user", onboardingState: withVault ? "complete" : "vault", hasRecovery: true, createdAt: "2026-07-13T10:00:00Z", updatedAt: "2026-07-13T10:00:00Z" },
@@ -31,6 +37,7 @@ export function me(withVault = true) {
 
 export const dashboard = {
   environment: "robinhood-testnet", asOf: "2026-07-13T10:05:00Z", infrastructureReady: true,
+  agent,
   totalValue: { raw: "1000000000", decimals: 6, symbol: "tUSDG" },
   availableBalance: { raw: "0", decimals: 6, symbol: "tUSDG" },
   deployedCapital: { raw: "1000000000", decimals: 6, symbol: "tUSDG" }, pnl: null,
@@ -41,16 +48,22 @@ export const dashboard = {
   activity: [], wallets: me().wallets.map((item) => ({ wallet: item, balance: { raw: item.isPrimary ? "0" : "250000000", decimals: 6, symbol: "tUSDG" } })),
 };
 
-export async function mockApplication(page: Page, options: { withVault?: boolean } = {}) {
+export async function mockApplication(page: Page, options: { withVault?: boolean; withAgent?: boolean } = {}) {
   const withVault = options.withVault ?? true;
-  await page.route("**/api/app/**", async (route) => respond(route, withVault));
+  const state = { withAgent: options.withAgent ?? withVault };
+  await page.route("**/api/app/**", async (route) => respond(route, withVault, state));
 }
 
-async function respond(route: Route, withVault: boolean) {
+async function respond(route: Route, withVault: boolean, state: { withAgent: boolean }) {
   const request = route.request();
   const path = new URL(request.url()).pathname;
   if (path.endsWith("/metrics")) return route.fulfill({ status: 204 });
-  if (path.endsWith("/dashboard")) return json(route, dashboard);
+  if (path.endsWith("/dashboard")) return json(route, { ...dashboard, agent: state.withAgent ? agent : null, vault: withVault ? dashboard.vault : null });
+  if (path.endsWith("/agents") && request.method() === "POST") {
+    state.withAgent = true;
+    return json(route, agent, 201);
+  }
+  if (path.includes("/agents/") && request.method() === "PUT") return json(route, agent);
   if (path.endsWith("/activity")) return json(route, { items: [], nextCursor: null });
   if (path.endsWith("/preferences")) return json(route, me(withVault).preferences);
   if (path.endsWith("/vaults/prepare")) return json(route, { chainId: 46630, smartAccount: embedded, expectedVault: vaultAddress, calls: [{ to: vault.assetAddress, data: "0x095ea7b3", value: "0" }] });

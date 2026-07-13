@@ -8,6 +8,33 @@ import { formatAddress } from "../lib/format";
 import { useAppApi, useRobinAuth, useSmartWallet } from "./app-providers";
 import { ErrorNotice } from "./app-ui";
 
+export function AgentButton({ dashboard }: { dashboard: DashboardSnapshot }) {
+  const api = useAppApi();
+  const queryClient = useQueryClient();
+  const agent = dashboard.agent;
+  const mutation = useMutation({
+    mutationFn: () => agent
+      ? api.updateAgent(agent.id, agent.status === "running" ? "paused" : "running")
+      : api.launchAgent(),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+  });
+
+  if (!dashboard.vault) return null;
+  const label = !agent
+    ? "Launch Robin agent"
+    : agent.status === "running"
+      ? "Pause agent"
+      : "Resume agent";
+  return (
+    <div className="inline-action">
+      <button className="button button-primary" disabled={mutation.isPending} onClick={() => mutation.mutate()}>
+        {mutation.isPending ? "Updating…" : label}
+      </button>
+      {mutation.error && <span className="field-error" role="alert">{mutation.error.message}</span>}
+    </div>
+  );
+}
+
 export function MandateButton({ dashboard }: { dashboard: DashboardSnapshot }) {
   const smartWallet = useSmartWallet();
   const queryClient = useQueryClient();

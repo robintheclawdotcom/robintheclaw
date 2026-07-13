@@ -97,10 +97,26 @@ export type OpportunitySnapshot = {
   observedAt: number;
 };
 
+export type AgentRecord = {
+  id: string;
+  strategyVersion: string;
+  mode: "paper" | "live";
+  status: "running" | "paused";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentSnapshot = AgentRecord & {
+  evaluations: number;
+  candidates: number;
+  lastEvaluatedAt: string | null;
+};
+
 export type DashboardSnapshot = {
   environment: string;
   asOf: string;
   infrastructureReady: boolean;
+  agent: AgentSnapshot | null;
   totalValue: Amount;
   availableBalance: Amount;
   deployedCapital: Amount;

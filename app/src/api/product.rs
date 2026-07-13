@@ -2,9 +2,9 @@ use crate::api::error::ApiError;
 use crate::auth::require_user;
 use crate::evm::abi;
 use crate::product::{
-    ActivityPage, Amount, ConfirmVaultInput, ConfirmedVault, DashboardSnapshot, MetricInput,
-    OpportunitySnapshot, PreferencesInput, TransactionCall, TransactionPlan, VaultSnapshot,
-    WalletBalanceSnapshot,
+    ActivityPage, AgentStatusInput, Amount, ConfirmVaultInput, ConfirmedVault, DashboardSnapshot,
+    MetricInput, OpportunitySnapshot, PreferencesInput, TransactionCall, TransactionPlan,
+    VaultSnapshot, WalletBalanceSnapshot,
 };
 use crate::product_store::normalize_address;
 use crate::state::AppState;
@@ -218,6 +218,11 @@ pub async fn dashboard(
         .me(&auth.did)
         .await
         .map_err(ApiError::internal)?;
+    let agent = state
+        .product_store
+        .agent_snapshot(me.user.id)
+        .await
+        .map_err(ApiError::internal)?;
     let activity = state
         .product_store
         .activity(&auth.did, None, 12)
@@ -289,6 +294,7 @@ pub async fn dashboard(
         environment: "robinhood-testnet".to_string(),
         as_of: chrono::Utc::now(),
         infrastructure_ready: ready,
+        agent,
         total_value: amount(&state, total_raw),
         available_balance: amount(&state, available_raw),
         deployed_capital: amount(&state, deployed_raw),
@@ -300,6 +306,41 @@ pub async fn dashboard(
         activity,
         wallets,
     }))
+}
+
+pub async fn launch_agent(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    let agent = state
+        .product_store
+        .launch_agent(&auth.did, &state.config.agent_strategy_version)
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(HttpResponse::Created().json(agent))
+}
+
+pub async fn update_agent_status(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+    input: web::Json<AgentStatusInput>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    if !matches!(input.status.as_str(), "running" | "paused") {
+        return Err(ApiError::BadRequest(
+            "Agent status must be running or paused.".to_string(),
+        ));
+    }
+    let agent = state
+        .product_store
+        .set_agent_status(&auth.did, path.into_inner(), &input.status)
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(HttpResponse::Ok().json(agent))
 }
 
 #[derive(Deserialize)]

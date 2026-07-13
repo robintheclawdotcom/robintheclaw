@@ -167,12 +167,40 @@ pub struct OpportunitySnapshot {
     pub observed_at: i64,
 }
 
+#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRecord {
+    pub id: Uuid,
+    pub strategy_version: String,
+    pub mode: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSnapshot {
+    #[serde(flatten)]
+    pub record: AgentRecord,
+    pub evaluations: i64,
+    pub candidates: i64,
+    pub last_evaluated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentStatusInput {
+    pub status: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardSnapshot {
     pub environment: String,
     pub as_of: DateTime<Utc>,
     pub infrastructure_ready: bool,
+    pub agent: Option<AgentSnapshot>,
     pub total_value: Amount,
     pub available_balance: Amount,
     pub deployed_capital: Amount,

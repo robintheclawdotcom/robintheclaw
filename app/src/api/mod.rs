@@ -22,6 +22,8 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
                         web::put().to(product::update_preferences),
                     )
                     .route("/dashboard", web::get().to(product::dashboard))
+                    .route("/agents", web::post().to(product::launch_agent))
+                    .route("/agents/{id}", web::put().to(product::update_agent_status))
                     .route("/activity", web::get().to(product::activity))
                     .route("/metrics", web::post().to(product::metric))
                     .route("/vaults/prepare", web::post().to(product::prepare_vault))

@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { ActivityList, EmptyState, ErrorNotice, LoadingPanel, PageHeader, SetupCard } from "../../components/app-ui";
 import { useAppApi } from "../../components/app-providers";
-import { MandateButton } from "../../components/strategy-controls";
+import { AgentButton } from "../../components/strategy-controls";
 import { formatAddress, formatAmount, formatDate } from "../../lib/format";
 
 export default function OverviewPage() {
@@ -30,7 +30,7 @@ export default function OverviewPage() {
         eyebrow="Overview"
         title="Strategy overview"
         description={`Capital, exposure, and performance · ${formatDate(dashboard.asOf)}`}
-        action={dashboard.vault ? <MandateButton dashboard={dashboard} /> : <Link className="button button-primary" href="/app/onboarding">Create vault</Link>}
+        action={dashboard.vault ? <AgentButton dashboard={dashboard} /> : <Link className="button button-primary" href="/app/onboarding">Create vault</Link>}
       />
       {!dashboard.vault && <SetupCard />}
       {dashboard.vault && <nav className="quick-actions" aria-label="Primary account actions"><Link className="button button-secondary" href="/app/strategy#fund">Add funds</Link><Link className="button button-secondary" href="/app/strategy#withdraw">Withdraw</Link><Link className="button button-secondary" href="/app/wallets">Link wallet</Link></nav>}
@@ -43,12 +43,12 @@ export default function OverviewPage() {
       <div className="dashboard-grid">
         <section className="panel strategy-summary">
           <div className="panel-heading"><div><span className="eyebrow">Strategy</span><h2>Basis strategy</h2></div><Link href="/app/strategy">Manage →</Link></div>
-          {dashboard.vault ? (
+          {dashboard.agent ? (
             <>
-              <div className="strategy-state"><span className={`status-dot ${dashboard.vault.halted ? "halted" : "running"}`} /><div><strong>{dashboard.vault.halted ? "Paused" : "Running"}</strong><small>{dashboard.vault.halted ? "New position entry is disabled." : "Monitoring qualified basis opportunities."}</small></div></div>
-              <dl className="detail-list"><div><dt>Current exposure</dt><dd>{formatAmount(dashboard.deployedCapital)}</dd></div><div><dt>Mandate capacity</dt><dd>{formatAmount(dashboard.vault.remainingCapacity)}</dd></div><div><dt>Open positions</dt><dd>{dashboard.positions.filter((position) => position.status === "open").length}</dd></div></dl>
+              <div className="strategy-state"><span className={`status-dot ${dashboard.agent.status === "paused" ? "halted" : "running"}`} /><div><strong>{dashboard.agent.status === "running" ? "Agent running" : "Agent paused"}</strong><small>{dashboard.agent.status === "running" ? "Evaluating qualified basis opportunities." : "No new evaluations are assigned."}</small></div></div>
+              <dl className="detail-list"><div><dt>Mode</dt><dd>{dashboard.agent.mode === "live" ? "Live" : "Paper"}</dd></div><div><dt>Evaluations</dt><dd>{dashboard.agent.evaluations}</dd></div><div><dt>Candidates</dt><dd>{dashboard.agent.candidates}</dd></div></dl>
             </>
-          ) : <EmptyState title="No active vault" body="Create a vault to fund and operate the strategy." />}
+          ) : dashboard.vault ? <EmptyState title="No agent" body="Launch Robin to start receiving strategy evaluations." /> : <EmptyState title="No active vault" body="Create a vault to fund and operate the strategy." />}
         </section>
         <section className="panel opportunity-panel">
           <div className="panel-heading"><div><span className="eyebrow">Market intelligence</span><h2>Current opportunities</h2></div></div>

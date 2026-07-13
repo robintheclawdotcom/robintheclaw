@@ -74,6 +74,7 @@ pub struct Config {
     pub test_asset_decimals: u8,
     pub test_claim_amount: String,
     pub alchemy_wallet_rpc_url: String,
+    pub agent_strategy_version: String,
 }
 
 impl Config {
@@ -136,6 +137,7 @@ impl Config {
                         .map(|key| format!("https://api.g.alchemy.com/v2/{key}"))
                 })
                 .unwrap_or_default(),
+            agent_strategy_version: env_or("AGENT_STRATEGY_VERSION", "basis-paper-v1"),
         }
     }
 
