@@ -15,6 +15,8 @@ type HmacSha256 = Hmac<Sha256>;
 const COMMAND_PATH: &str = "/v1/account-commands";
 const STATUS_PATH: &str = "/v1/account-command-status";
 const ROBINHOOD_CHAIN_ID: u64 = 4663;
+const EMERGENCY_HALT_CALL: &str = "0x51755334";
+const WITHDRAW_SETTLEMENT_SELECTOR: &str = "0x142834dd";
 
 #[derive(Clone)]
 pub struct CoordinatorCommandClient {
@@ -261,13 +263,7 @@ fn validate_response(
             || !response.reconciled_flat
             || response.owner_actions.is_empty()
             || response.evidence_sha256.is_none()
-            || response.owner_actions.iter().any(|action| {
-                action.chain_id != ROBINHOOD_CHAIN_ID
-                    || !valid_address(&action.from)
-                    || !valid_address(&action.to)
-                    || action.value != "0"
-                    || !valid_calldata(&action.data)
-            })
+            || !valid_owner_actions(item, &response.owner_actions)
         {
             return Err(CommandClientError::InvalidResponse);
         }
@@ -409,17 +405,29 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn valid_address(value: &str) -> bool {
-    value.len() == 42
-        && value.starts_with("0x")
-        && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn valid_calldata(value: &str) -> bool {
-    value.len() >= 10
-        && value.len().is_multiple_of(2)
-        && value.starts_with("0x")
-        && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+fn valid_owner_actions(item: &AgentCommandWorkItem, actions: &[OwnerAction]) -> bool {
+    if !(1..=2).contains(&actions.len())
+        || actions.iter().any(|action| {
+            action.chain_id != ROBINHOOD_CHAIN_ID
+                || action.from != item.robinhood_owner
+                || action.to != item.robinhood_vault
+                || action.value != "0"
+        })
+    {
+        return false;
+    }
+    let withdraw = actions.last().expect("owner action count is checked");
+    let encoded_amount = withdraw.data.strip_prefix(WITHDRAW_SETTLEMENT_SELECTOR);
+    if encoded_amount.is_none_or(|value| {
+        value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || value.bytes().all(|byte| byte == b'0')
+    }) {
+        return false;
+    }
+    actions.len() == 1 || actions[0].data == EMERGENCY_HALT_CALL
 }
 
 #[cfg(test)]
@@ -435,6 +443,8 @@ mod tests {
             agent_status: "closed".into(),
             target_agent_status: "closed".into(),
             requested_at_ms: 1,
+            robinhood_owner: "0x1111111111111111111111111111111111111111".into(),
+            robinhood_vault: "0x2222222222222222222222222222222222222222".into(),
         }
     }
 
@@ -463,13 +473,41 @@ mod tests {
             evidence_sha256: Some("a".repeat(64)),
             owner_actions: vec![OwnerAction {
                 chain_id: ROBINHOOD_CHAIN_ID,
-                from: "0x1111111111111111111111111111111111111111".into(),
-                to: "0x2222222222222222222222222222222222222222".into(),
-                data: "0x12345678".into(),
+                from: item.robinhood_owner.clone(),
+                to: item.robinhood_vault.clone(),
+                data: format!("{WITHDRAW_SETTLEMENT_SELECTOR}{:064x}", 25_000_000),
                 value: "0".into(),
             }],
         };
         assert!(validate_response(&item, &response).is_ok());
+        response.owner_actions[0].from = "0x3333333333333333333333333333333333333333".into();
+        assert!(matches!(
+            validate_response(&item, &response),
+            Err(CommandClientError::InvalidResponse)
+        ));
+        response.owner_actions[0].from = item.robinhood_owner.clone();
+        response.owner_actions[0].to = "0x4444444444444444444444444444444444444444".into();
+        assert!(matches!(
+            validate_response(&item, &response),
+            Err(CommandClientError::InvalidResponse)
+        ));
+        response.owner_actions[0].to = item.robinhood_vault.clone();
+        response.owner_actions.insert(
+            0,
+            OwnerAction {
+                chain_id: ROBINHOOD_CHAIN_ID,
+                from: item.robinhood_owner.clone(),
+                to: item.robinhood_vault.clone(),
+                data: EMERGENCY_HALT_CALL.into(),
+                value: "0".into(),
+            },
+        );
+        assert!(validate_response(&item, &response).is_ok());
+        response.owner_actions.swap(0, 1);
+        assert!(matches!(
+            validate_response(&item, &response),
+            Err(CommandClientError::InvalidResponse)
+        ));
         response.command = "pause".into();
         assert!(matches!(
             validate_response(&item, &response),

@@ -244,6 +244,9 @@ pub struct ExecutionBindingRecord {
 #[serde(rename_all = "camelCase")]
 pub struct AgentReadiness {
     pub execution_account_id: Uuid,
+    pub robinhood_owner_address: Option<String>,
+    pub robinhood_vault_address: Option<String>,
+    pub coordinator_registered: bool,
     pub lighter_linked: bool,
     pub lighter_funded: bool,
     pub robinhood_deployed: bool,
@@ -262,6 +265,10 @@ pub struct AgentReadiness {
 impl AgentReadiness {
     pub fn finalize(mut self) -> Self {
         let checks = [
+            (
+                self.coordinator_registered,
+                "coordinator_account_not_registered",
+            ),
             (self.lighter_linked, "lighter_not_linked"),
             (self.lighter_funded, "lighter_usdc_not_funded"),
             (self.robinhood_deployed, "robinhood_vault_not_deployed"),
@@ -346,6 +353,8 @@ pub struct AgentCommandWorkItem {
     pub agent_status: String,
     pub target_agent_status: String,
     pub requested_at_ms: i64,
+    pub robinhood_owner: String,
+    pub robinhood_vault: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -415,6 +424,9 @@ mod agent_tests {
     fn readiness_is_fail_closed() {
         let readiness = AgentReadiness {
             execution_account_id: Uuid::nil(),
+            robinhood_owner_address: None,
+            robinhood_vault_address: None,
+            coordinator_registered: true,
             lighter_linked: true,
             lighter_funded: true,
             robinhood_deployed: true,

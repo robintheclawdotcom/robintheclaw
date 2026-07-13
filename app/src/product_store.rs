@@ -1,3 +1,4 @@
+use crate::account_registration::{AccountRegistration, AccountRegistrationResponse};
 use crate::lighter_provisioner::PublicLink;
 use crate::product::{
     command_transition, ActivityPage, ActivityRecord, AgentCommandRecord, AgentCommandWorkItem,
@@ -27,6 +28,19 @@ pub struct ContractActivity {
     pub block_number: u64,
     pub log_index: u64,
     pub payload: serde_json::Value,
+}
+
+#[derive(sqlx::FromRow)]
+struct RegistrationCandidate {
+    execution_account_id: Uuid,
+    agent_id: Uuid,
+    strategy_version: String,
+    strategy_manifest_sha256: String,
+    lighter_account_index: i64,
+    lighter_api_key_index: i16,
+    robinhood_owner: String,
+    robinhood_vault: String,
+    robinhood_signer: String,
 }
 
 impl ProductStore {
@@ -611,6 +625,31 @@ impl ProductStore {
         .ok_or_else(|| anyhow!("execution account not found"))
     }
 
+    async fn onboarding_execution_account(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+    ) -> Result<ExecutionAccountRecord> {
+        let user = self.ensure_user(did).await?;
+        sqlx::query_as::<_, ExecutionAccountRecord>(
+            r#"
+            SELECT account.id, account.agent_id, account.strategy_version,
+                account.strategy_manifest_sha256, account.chain_id, account.status,
+                account.created_at, account.updated_at
+            FROM execution_accounts account
+            JOIN agents agent ON agent.id = account.agent_id
+            WHERE account.agent_id = $1 AND account.user_id = $2
+              AND account.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+              AND agent.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+            "#,
+        )
+        .bind(agent_id)
+        .bind(user.id)
+        .fetch_optional(self.pool()?)
+        .await?
+        .ok_or_else(|| anyhow!("agent is not accepting onboarding changes"))
+    }
+
     pub async fn request_execution_binding(
         &self,
         did: &str,
@@ -624,6 +663,7 @@ impl ProductStore {
         let owner = normalize_address(owner_address)?;
         let user = self.ensure_user(did).await?;
         let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
         let owner_is_linked = sqlx::query_scalar::<_, bool>(
             r#"
             SELECT EXISTS (
@@ -635,12 +675,29 @@ impl ProductStore {
         )
         .bind(user.id)
         .bind(&owner)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
         if !owner_is_linked {
             return Err(anyhow!("execution owner is not linked to this account"));
         }
-        let account = self.execution_account(did, agent_id).await?;
+        let account = sqlx::query_as::<_, ExecutionAccountRecord>(
+            r#"
+            SELECT account.id, account.agent_id, account.strategy_version,
+                account.strategy_manifest_sha256, account.chain_id, account.status,
+                account.created_at, account.updated_at
+            FROM execution_accounts account
+            JOIN agents agent ON agent.id = account.agent_id
+            WHERE account.agent_id = $1 AND account.user_id = $2
+              AND account.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+              AND agent.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+            FOR UPDATE OF account, agent
+            "#,
+        )
+        .bind(agent_id)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow!("agent is not accepting onboarding changes"))?;
         let binding = sqlx::query_as::<_, ExecutionBindingRecord>(
             r#"
             INSERT INTO execution_account_bindings (
@@ -665,7 +722,7 @@ impl ProductStore {
         .bind(Uuid::new_v4())
         .bind(Uuid::new_v4())
         .bind(&owner)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
         if binding.owner_address != owner {
             return Err(anyhow!("execution binding owner cannot be changed"));
@@ -674,8 +731,9 @@ impl ProductStore {
             "UPDATE agents SET status = 'awaiting_signatures', updated_at = now() WHERE id = $1 AND status IN ('setup', 'provisioning')",
         )
         .bind(agent_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(binding)
     }
 
@@ -686,7 +744,7 @@ impl ProductStore {
         request_id: Uuid,
         graph: &PublicGraphBinding,
     ) -> Result<ExecutionBindingRecord> {
-        let account = self.execution_account(did, agent_id).await?;
+        let account = self.onboarding_execution_account(did, agent_id).await?;
         if account.id != graph.execution_account_id {
             return Err(anyhow!(
                 "Robinhood provisioner returned a different execution account"
@@ -729,6 +787,13 @@ impl ProductStore {
               AND (proof_transaction_hash IS NULL OR proof_transaction_hash = $14)
               AND ($15::bigint IS NULL OR robinhood_deployment_block IS NULL OR robinhood_deployment_block = $15)
               AND status IN ('provisioning', 'awaiting_signature', 'linked')
+              AND EXISTS (
+                  SELECT 1 FROM execution_accounts account
+                  JOIN agents agent ON agent.id = account.agent_id
+                  WHERE account.id = execution_account_bindings.execution_account_id
+                    AND account.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+                    AND agent.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+              )
             RETURNING binding_ref, request_id, provider_request_id, venue, owner_address,
                 lighter_account_index, lighter_api_key_index, robinhood_vault_address,
                 robinhood_signer_address, robinhood_key_version, robinhood_factory_address,
@@ -768,7 +833,7 @@ impl ProductStore {
         transaction_hash: &str,
         graph: &PublicGraphBinding,
     ) -> Result<ExecutionBindingRecord> {
-        let account = self.execution_account(did, agent_id).await?;
+        let account = self.onboarding_execution_account(did, agent_id).await?;
         if account.id != graph.execution_account_id {
             return Err(anyhow!(
                 "Robinhood provisioner returned a different execution account"
@@ -804,6 +869,13 @@ impl ProductStore {
               AND status IN ('awaiting_signature', 'verifying', 'linked')
               AND (proof_transaction_hash IS NULL OR lower(proof_transaction_hash) = lower($12))
               AND (robinhood_deployment_block IS NULL OR robinhood_deployment_block = $14)
+              AND EXISTS (
+                  SELECT 1 FROM execution_accounts account
+                  JOIN agents agent ON agent.id = account.agent_id
+                  WHERE account.id = execution_account_bindings.execution_account_id
+                    AND account.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+                    AND agent.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+              )
             RETURNING binding_ref, request_id, provider_request_id, venue, owner_address,
                 lighter_account_index, lighter_api_key_index, robinhood_vault_address,
                 robinhood_signer_address, robinhood_key_version, robinhood_factory_address,
@@ -840,7 +912,7 @@ impl ProductStore {
         request_id: Uuid,
         link: &PublicLink,
     ) -> Result<ExecutionBindingRecord> {
-        let account = self.execution_account(did, agent_id).await?;
+        let account = self.onboarding_execution_account(did, agent_id).await?;
         if account.id != link.execution_account_id {
             return Err(anyhow!(
                 "Lighter provisioner returned a different execution account"
@@ -884,6 +956,13 @@ impl ProductStore {
               AND (lighter_account_index IS NULL OR lighter_account_index = $5)
               AND (lighter_api_key_index IS NULL OR lighter_api_key_index = $6)
               AND (public_key IS NULL OR lower(public_key) = lower($8))
+              AND EXISTS (
+                  SELECT 1 FROM execution_accounts account
+                  JOIN agents agent ON agent.id = account.agent_id
+                  WHERE account.id = execution_account_bindings.execution_account_id
+                    AND account.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+                    AND agent.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+              )
             RETURNING binding_ref, request_id, provider_request_id, venue, owner_address,
                 lighter_account_index, lighter_api_key_index, robinhood_vault_address,
                 robinhood_signer_address, robinhood_key_version, robinhood_factory_address,
@@ -917,27 +996,371 @@ impl ProductStore {
         venue: &str,
         request_id: Uuid,
     ) -> Result<ExecutionBindingRecord> {
-        let account = self.execution_account(did, agent_id).await?;
         sqlx::query_as::<_, ExecutionBindingRecord>(
             r#"
-            SELECT binding_ref, request_id, provider_request_id, venue, owner_address,
-                lighter_account_index, lighter_api_key_index, robinhood_vault_address,
-                robinhood_signer_address, robinhood_key_version, robinhood_factory_address,
-                robinhood_registry_address, robinhood_policy_digest,
-                robinhood_risk_manager_address, robinhood_spot_adapter_address,
-                robinhood_deployment_block, robinhood_deployment_action,
-                public_identifier, public_key, association_payload, proof_transaction_hash, status,
-                created_at, updated_at
-            FROM execution_account_bindings
-            WHERE execution_account_id = $1 AND venue = $2 AND request_id = $3
+            SELECT binding.binding_ref, binding.request_id, binding.provider_request_id,
+                binding.venue, binding.owner_address, binding.lighter_account_index,
+                binding.lighter_api_key_index, binding.robinhood_vault_address,
+                binding.robinhood_signer_address, binding.robinhood_key_version,
+                binding.robinhood_factory_address, binding.robinhood_registry_address,
+                binding.robinhood_policy_digest, binding.robinhood_risk_manager_address,
+                binding.robinhood_spot_adapter_address, binding.robinhood_deployment_block,
+                binding.robinhood_deployment_action, binding.public_identifier,
+                binding.public_key, binding.association_payload,
+                binding.proof_transaction_hash, binding.status,
+                binding.created_at, binding.updated_at
+            FROM execution_account_bindings binding
+            JOIN execution_accounts account ON account.id = binding.execution_account_id
+            JOIN agents agent ON agent.id = account.agent_id
+            WHERE account.agent_id = $1 AND account.user_id = $2
+              AND binding.venue = $3 AND binding.request_id = $4
+              AND account.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+              AND agent.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
             "#,
         )
-        .bind(account.id)
+        .bind(agent_id)
+        .bind(self.ensure_user(did).await?.id)
         .bind(venue)
         .bind(request_id)
         .fetch_optional(self.pool()?)
         .await?
         .ok_or_else(|| anyhow!("execution binding not found"))
+    }
+
+    pub async fn enqueue_ready_account_registrations(&self, limit: u32) -> Result<()> {
+        if limit == 0 || limit > 100 {
+            return Err(anyhow!("invalid account registration enqueue limit"));
+        }
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('coordinator_account_registration'))")
+            .execute(&mut *tx)
+            .await?;
+        let candidates = sqlx::query_as::<_, RegistrationCandidate>(
+            r#"
+            SELECT account.id AS execution_account_id, account.agent_id,
+                account.strategy_version, account.strategy_manifest_sha256,
+                lighter.lighter_account_index, lighter.lighter_api_key_index,
+                lower(robinhood.owner_address) AS robinhood_owner,
+                lower(robinhood.robinhood_vault_address) AS robinhood_vault,
+                lower(robinhood.robinhood_signer_address) AS robinhood_signer
+            FROM execution_accounts account
+            JOIN agents agent ON agent.id = account.agent_id
+            JOIN execution_account_bindings lighter
+              ON lighter.execution_account_id = account.id
+             AND lighter.venue = 'lighter' AND lighter.status = 'linked'
+            JOIN execution_account_bindings robinhood
+              ON robinhood.execution_account_id = account.id
+             AND robinhood.venue = 'robinhood' AND robinhood.status = 'linked'
+            WHERE account.status IN (
+                    'provisioning', 'awaiting_signatures', 'awaiting_funding', 'ready'
+                  )
+              AND agent.status IN (
+                    'provisioning', 'awaiting_signatures', 'awaiting_funding', 'ready'
+                  )
+            ORDER BY account.created_at, account.id
+            LIMIT $1
+            FOR UPDATE OF account, agent
+            "#,
+        )
+        .bind(i64::from(limit))
+        .fetch_all(&mut *tx)
+        .await?;
+        for candidate in candidates {
+            let mut registration = AccountRegistration {
+                execution_account_id: candidate.execution_account_id,
+                agent_id: candidate.agent_id,
+                strategy_version: candidate.strategy_version,
+                risk_version: LIVE_STRATEGY_VERSION.into(),
+                strategy_manifest_sha256: candidate.strategy_manifest_sha256,
+                lighter_account_index: candidate.lighter_account_index,
+                lighter_api_key_index: candidate.lighter_api_key_index,
+                robinhood_owner: candidate.robinhood_owner,
+                robinhood_vault: candidate.robinhood_vault,
+                robinhood_signer: candidate.robinhood_signer,
+                binding_sha256: String::new(),
+            };
+            registration.binding_sha256 = registration.calculate_binding_sha256();
+            if registration.validate().is_err() {
+                block_registration_transaction(
+                    &mut tx,
+                    registration.execution_account_id,
+                    "invalid_account_registration_binding",
+                )
+                .await?;
+                continue;
+            }
+            let identity_conflict = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1 FROM coordinator_account_registrations
+                    WHERE execution_account_id <> $1
+                      AND (
+                        agent_id = $2
+                        OR (
+                          lighter_account_index = $3
+                          AND lighter_api_key_index = $4
+                        )
+                        OR binding_sha256 = $5
+                        OR robinhood_owner IN ($6, $7, $8)
+                        OR robinhood_vault IN ($6, $7, $8)
+                        OR robinhood_signer IN ($6, $7, $8)
+                      )
+                )
+                "#,
+            )
+            .bind(registration.execution_account_id)
+            .bind(registration.agent_id)
+            .bind(registration.lighter_account_index)
+            .bind(registration.lighter_api_key_index)
+            .bind(&registration.binding_sha256)
+            .bind(&registration.robinhood_owner)
+            .bind(&registration.robinhood_vault)
+            .bind(&registration.robinhood_signer)
+            .fetch_one(&mut *tx)
+            .await?;
+            if identity_conflict {
+                block_registration_transaction(
+                    &mut tx,
+                    registration.execution_account_id,
+                    "account_registration_identity_conflict",
+                )
+                .await?;
+                continue;
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO coordinator_account_registrations (
+                    execution_account_id, agent_id, strategy_version, risk_version,
+                    strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+                    robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                ON CONFLICT (execution_account_id) DO NOTHING
+                "#,
+            )
+            .bind(registration.execution_account_id)
+            .bind(registration.agent_id)
+            .bind(&registration.strategy_version)
+            .bind(&registration.risk_version)
+            .bind(&registration.strategy_manifest_sha256)
+            .bind(registration.lighter_account_index)
+            .bind(registration.lighter_api_key_index)
+            .bind(&registration.robinhood_owner)
+            .bind(&registration.robinhood_vault)
+            .bind(&registration.robinhood_signer)
+            .bind(&registration.binding_sha256)
+            .execute(&mut *tx)
+            .await?;
+            let stored = sqlx::query_as::<_, AccountRegistration>(
+                r#"
+                SELECT execution_account_id, agent_id, strategy_version, risk_version,
+                    strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+                    robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256
+                FROM coordinator_account_registrations
+                WHERE execution_account_id = $1
+                FOR UPDATE
+                "#,
+            )
+            .bind(registration.execution_account_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if stored != registration {
+                block_registration_transaction(
+                    &mut tx,
+                    registration.execution_account_id,
+                    "account_registration_binding_changed",
+                )
+                .await?;
+                continue;
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO coordinator_account_registration_outbox (execution_account_id)
+                SELECT execution_account_id FROM coordinator_account_registrations
+                WHERE execution_account_id = $1 AND status = 'pending'
+                ON CONFLICT (execution_account_id) DO NOTHING
+                "#,
+            )
+            .bind(registration.execution_account_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE execution_accounts SET status = 'awaiting_funding', updated_at = now()
+                WHERE id = $1 AND status IN ('provisioning', 'awaiting_signatures')
+                "#,
+            )
+            .bind(registration.execution_account_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE agents SET status = 'awaiting_funding', updated_at = now()
+                WHERE id = $1 AND status IN ('provisioning', 'awaiting_signatures')
+                "#,
+            )
+            .bind(registration.agent_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn claim_account_registrations(
+        &self,
+        worker_id: &str,
+        limit: u32,
+    ) -> Result<Vec<AccountRegistration>> {
+        if worker_id.trim().is_empty() || worker_id.len() > 128 || limit == 0 || limit > 100 {
+            return Err(anyhow!("invalid account registration claim"));
+        }
+        sqlx::query_as::<_, AccountRegistration>(
+            r#"
+            WITH selected AS (
+                SELECT outbox.execution_account_id
+                FROM coordinator_account_registration_outbox outbox
+                JOIN coordinator_account_registrations registration
+                  USING (execution_account_id)
+                WHERE outbox.delivered_at IS NULL
+                  AND outbox.available_at <= now()
+                  AND (
+                    outbox.claimed_at IS NULL
+                    OR outbox.claimed_at < now() - interval '30 seconds'
+                  )
+                  AND registration.status IN ('pending', 'processing')
+                ORDER BY outbox.available_at, outbox.execution_account_id
+                LIMIT $2
+                FOR UPDATE OF outbox SKIP LOCKED
+            ), claimed AS (
+                UPDATE coordinator_account_registration_outbox outbox SET
+                    claimed_at = now(), claimed_by = $1, attempts = attempts + 1,
+                    updated_at = now()
+                FROM selected
+                WHERE outbox.execution_account_id = selected.execution_account_id
+                RETURNING outbox.execution_account_id
+            )
+            UPDATE coordinator_account_registrations registration SET
+                status = 'processing', updated_at = now()
+            FROM claimed
+            WHERE registration.execution_account_id = claimed.execution_account_id
+            RETURNING registration.execution_account_id, registration.agent_id,
+                registration.strategy_version, registration.risk_version,
+                registration.strategy_manifest_sha256, registration.lighter_account_index,
+                registration.lighter_api_key_index, registration.robinhood_owner,
+                registration.robinhood_vault, registration.robinhood_signer,
+                registration.binding_sha256
+            "#,
+        )
+        .bind(worker_id)
+        .bind(i64::from(limit))
+        .fetch_all(self.pool()?)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn complete_account_registration(
+        &self,
+        registration: &AccountRegistration,
+        response: &AccountRegistrationResponse,
+    ) -> Result<()> {
+        if !response.matches(registration) || response.account_status != "active" {
+            let reason = if response.account_status == "active" {
+                "coordinator_registration_response_mismatch"
+            } else {
+                "coordinator_registration_account_not_active"
+            };
+            self.block_account_registration(registration.execution_account_id, reason)
+                .await?;
+            return Err(anyhow!("coordinator registration response is not active"));
+        }
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE coordinator_account_registrations SET
+                status = 'registered', coordinator_account_status = $3,
+                coordinator_control_mode = $4, last_error = NULL,
+                registered_at = coalesce(registered_at, now()), updated_at = now()
+            WHERE execution_account_id = $1 AND binding_sha256 = $2
+              AND status IN ('pending', 'processing', 'registered')
+            "#,
+        )
+        .bind(registration.execution_account_id)
+        .bind(&registration.binding_sha256)
+        .bind(&response.account_status)
+        .bind(&response.control_mode)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            block_registration_transaction(
+                &mut tx,
+                registration.execution_account_id,
+                "coordinator_registration_completion_conflict",
+            )
+            .await?;
+            tx.commit().await?;
+            return Err(anyhow!("account registration completion conflict"));
+        }
+        sqlx::query(
+            r#"
+            UPDATE coordinator_account_registration_outbox SET
+                delivered_at = coalesce(delivered_at, now()), claimed_at = NULL,
+                claimed_by = NULL, updated_at = now()
+            WHERE execution_account_id = $1
+            "#,
+        )
+        .bind(registration.execution_account_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn retry_account_registration(
+        &self,
+        execution_account_id: Uuid,
+        error: &str,
+    ) -> Result<()> {
+        let message: String = error.chars().take(256).collect();
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            r#"
+            UPDATE coordinator_account_registrations SET
+                status = 'pending', last_error = $2, updated_at = now()
+            WHERE execution_account_id = $1 AND status IN ('pending', 'processing')
+            "#,
+        )
+        .bind(execution_account_id)
+        .bind(&message)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE coordinator_account_registration_outbox SET
+                available_at = now() + least(attempts, 60) * interval '1 second',
+                claimed_at = NULL, claimed_by = NULL, updated_at = now()
+            WHERE execution_account_id = $1 AND delivered_at IS NULL
+            "#,
+        )
+        .bind(execution_account_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn block_account_registration(
+        &self,
+        execution_account_id: Uuid,
+        reason: &str,
+    ) -> Result<()> {
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        block_registration_transaction(&mut tx, execution_account_id, reason).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn agent_readiness(&self, did: &str, agent_id: Uuid) -> Result<AgentReadiness> {
@@ -946,9 +1369,19 @@ impl ProductStore {
             r#"
             SELECT r.execution_account_id, r.lighter_linked, r.lighter_funded,
                 r.robinhood_deployed, r.robinhood_funded, r.user_gas_ready,
-                r.execution_gas_ready, r.policy_active, r.reconciled, r.valid_until
+                r.execution_gas_ready, r.policy_active, r.reconciled, r.valid_until,
+                coalesce(registration.robinhood_owner, robinhood.owner_address)
+                    AS robinhood_owner_address,
+                coalesce(registration.robinhood_vault, robinhood.robinhood_vault_address)
+                    AS robinhood_vault_address,
+                coalesce(registration.status = 'registered', false) AS coordinator_registered
             FROM current_agent_readiness r
             JOIN execution_accounts e ON e.id = r.execution_account_id
+            LEFT JOIN execution_account_bindings robinhood
+             ON robinhood.execution_account_id = e.id
+             AND robinhood.venue = 'robinhood' AND robinhood.status = 'linked'
+            LEFT JOIN coordinator_account_registrations registration
+              ON registration.execution_account_id = e.id
             WHERE e.agent_id = $1 AND e.user_id = $2
             "#,
         )
@@ -970,19 +1403,23 @@ impl ProductStore {
         let user = self.ensure_user(did).await?;
         let pool = self.pool()?;
         let mut tx = pool.begin().await?;
-        let (agent_status, account_id) = sqlx::query_as::<_, (String, Uuid)>(
-            r#"
-            SELECT a.status, e.id
+        let (agent_status, account_id, coordinator_registered) =
+            sqlx::query_as::<_, (String, Uuid, bool)>(
+                r#"
+            SELECT a.status, e.id,
+                coalesce(registration.status = 'registered', false)
             FROM agents a JOIN execution_accounts e ON e.agent_id = a.id
+            LEFT JOIN coordinator_account_registrations registration
+              ON registration.execution_account_id = e.id
             WHERE a.id = $1 AND a.user_id = $2 AND a.mode = 'live'
-            FOR UPDATE OF a
+            FOR UPDATE OF a, e
             "#,
-        )
-        .bind(agent_id)
-        .bind(user.id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| anyhow!("live agent not found"))?;
+            )
+            .bind(agent_id)
+            .bind(user.id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| anyhow!("live agent not found"))?;
         if let Some(existing) = sqlx::query_as::<_, AgentCommandRecord>(
             r#"
             SELECT id, agent_id, execution_account_id, idempotency_key,
@@ -1010,7 +1447,25 @@ impl ProductStore {
             r#"
             SELECT execution_account_id, lighter_linked, lighter_funded,
                 robinhood_deployed, robinhood_funded, user_gas_ready,
-                execution_gas_ready, policy_active, reconciled, valid_until
+                execution_gas_ready, policy_active, reconciled, valid_until,
+                coalesce((
+                    SELECT robinhood_owner FROM coordinator_account_registrations
+                    WHERE execution_account_id = $1
+                ), (
+                    SELECT owner_address FROM execution_account_bindings
+                    WHERE execution_account_id = $1 AND venue = 'robinhood' AND status = 'linked'
+                )) AS robinhood_owner_address,
+                coalesce((
+                    SELECT robinhood_vault FROM coordinator_account_registrations
+                    WHERE execution_account_id = $1
+                ), (
+                    SELECT robinhood_vault_address FROM execution_account_bindings
+                    WHERE execution_account_id = $1 AND venue = 'robinhood' AND status = 'linked'
+                )) AS robinhood_vault_address,
+                EXISTS (
+                    SELECT 1 FROM coordinator_account_registrations
+                    WHERE execution_account_id = $1 AND status = 'registered'
+                ) AS coordinator_registered
             FROM current_agent_readiness WHERE execution_account_id = $1
             "#,
         )
@@ -1018,12 +1473,16 @@ impl ProductStore {
         .fetch_one(&mut *tx)
         .await?
         .finalize();
-        let transition = command_transition(
-            &agent_status,
-            command,
-            readiness.can_launch,
-            readiness.reconciled,
-        );
+        let transition = if coordinator_registered {
+            command_transition(
+                &agent_status,
+                command,
+                readiness.can_launch,
+                readiness.reconciled,
+            )
+        } else {
+            Err("coordinator_account_not_registered")
+        };
         let (command_status, next_status, error_reason) = match transition {
             Ok(next) => ("pending", next, None),
             Err(reason) => ("rejected", agent_status.as_str(), Some(reason)),
@@ -1185,7 +1644,25 @@ impl ProductStore {
             r#"
             SELECT execution_account_id, lighter_linked, lighter_funded,
                 robinhood_deployed, robinhood_funded, user_gas_ready,
-                execution_gas_ready, policy_active, reconciled, valid_until
+                execution_gas_ready, policy_active, reconciled, valid_until,
+                coalesce((
+                    SELECT robinhood_owner FROM coordinator_account_registrations
+                    WHERE execution_account_id = $1
+                ), (
+                    SELECT owner_address FROM execution_account_bindings
+                    WHERE execution_account_id = $1 AND venue = 'robinhood' AND status = 'linked'
+                )) AS robinhood_owner_address,
+                coalesce((
+                    SELECT robinhood_vault FROM coordinator_account_registrations
+                    WHERE execution_account_id = $1
+                ), (
+                    SELECT robinhood_vault_address FROM execution_account_bindings
+                    WHERE execution_account_id = $1 AND venue = 'robinhood' AND status = 'linked'
+                )) AS robinhood_vault_address,
+                EXISTS (
+                    SELECT 1 FROM coordinator_account_registrations
+                    WHERE execution_account_id = $1 AND status = 'registered'
+                ) AS coordinator_registered
             FROM current_agent_readiness WHERE execution_account_id = $1
             "#,
         )
@@ -1273,6 +1750,9 @@ impl ProductStore {
                 SELECT outbox.command_id
                 FROM agent_command_outbox outbox
                 JOIN agent_commands command ON command.id = outbox.command_id
+                JOIN coordinator_account_registrations registration
+                  ON registration.execution_account_id = command.execution_account_id
+                 AND registration.status = 'registered'
                 WHERE outbox.delivered_at IS NULL
                   AND outbox.claimed_at IS NULL
                   AND outbox.available_at <= now()
@@ -1290,12 +1770,15 @@ impl ProductStore {
             UPDATE agent_commands command SET status = 'processing',
                 dispatch_requested_at = coalesce(command.dispatch_requested_at, clock_timestamp()),
                 updated_at = now()
-            FROM claimed
+            FROM claimed, coordinator_account_registrations registration
             WHERE command.id = claimed.command_id
+              AND registration.execution_account_id = command.execution_account_id
+              AND registration.status = 'registered'
             RETURNING command.id, command.agent_id, command.execution_account_id,
                 command.command, command.agent_status, command.target_agent_status,
                 (EXTRACT(EPOCH FROM command.dispatch_requested_at) * 1000)::bigint
-                    AS requested_at_ms
+                    AS requested_at_ms,
+                registration.robinhood_owner, registration.robinhood_vault
             "#,
         )
         .bind(worker_id)
@@ -1314,9 +1797,13 @@ impl ProductStore {
             SELECT command.id, command.agent_id, command.execution_account_id,
                 command.command, command.agent_status, command.target_agent_status,
                 (EXTRACT(EPOCH FROM command.dispatch_requested_at) * 1000)::bigint
-                    AS requested_at_ms
+                    AS requested_at_ms,
+                registration.robinhood_owner, registration.robinhood_vault
             FROM agent_commands command
             JOIN agent_command_outbox outbox ON outbox.command_id = command.id
+            JOIN coordinator_account_registrations registration
+              ON registration.execution_account_id = command.execution_account_id
+             AND registration.status = 'registered'
             WHERE command.status IN ('processing', 'awaiting_signature')
               AND command.dispatch_requested_at IS NOT NULL
               AND outbox.delivered_at IS NULL
@@ -1644,6 +2131,60 @@ fn validate_evidence_digest(value: &str) -> Result<()> {
         return Ok(());
     }
     Err(anyhow!("invalid command evidence digest"))
+}
+
+async fn block_registration_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    execution_account_id: Uuid,
+    reason: &str,
+) -> Result<()> {
+    if reason.trim().is_empty() || reason.len() > 128 {
+        return Err(anyhow!("invalid account registration block reason"));
+    }
+    sqlx::query(
+        r#"
+        UPDATE coordinator_account_registrations SET
+            status = 'blocked', last_error = $2, updated_at = now()
+        WHERE execution_account_id = $1
+        "#,
+    )
+    .bind(execution_account_id)
+    .bind(reason)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE execution_accounts SET status = 'blocked', updated_at = now()
+        WHERE id = $1 AND status <> 'closed'
+        "#,
+    )
+    .bind(execution_account_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE agents agent SET status = 'blocked', blocked_reason = $2, updated_at = now()
+        FROM execution_accounts account
+        WHERE account.id = $1 AND agent.id = account.agent_id
+          AND agent.status <> 'closed'
+        "#,
+    )
+    .bind(execution_account_id)
+    .bind(reason)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE coordinator_account_registration_outbox SET
+            delivered_at = coalesce(delivered_at, now()), claimed_at = NULL,
+            claimed_by = NULL, updated_at = now()
+        WHERE execution_account_id = $1
+        "#,
+    )
+    .bind(execution_account_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn insert_readiness_snapshot(

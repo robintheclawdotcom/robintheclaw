@@ -3,6 +3,7 @@
 //! The binary in `main.rs` wires these together; the modules are public so later phases (the
 //! basis-scanner service, a Postgres store, the signer and execution path) build on the same API.
 
+pub mod account_registration;
 pub mod api;
 pub mod auth;
 pub mod command_dispatcher;

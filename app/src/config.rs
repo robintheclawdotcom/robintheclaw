@@ -88,6 +88,10 @@ pub struct Config {
     pub coordinator_command_caller_id: String,
     pub coordinator_command_hmac_key: String,
     pub command_worker_id: String,
+    pub coordinator_registration_url: String,
+    pub coordinator_registration_caller_id: String,
+    pub coordinator_registration_hmac_key: String,
+    pub registration_worker_id: String,
 }
 
 impl Config {
@@ -167,6 +171,16 @@ impl Config {
             ),
             coordinator_command_hmac_key: env_or("COORDINATOR_CONTROL_HMAC_KEY", ""),
             command_worker_id: env_or("COMMAND_WORKER_ID", "product-command-worker-1"),
+            coordinator_registration_url: env_or("COORDINATOR_REGISTRATION_URL", ""),
+            coordinator_registration_caller_id: env_or(
+                "COORDINATOR_REGISTRATION_CALLER_ID",
+                "product-account-provisioner",
+            ),
+            coordinator_registration_hmac_key: env_or("COORDINATOR_REGISTRATION_HMAC_KEY", ""),
+            registration_worker_id: env_or(
+                "REGISTRATION_WORKER_ID",
+                "product-account-provisioner-1",
+            ),
         }
     }
 

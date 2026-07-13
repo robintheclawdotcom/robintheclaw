@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use app::account_registration::{self, CoordinatorRegistrationClient};
 use app::api::configure_routes;
 use app::auth::AuthService;
 use app::command_dispatcher::{self, CoordinatorCommandClient};
@@ -83,6 +84,25 @@ async fn main() -> std::io::Result<()> {
     .map_err(|error| {
         std::io::Error::other(format!("coordinator command configuration failed: {error}"))
     })?;
+    if !config.coordinator_command_hmac_key.is_empty()
+        && config
+            .coordinator_command_hmac_key
+            .eq_ignore_ascii_case(&config.coordinator_registration_hmac_key)
+    {
+        return Err(std::io::Error::other(
+            "coordinator command and registration HMAC keys must be distinct",
+        ));
+    }
+    let registration_client = CoordinatorRegistrationClient::new(
+        &config.coordinator_registration_url,
+        &config.coordinator_registration_caller_id,
+        &config.coordinator_registration_hmac_key,
+    )
+    .map_err(|error| {
+        std::io::Error::other(format!(
+            "coordinator registration configuration failed: {error}"
+        ))
+    })?;
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -106,6 +126,11 @@ async fn main() -> std::io::Result<()> {
         state.product_store.clone(),
         command_client,
         config.command_worker_id.clone(),
+    );
+    account_registration::spawn(
+        state.product_store.clone(),
+        registration_client,
+        config.registration_worker_id.clone(),
     );
 
     info!(
