@@ -1,26 +1,27 @@
 # Robin the Claw
 
-A market-neutral trading agent on Robinhood Chain, built to find durable, risk-adjusted net
-profitability in tokenized-stock basis and funding. It matches spot and perpetual exposures,
-takes no directional view on the underlying, sizes with quarter-Kelly discipline, and operates
-within on-chain limits it cannot exceed. Every trade is committed to an on-chain, recomputable
-record so measured performance can be independently inspected.
+A systematic, delta-neutral RWA trading agent for Robinhood Chain. Robin the Claw targets
+repeatable, risk-adjusted returns from tokenized-stock spot/perpetual basis and funding. It
+matches exposures rather than taking a directional view, sizes within fractional-Kelly and
+portfolio limits, and operates inside on-chain controls. Published trade records are committed in
+a recomputable form so reported results can be independently reviewed.
 
-## Why
+## Approach
 
-Most agentic trading products automate execution without establishing that the strategy has a
-durable net edge. Robin the Claw is built to do both: find profitable basis opportunities after
-fees, funding, impact, and risk, then preserve enough evidence to measure whether that edge holds.
+The system focuses on a narrow problem: identify basis and funding dislocations that remain
+attractive after fees, funding, price impact, latency, and hedging risk. A displayed spread is
+not a trade. Each candidate must clear executable-price, liquidity, sizing, and validation gates
+before it can progress.
 
-- **Edge-driven:** the agent pursues positive, risk-adjusted net returns from matched spot/perp
-  basis and funding, selected only after out-of-sample and shadow evidence.
-- **Bounded:** the agent trades only through a mandate enforced on-chain (`MandateGuard`):
+- **Research-led:** candidates require registered hypotheses, out-of-sample testing, and shadow
+  evidence before any live-capital review.
+- **Bounded:** the agent may operate only through a mandate enforced on-chain (`MandateGuard`):
   allowlisted venues and selectors, a per-window notional cap, and a kill switch. A call outside
   the mandate reverts.
-- **Measured:** every batch of trades is Merkle-rooted and anchored on-chain (`AttestationAnchor`),
-  append-only. The record makes realized performance auditable rather than anecdotal.
-- **Disciplined:** market-neutral, quarter-Kelly sizing, concentration limits, and drawdown
-  controls keep the pursuit of returns bounded by capital preservation.
+- **Verifiable:** every batch of disclosed trades is Merkle-rooted and anchored on-chain
+  (`AttestationAnchor`) in append-only sequence.
+- **Risk-managed:** market-neutral construction, fractional-Kelly sizing, concentration limits,
+  and drawdown controls prioritize capital preservation.
 
 ## Layout
 
@@ -36,9 +37,10 @@ web/         public Next.js site and verifier interface
 docs/        design + verification notes
 ```
 
-## Status
+## Current stage
 
-Early. What runs today:
+Research and testnet foundation. The components that run today are deliberately separated from
+live capital:
 
 - `contracts/` compiles and tests green (`forge test`): the mandate, custody vault, and
   attestation anchor enforce access control, cap/window, append-only, and agent-to-anchor paths.
@@ -77,11 +79,10 @@ set during its build so the public documentation and repository documentation de
 system boundaries. The [edge research methodology](docs/research-methodology.md) defines the
 model hierarchy, RWA-specific data requirements, and evidence needed to promote a strategy.
 
-## Honest scope
+## Scope and risk
 
-- The objective is positive, risk-adjusted net returns. That is a research and execution target,
-  not a guarantee: basis edges can decay as capital arrives and every candidate must earn promotion
-  with out-of-sample and shadow evidence.
+- No live performance or durable edge is claimed. Basis opportunities can decay as capital enters,
+  and every candidate must earn promotion through out-of-sample and shadow evidence.
 - Market-neutral is not risk-free: basis can widen before it converges, legs can fill unevenly,
   and funding can invert. Position sizing and the mandate cap exist to bound those, not remove them.
 - Tokenized stocks on Robinhood Chain are geo-restricted and are not available to U.S. persons.

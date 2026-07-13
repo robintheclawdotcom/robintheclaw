@@ -2,10 +2,10 @@
 
 ## Purpose and scope
 
-The system is built to produce durable, risk-adjusted net returns from a market-neutral trade
-shape: buy one exposure and short the matched exposure when a measured spot/perpetual basis
-survives costs and risk limits. The implementation is split so an observation cannot become an
-execution merely because a process has a key.
+The architecture supports systematic, market-neutral basis trading: buy one exposure and short
+the matched exposure only when an observed spot/perpetual dislocation survives costs and risk
+limits. Components are separated so an observation cannot become an execution merely because a
+process has a key.
 
 ## Components
 

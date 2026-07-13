@@ -1,10 +1,10 @@
 # engine
 
-The decision engine for a profitability-driven trading agent. It turns a cross-venue basis
-observation (Uniswap v4 spot vs Lighter perp) into a sized, delta-neutral order plan only when
-the modeled return survives portfolio risk limits. Pure logic: no chain client, no network, no
-database. The same inputs always produce the same plan, so every decision is reproducible and can
-be replayed against the on-chain record.
+The deterministic decision engine for Robin the Claw. It turns a cross-venue basis observation
+(Uniswap v4 spot versus Lighter perp) into a sized, delta-neutral order plan only when modeled
+economics clear portfolio risk limits. Pure logic: no chain client, network, or database. The same
+inputs always produce the same plan, so every decision is reproducible and can be replayed against
+the on-chain record.
 
 ```bash
 cargo test

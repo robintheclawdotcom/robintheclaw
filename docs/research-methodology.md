@@ -1,14 +1,14 @@
 # Edge research methodology
 
-## Objective
+## Mandate
 
-Robin the Claw is being built to find and operate durable, risk-adjusted net-profit opportunities
-in tokenized-asset spot/perpetual basis and funding. The return objective is explicit: a strategy
-must demonstrate positive performance after fees, funding, gas, impact, latency, failed hedges,
-and capital constraints.
+Robin the Claw researches systematic, market-neutral opportunities in tokenized-asset
+spot/perpetual basis and funding. A strategy must demonstrate positive net economics after fees,
+funding, gas, impact, latency, failed hedges, and capital constraints before it can be considered
+for live capital.
 
-The methodology does not assume that a measured spread is an opportunity. It treats a candidate as
-unproven until it survives the model, execution, and validation gates below.
+A measured spread is not an opportunity. Every candidate remains unproven until it clears the
+model, execution, and validation gates below.
 
 ## Research principles
 
@@ -19,23 +19,23 @@ unproven until it survives the model, execution, and validation gates below.
   cross-venue microstructure effect.
 - **Net economics, not displayed spread.** Every candidate is evaluated against the full cost of
   entering, hedging, maintaining, and unwinding both legs.
-- **Evidence before capital.** An unexplained anomaly can be researched with a small shadow
-  allocation. It cannot graduate into live capital merely because a backtest looks attractive.
+- **Evidence before capital.** An unexplained anomaly can enter shadow evaluation. It cannot
+  graduate to live capital merely because a backtest looks attractive.
 - **Portfolio context is mandatory.** Position sizing, concentration, factor exposure, and
   correlated failure modes are evaluated across the book, not trade by trade.
 
-## Fast decision loop
+## Decision loop
 
-The execution-time loop is private, deterministic, and deliberately narrow. It consumes
-venue-native events and produces a trade, hedge, decline, or unwind decision. An LLM is not in
-this path and has no signing access.
+The planned execution-time loop is private, deterministic, and deliberately narrow. It will
+consume venue-native events and emit an approved intent, hedge instruction, decline, or unwind
+instruction. An LLM is not in this path and has no signing access.
 
 ### Spread and convergence models
 
-For each registered pair, the research pipeline tests cointegration between realizable spot value
-and the matched perpetual. A rolling Ornstein-Uhlenbeck residual model estimates deviation,
-half-life, and expected convergence. A Kalman filter may adapt the hedge ratio where the static
-relationship drifts.
+For each registered pair, the planned research pipeline will test cointegration between realizable
+spot value and the matched perpetual. A rolling Ornstein-Uhlenbeck residual model will estimate
+deviation, half-life, and expected convergence. A Kalman filter may adapt the hedge ratio where the
+static relationship drifts.
 
 A candidate is rejected when stationarity, convergence, capacity, or net economics cannot be
 demonstrated out of sample. The model must use executable bid/ask and depth, not mid-price spreads.
@@ -49,14 +49,14 @@ conditions decline new risk and can trigger an unwind.
 
 ### Portfolio and sizing model
 
-The fast loop uses robust fractional Kelly only after a positive lower-confidence net-return
-estimate. It is constrained by shrinkage covariance, concentration caps, factor limits, gross and
-net exposure limits, liquidity capacity, and drawdown state. Quarter-Kelly is a ceiling, not a
-default allocation.
+The future fast loop will use robust fractional Kelly only after a positive lower-confidence
+net-return estimate. It will be constrained by shrinkage covariance, concentration caps, factor
+limits, gross and net exposure limits, liquidity capacity, and drawdown state. Quarter-Kelly is a
+ceiling, not a default allocation.
 
 ## RWA-specific inputs
 
-The private event store is designed to compound into a proprietary dataset. Required sources are:
+The private event store is designed to compound into a proprietary dataset. Target sources are:
 
 - L2 order-book deltas, trades, mark/index prices, funding, open interest, and source health.
 - Chain blocks, reorg state, gas, pool state, sequencer events, and oracle updates.
@@ -81,12 +81,12 @@ counterparty risks, and operational controls are documented. No routing mechanis
 typed execution intent and its asset, route, recipient, maximum-input, minimum-output, deadline,
 and slippage constraints.
 
-## Slow research loop
+## Research loop
 
-Large models belong in the private slow loop. They can parse issuer documents, normalize event
-schemas, generate candidate hypotheses, inspect market structure, propose tests, and perform
-post-trade forensics. They cannot sign, submit, amend, or cancel orders and cannot alter a live
-threshold.
+Large models belong in the planned private research loop. They may parse issuer documents,
+normalize event schemas, generate candidate hypotheses, inspect market structure, propose tests,
+and perform post-trade forensics. They cannot sign, submit, amend, or cancel orders and cannot
+alter a live threshold.
 
 The slow loop submits a versioned hypothesis to the research registry. It then follows a fixed
 path: data snapshot, embargoed backtest, multiple-testing adjustment, walk-forward evaluation,
@@ -95,7 +95,7 @@ pipeline and retiring decayed signals, not allowing an LLM to learn directly fro
 
 ## Statistical hygiene
 
-RWA histories are short and sparse. The research process therefore requires:
+RWA histories are short and sparse. Promotion therefore requires:
 
 1. A registered hypothesis and parameters before evaluation.
 2. Immutable source data and a versioned dataset manifest.
@@ -110,8 +110,8 @@ RWA histories are short and sparse. The research process therefore requires:
 
 | Capability | Status | Promotion condition |
 | --- | --- | --- |
-| Private Lighter and Robinhood Chain capture | Implemented | R2-backed worker running continuously. |
-| Immutable raw archive and normalized event schema | Implemented | Archive credentials and worker deployment configured. |
+| Private Lighter and Robinhood Chain capture | Code complete | R2-backed worker deployed and running continuously. |
+| Immutable raw archive and normalized event schema | Code complete | Archive credentials and worker deployment configured. |
 | Spot executable quote adapter and NAV/redemption feeds | Planned | Venue schemas, freshness rules, and reconciliation tests. |
 | Cointegration, OU, and Kalman research models | Planned | Frozen datasets and out-of-sample calibration. |
 | HMM regime veto | Planned | Regime labels, confusion analysis, and stale/unknown fail-closed tests. |
@@ -120,5 +120,5 @@ RWA histories are short and sparse. The research process therefore requires:
 | LLM slow research loop | Planned | Isolated credentials, immutable experiment logs, and no execution authority. |
 | Live execution | Blocked | All venue, research, contract-audit, and operational gates pass. |
 
-The methodology is a build specification, not evidence that any model is currently profitable.
-Only complete, versioned results can establish that claim.
+This methodology defines the research standard. It does not assert live performance or a proven
+edge; only complete, versioned results can support either conclusion.

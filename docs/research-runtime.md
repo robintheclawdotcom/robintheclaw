@@ -2,10 +2,10 @@
 
 ## Purpose
 
-`runtime/` is the private, continuous data-capture and shadow-execution runtime. Its purpose is
-to determine whether registered hypotheses can produce durable, net-of-cost profitability across
-market regimes. It collects point-in-time market evidence and evaluates those hypotheses. It
-cannot sign orders, hold funds, call a venue write API, or connect to a wallet.
+`runtime/` is the private, continuous data-capture and shadow-execution runtime. It determines
+whether registered hypotheses retain positive net economics across market regimes after realistic
+costs and execution assumptions. It collects point-in-time market evidence and evaluates those
+hypotheses. It cannot sign orders, hold funds, call a venue write API, or connect to a wallet.
 
 The public website is not part of this runtime. It receives no research database connection,
 object-storage credential, venue credential, or strategy configuration.
