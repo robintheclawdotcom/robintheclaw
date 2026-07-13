@@ -22,6 +22,7 @@ type AccountBinding struct {
 	ExecutionAccountID string           `json:"executionAccountId"`
 	ReadinessAccountID string           `json:"readinessExecutionAccountId,omitempty"`
 	PolicyActive       bool             `json:"policyActive"`
+	StrategyVersion    string           `json:"strategyVersion"`
 	Lighter            LighterBinding   `json:"lighter"`
 	Robinhood          RobinhoodBinding `json:"robinhood"`
 }
@@ -68,7 +69,7 @@ type LighterObservation struct {
 }
 
 func (o LighterObservation) Healthy() bool {
-	return o.AccountIndex > 0 && o.APIKeyIndex >= 2 && o.APIKeyIndex <= 254 &&
+	return o.AccountIndex > 0 && o.APIKeyIndex >= 4 && o.APIKeyIndex <= 254 &&
 		o.Nonce == o.ExpectedNonce && o.NoUnknownOrders && o.NoUnknownPositions &&
 		o.CollateralReady && o.RESTReconstructed &&
 		o.MaintenanceMarginRatioMicros >= 2_000_000 && fresh(o.ObservedAt, time.Now())

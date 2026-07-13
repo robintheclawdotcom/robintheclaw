@@ -37,13 +37,14 @@ type accountMinimums struct {
 }
 
 type registeredAccount struct {
-	id           string
-	lighterIndex uint64
-	apiKeyIndex  uint8
-	owner        string
-	vault        string
-	signer       string
-	policyActive bool
+	id              string
+	lighterIndex    uint64
+	apiKeyIndex     uint8
+	owner           string
+	vault           string
+	signer          string
+	policyActive    bool
+	strategyVersion string
 }
 
 type coordinatorPolicyState struct {
@@ -59,9 +60,10 @@ type coordinatorPolicyState struct {
 	exitReady        sql.NullBool
 	alertingReady    sql.NullBool
 	rotationReady    sql.NullBool
+	lighterMarketID  sql.NullInt64
 }
 
-func (value coordinatorPolicyState) Active(expectedManifest string) bool {
+func (value coordinatorPolicyState) Active(expectedManifest string, expectedMarketID uint16) bool {
 	return value.globalMode.Valid && value.globalMode.String == "ACTIVE" &&
 		value.strategyMode.Valid && value.strategyMode.String == "ACTIVE" &&
 		value.accountMode.Valid && value.accountMode.String == "ACTIVE" &&
@@ -73,7 +75,8 @@ func (value coordinatorPolicyState) Active(expectedManifest string) bool {
 		value.reconciled.Valid && value.reconciled.Bool &&
 		value.exitReady.Valid && value.exitReady.Bool &&
 		value.alertingReady.Valid && value.alertingReady.Bool &&
-		value.rotationReady.Valid && value.rotationReady.Bool
+		value.rotationReady.Valid && value.rotationReady.Bool &&
+		value.lighterMarketID.Valid && value.lighterMarketID.Int64 == int64(expectedMarketID)
 }
 
 func NewPGAccountSource(ctx context.Context, config Config) (*PGAccountSource, error) {
@@ -180,6 +183,7 @@ func (value *PGAccountSource) List(ctx context.Context) (AccountDiscovery, error
 			ExecutionAccountID: account.id,
 			ReadinessAccountID: account.id,
 			PolicyActive:       account.policyActive,
+			StrategyVersion:    account.strategyVersion,
 			Lighter: LighterBinding{
 				AccountIndex:         account.lighterIndex,
 				APIKeyIndex:          account.apiKeyIndex,
@@ -200,19 +204,26 @@ func (value *PGAccountSource) registered(ctx context.Context) ([]registeredAccou
 		       registration.robinhood_owner,
 		       registration.robinhood_vault,
 		       registration.robinhood_signer,
+		       registration.strategy_version,
 		       registration.strategy_manifest_sha256,
 		       global.mode, strategy.mode, account_control.mode,
 		       strategy.strategy_manifest_sha256, account.strategy_manifest_sha256,
 		       readiness.venue_approved, readiness.oracle_healthy,
 		       readiness.sequencer_healthy, readiness.reconciliation_ready,
 		       readiness.exit_authority_ready, readiness.alerting_ready,
-		       readiness.safe_rotation_ready
+		       readiness.safe_rotation_ready, market.lighter_market_index
 		FROM execution_account_registrations AS registration
 		JOIN execution_accounts AS account USING (execution_account_id)
 		LEFT JOIN execution_account_control AS account_control USING (execution_account_id)
 		LEFT JOIN execution_account_readiness AS readiness USING (execution_account_id)
 		LEFT JOIN execution_strategy_control AS strategy USING (strategy_version)
 		LEFT JOIN execution_control AS global ON global.singleton
+		LEFT JOIN (
+			SELECT MIN(lighter_market_index) AS lighter_market_index
+			FROM execution_market_configs
+			WHERE symbol = 'AAPL' AND valid_from <= now() AND valid_until > now()
+			HAVING COUNT(*) = 1
+		) AS market ON TRUE
 		WHERE account.status = 'active'
 		ORDER BY registration.execution_account_id`)
 	if err != nil {
@@ -226,15 +237,15 @@ func (value *PGAccountSource) registered(ctx context.Context) ([]registeredAccou
 		var policy coordinatorPolicyState
 		if err := rows.Scan(
 			&account.id, &account.lighterIndex, &account.apiKeyIndex, &account.owner, &account.vault, &account.signer,
-			&manifest, &policy.globalMode, &policy.strategyMode, &policy.accountMode,
+			&account.strategyVersion, &manifest, &policy.globalMode, &policy.strategyMode, &policy.accountMode,
 			&policy.strategyManifest, &policy.accountManifest, &policy.venueApproved,
 			&policy.oracleHealthy, &policy.sequencerHealthy, &policy.reconciled,
-			&policy.exitReady, &policy.alertingReady, &policy.rotationReady,
+			&policy.exitReady, &policy.alertingReady, &policy.rotationReady, &policy.lighterMarketID,
 		); err != nil {
 			return nil, errors.New("read active execution account")
 		}
-		account.policyActive = policy.Active(manifest)
-		if !validUUID(account.id) || account.lighterIndex == 0 || account.apiKeyIndex < 2 || account.apiKeyIndex > 254 ||
+		account.policyActive = policy.Active(manifest, value.marketID)
+		if !validUUID(account.id) || account.lighterIndex == 0 || account.apiKeyIndex < 4 || account.apiKeyIndex > 254 ||
 			!validAddress(account.owner) || !validAddress(account.vault) || !validAddress(account.signer) {
 			return nil, errors.New("authoritative execution account is invalid")
 		}

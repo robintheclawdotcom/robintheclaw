@@ -8,6 +8,7 @@ import (
 func TestEnabledConfigLoadsDirectlyFromEnvironment(t *testing.T) {
 	values := map[string]string{
 		"ACCOUNT_PUBLISHER_ENABLED":                        "true",
+		"ACCOUNT_PUBLISHER_ENVIRONMENT":                    "production",
 		"ACCOUNT_PUBLISHER_COORDINATOR_DATABASE_URL":       "postgres://coordinator.invalid/read-only",
 		"ACCOUNT_PUBLISHER_ROBINHOOD_DATABASE_URL":         "postgres://custody.invalid/read-only",
 		"ACCOUNT_PUBLISHER_ROBINHOOD_JOURNAL_DATABASE_URL": "postgres://journal.invalid/read-only",
@@ -77,6 +78,7 @@ func validTestConfig() Config {
 		MinimumSettlementRaw:        "25000000",
 		MinimumOwnerGasRaw:          "1",
 		MinimumSignerGasRaw:         "1",
+		Environment:                 "production",
 		LighterBridge:               EndpointConfig{URL: "https://lighter.internal", Caller: "account-publisher", HMACKey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 		Coordinator:                 EndpointConfig{URL: "https://coordinator.internal", Caller: "account-publisher", HMACKey: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
 		Application:                 EndpointConfig{URL: "https://application.internal", Caller: "account-publisher", HMACKey: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
@@ -87,6 +89,7 @@ func configTestAccount(id string, lighterIndex uint64, vault string) AccountBind
 	return AccountBinding{
 		ExecutionAccountID: id,
 		ReadinessAccountID: id,
+		StrategyVersion:    "basis-aapl-v1",
 		Lighter:            LighterBinding{AccountIndex: lighterIndex, APIKeyIndex: 4, MarketID: 5, MinimumCollateralRaw: "50"},
 		Robinhood: RobinhoodBinding{
 			Registry: "0x3333333333333333333333333333333333333333", Factory: "0x4444444444444444444444444444444444444444",

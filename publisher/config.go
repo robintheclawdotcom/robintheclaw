@@ -26,6 +26,7 @@ type Config struct {
 	MinimumSettlementRaw        string
 	MinimumOwnerGasRaw          string
 	MinimumSignerGasRaw         string
+	Environment                 string
 }
 
 type EndpointConfig struct {
@@ -79,6 +80,7 @@ func LoadConfig() (Config, error) {
 		MinimumSettlementRaw: os.Getenv("ACCOUNT_PUBLISHER_MINIMUM_SETTLEMENT_RAW"),
 		MinimumOwnerGasRaw:   os.Getenv("ACCOUNT_PUBLISHER_MINIMUM_OWNER_GAS_RAW"),
 		MinimumSignerGasRaw:  os.Getenv("ACCOUNT_PUBLISHER_MINIMUM_SIGNER_GAS_RAW"),
+		Environment:          os.Getenv("ACCOUNT_PUBLISHER_ENVIRONMENT"),
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -89,6 +91,9 @@ func LoadConfig() (Config, error) {
 func validateConfig(config Config) error {
 	if config.CoordinatorDatabaseURL == "" || config.RobinhoodDatabaseURL == "" || config.RobinhoodJournalDatabaseURL == "" {
 		return errors.New("publisher read-only database URLs are required")
+	}
+	if !validMetricLabel(config.Environment) {
+		return errors.New("ACCOUNT_PUBLISHER_ENVIRONMENT must be a lowercase environment label")
 	}
 	if config.LighterMarketID == 0 || !decimalAtLeast(config.MinimumCollateralRaw, "50") ||
 		!decimalAtLeast(config.MinimumSettlementRaw, "25000000") ||

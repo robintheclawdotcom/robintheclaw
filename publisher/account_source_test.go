@@ -20,23 +20,32 @@ func TestCoordinatorPolicyRequiresEveryControlAndReadinessGate(t *testing.T) {
 		exitReady:        sql.NullBool{Bool: true, Valid: true},
 		alertingReady:    sql.NullBool{Bool: true, Valid: true},
 		rotationReady:    sql.NullBool{Bool: true, Valid: true},
+		lighterMarketID:  sql.NullInt64{Int64: 101, Valid: true},
 	}
-	if !active.Active(manifest) {
+	if !active.Active(manifest, 101) {
 		t.Fatal("fully active coordinator policy was rejected")
 	}
 	controlFalse := active
 	controlFalse.strategyMode.String = "REDUCE_ONLY"
-	if controlFalse.Active(manifest) {
+	if controlFalse.Active(manifest, 101) {
 		t.Fatal("non-active strategy control enabled policy")
 	}
 	gateFalse := active
 	gateFalse.oracleHealthy.Bool = false
-	if gateFalse.Active(manifest) {
+	if gateFalse.Active(manifest, 101) {
 		t.Fatal("false readiness gate enabled policy")
 	}
 	missing := active
 	missing.accountMode.Valid = false
-	if missing.Active(manifest) {
+	if missing.Active(manifest, 101) {
 		t.Fatal("missing account control enabled policy")
+	}
+	if active.Active(manifest, 102) {
+		t.Fatal("mismatched canonical Lighter market enabled policy")
+	}
+	missingMarket := active
+	missingMarket.lighterMarketID.Valid = false
+	if missingMarket.Active(manifest, 101) {
+		t.Fatal("missing canonical Lighter market enabled policy")
 	}
 }

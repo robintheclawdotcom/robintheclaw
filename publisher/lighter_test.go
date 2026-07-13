@@ -43,6 +43,17 @@ func TestLighterBridgeRejectsCredentialAccountSubstitution(t *testing.T) {
 	}
 }
 
+func TestLighterBridgeRejectsReservedAPIKeyIndexes(t *testing.T) {
+	client, binding, closeServer := lighterBridgeFixture(t, func(_ map[string]any, _ *lighterBridgeResponse) {})
+	defer closeServer()
+	for _, index := range []uint8{0, 1, 2, 3} {
+		binding.APIKeyIndex = index
+		if _, err := client.Collect(context.Background(), "10000000-0000-4000-8000-000000000001", binding); err == nil {
+			t.Fatalf("reserved API key index %d was accepted", index)
+		}
+	}
+}
+
 func lighterBridgeFixture(t *testing.T, mutate func(map[string]any, *lighterBridgeResponse)) (*LighterClient, LighterBinding, func()) {
 	t.Helper()
 	key := strings.Repeat("42", 32)

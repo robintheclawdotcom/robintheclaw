@@ -25,6 +25,7 @@ type Service struct {
 	sequences   map[string]int64
 	ready       atomic.Bool
 	lastSuccess atomic.Int64
+	metrics     *publisherMetrics
 }
 
 type lighterCollector interface {
@@ -40,8 +41,9 @@ type snapshotClient interface {
 }
 
 func NewService(config Config, client *http.Client) (*Service, error) {
+	metrics := newPublisherMetrics(config.Environment)
 	if !config.Enabled {
-		return &Service{config: config}, nil
+		return &Service{config: config, metrics: metrics}, nil
 	}
 	startup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -80,6 +82,7 @@ func NewService(config Config, client *http.Client) (*Service, error) {
 	return &Service{
 		config: config, accounts: accounts, lighter: lighter, robinhood: robinhood, coordinator: coordinator,
 		application: application, session: hex.EncodeToString(sessionBytes), sequences: make(map[string]int64),
+		metrics: metrics,
 	}, nil
 }
 
@@ -119,6 +122,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		s.ready.Store(false)
 		return err
 	}
+	s.metrics.BeginCycle(discovery.Accounts)
 	if len(discovery.Accounts) == 0 {
 		s.ready.Store(false)
 		return errors.New("no active execution accounts")
@@ -147,6 +151,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		lighterResult := <-lighterResultCh
 		robinhoodResult := <-robinhoodResultCh
 		if lighterResult.err != nil {
+			s.metrics.SourceFailure(account.ExecutionAccountID, "lighter")
 			allSucceeded = false
 			if errors.Is(lighterResult.err, ErrRateLimited) {
 				cancel()
@@ -160,6 +165,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			continue
 		}
 		if robinhoodResult.err != nil {
+			s.metrics.SourceFailure(account.ExecutionAccountID, "robinhood")
 			allSucceeded = false
 			if errors.Is(robinhoodResult.err, ErrRateLimited) {
 				cancel()
@@ -172,6 +178,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			cancel()
 			continue
 		}
+		s.metrics.Observe(account, lighterResult.observation, robinhoodResult.observation)
 		if err := s.publishAccount(accountCtx, account, lighterResult.observation, robinhoodResult.observation); err != nil {
 			allSucceeded = false
 			if errors.Is(err, ErrRateLimited) {
@@ -289,6 +296,7 @@ func (s *Service) nextSequence(key string) int64 {
 
 func (s *Service) HealthHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", s.metrics.Handler())
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{"status":"ok"}`))

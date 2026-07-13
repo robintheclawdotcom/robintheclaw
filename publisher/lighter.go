@@ -49,7 +49,7 @@ func NewLighterClient(endpoint EndpointConfig, client *http.Client) (*LighterCli
 }
 
 func (value *LighterClient) Collect(ctx context.Context, executionID string, binding LighterBinding) (LighterObservation, error) {
-	if !validExecutionID(executionID) || binding.AccountIndex == 0 || binding.APIKeyIndex < 2 || binding.APIKeyIndex > 254 {
+	if !validExecutionID(executionID) || binding.AccountIndex == 0 || binding.APIKeyIndex < 4 || binding.APIKeyIndex > 254 {
 		return LighterObservation{}, errors.New("invalid Lighter binding")
 	}
 	body, err := json.Marshal(lighterBridgeRequest{ExecutionAccountID: executionID})

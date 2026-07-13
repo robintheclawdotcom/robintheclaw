@@ -82,6 +82,7 @@ func TestRunOnceDiscoversAndRemovesAccountsWithoutRestart(t *testing.T) {
 	service := &Service{
 		config: Config{Enabled: true}, accounts: source, lighter: lighter, robinhood: &healthyRobinhoodCollector{},
 		coordinator: coordinator, application: application, session: "test", sequences: make(map[string]int64),
+		metrics: newPublisherMetrics("test"),
 	}
 	for index := 0; index < 3; index++ {
 		if err := service.RunOnce(context.Background()); err != nil {
