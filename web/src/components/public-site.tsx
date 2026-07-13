@@ -13,17 +13,15 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
       <>
         <p>
           Robin the Claw is an autonomous delta-neutral trading stack for tokenized markets on
-          Robinhood Chain: venue-native data, adaptive models, matched execution, and a durable
-          operating layer for autonomous strategies.
+          Robinhood Chain: no-code strategy access, venue-native data, adaptive models, matched
+          execution, and a durable operating layer for autonomous strategies.
         </p>
         <h2>From market structure to a trade plan</h2>
         <p>
           It turns continuous market and chain data into convergence research, regime-aware trade
           planning, and coordinated spot and perp legs.
         </p>
-        <div className="note">
-          Onchain records make each strategy run easier to inspect and improve over time.
-        </div>
+        <div className="note">Email or passkey opens a personal strategy account, linked wallets, and one dashboard.</div>
       </>
     ),
   },
@@ -330,7 +328,7 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
                 <div>
                   <h1><span>✻</span> Robin the Claw</h1>
                   <p>Delta-neutral market intelligence and execution for tokenized markets.</p>
-                  <small>status: market intelligence → testnet foundation → execution stack</small>
+                  <small>status: market intelligence → personal vaults → execution stack</small>
                 </div>
               </section>
 
@@ -339,7 +337,8 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
                 <p>
                   Robin the Claw is an autonomous trading stack for tokenized markets. It captures
                   venue-native data, finds cross-venue basis, develops adaptive models, sizes a
-                  position, and prepares matched spot and perp legs for execution.
+                  position, and prepares matched spot and perp legs for execution. Users access it
+                  through a no-code strategy account with a personal vault and unified dashboard.
                 </p>
               </section>
 
@@ -357,9 +356,9 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
                 <Prompt>robin testnet --status</Prompt>
                 <div className="proof-panel">
                   <div>
-                    <span className="proof-label">testnet foundation</span>
-                    <strong>onchain stack connected · sequence {testnetProof.sequence}</strong>
-                    <p>Custody, strategy roles, and the record pipeline are live on Robinhood Chain testnet.</p>
+                    <span className="proof-label">application testnet</span>
+                    <strong>personal vault stack live · sequence {testnetProof.sequence}</strong>
+                    <p>Personal vaults, account services, and the record pipeline are connected on Robinhood Chain testnet.</p>
                   </div>
                   <a href={`${testnetProof.explorer}/tx/${testnetProof.transaction}`} target="_blank" rel="noreferrer">
                     inspect onchain ↗
@@ -371,6 +370,7 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
                 <Prompt>robin --components</Prompt>
                 <div className="cards">
                   <article><span>[ signal ]</span><h2>Market intelligence</h2><p>Discovers v4 pools, compares spot with live perps, and maps the basis across tokenized markets.</p></article>
+                  <article><span>[ app ]</span><h2>No-code strategy access</h2><p>Opens a personal strategy account, linked wallets, real balances, controls, and activity in one dashboard.</p></article>
                   <article><span>[ engine ]</span><h2>Trade planning</h2><p>Combines spread quality, Kelly sizing, portfolio awareness, and neutrality into a coordinated plan.</p></article>
                   <article><span>[ research ]</span><h2>Adaptive research</h2><p>Builds a compounding event store for convergence, regime, hedge-ratio, and routing models.</p></article>
                   <article><span>[ contracts ]</span><h2>Execution foundation</h2><p>Custody, delegated execution, and venue policy establish the base for the Robin execution layer.</p></article>
@@ -395,7 +395,7 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
               </section>
 
               <section className="docs-cta">
-                <div><h2>Explore the research and execution stack</h2><p>Market intelligence, adaptive models, strategy planning, contracts, and operations.</p></div>
+                <div><h2>Explore Robin</h2><p>No-code strategy access, market intelligence, adaptive models, trade planning, contracts, and operations.</p></div>
                 <div className="docs-cta-actions"><a href="/app">open app →</a><a className="docs-link" href="/docs">docs</a></div>
               </section>
             </div>

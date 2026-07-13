@@ -32,4 +32,8 @@ Privy signer -> EIP-7702 strategy account -> PersonalStrategyVaultFactory
 
 The private application API uses these addresses to predict vaults, build onboarding batches,
 verify factory receipts, read balances and mandate state, and restore interrupted onboarding.
-Alchemy sponsorship remains disabled until the launch gas policy is attached.
+
+The application service layer is live on paid Render resources: the public Next.js service talks
+to a private Rust API backed by the dedicated `robin-app` PostgreSQL database. Robinhood Chain
+reads use Alchemy PAYG with bounded 10,000-block activity indexing. The final activation step for
+one-click onboarding is attaching and enabling the restricted Alchemy sponsorship policy.

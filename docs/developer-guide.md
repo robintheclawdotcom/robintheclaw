@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Node.js 20 or newer for `signal/`, `verifier/`, and `web/`.
+- Node.js 24 or newer for `web/`; Node.js 20 or newer for `signal/` and `verifier/`.
 - Rust stable for `engine/` and `app/`.
 - Rust stable for the private `runtime/` collector.
 - Foundry with Solidity 0.8.28 for `contracts/`.
@@ -105,6 +105,11 @@ Alchemy Wallet API traffic uses `POST /api/wallet`. This authenticated proxy acc
 prepare, submit, and status methods used by the application, verifies each prepared batch against
 the user's server-side account and vault state, injects the sponsorship policy, rate-limits the
 session, and forwards the request without exposing provider credentials to the browser.
+
+Runtime RPC access uses the Alchemy app API key. Policy provisioning is a separate administrative
+operation and requires an Alchemy access key with Gas Manager Read & Write plus the Alchemy app ID.
+After creating and activating the policy, place only its policy ID in `ALCHEMY_POLICY_ID` on the
+web and API services.
 
 ## Record integrity
 

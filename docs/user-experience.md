@@ -37,6 +37,9 @@ connected wallet signs an approval-and-deposit batch; it never changes the vault
 refreshes wallet ownership directly from Privy and rejects an address already attached to another
 Robin user. Recovery sends the user back to the existing account instead of merging identities.
 
+Privy owns the embedded and external-wallet connection experience. Launch does not require a
+separate WalletConnect project or project ID.
+
 Before first funding, the account must have a verified email or passkey. Embedded wallets cannot
 be unlinked from the application. External wallets can be unlinked; if the active funding wallet
 is removed, the preference returns to the embedded wallet.

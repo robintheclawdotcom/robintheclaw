@@ -47,18 +47,32 @@ credentials.
 sponsorship policy, and confirmed application contract addresses through managed settings. The
 product database is separate from `robin-research`.
 
+Current testnet resources:
+
+| Resource | Plan | Role |
+| --- | --- | --- |
+| `robintheclaw` | Starter | Public website and authenticated application |
+| `robin-api` | Starter | Private Rust application API and activity indexer |
+| `robin-app` | Basic 1 GB | Dedicated application PostgreSQL database |
+
+All three application resources run in the same Render region. The API and database are private.
+
 Before enabling onboarding:
 
 1. Confirm the chain ID, runtime bytecode, factory/faucet wiring, and addresses in
    `deployments/ux-testnet.json`.
 2. Create an Alchemy sponsorship policy limited to those contracts, child vaults and guards, the
    `claim`, `approve`, `createVault`, `deposit`, `withdraw`, and `setHalted` selectors, with
-   per-account and global spend quotas.
+   per-account and global quotas. The Gas Manager Admin API requires an Alchemy access key with
+   Gas Manager Read & Write and the app ID; the ordinary Node API key cannot create or activate a
+   policy. Store only the resulting policy ID in the web and API service settings.
 3. Configure all `sync: false` application values in Render. Use a provider RPC for `APP_RPC_URL`.
    Keep `PRODUCT_INDEXER_BLOCK_RANGE` within the provider's `eth_getLogs` limit; the testnet
    Blueprint uses Alchemy's 10,000-block PAYG range and a 50,000-block initial lookback.
 4. Configure Privy allowed origins, email/passkey login, Google and Apple OAuth, and embedded EVM
-   wallet creation for all users.
+   wallet creation for all users. No separately managed WalletConnect project is required for
+   launch. Privy's SDK still uses its documented WalletConnect relay and verification domains for
+   named mobile-wallet connections, so keep those domains in the CSP.
 5. Run an embedded-user onboarding smoke test, verify the factory receipt in `robin-api`, reload
    during confirmation, link two external wallets, change the funding source, pause, resume,
    deposit, withdraw, unlink, sign out, and recover the same account.
