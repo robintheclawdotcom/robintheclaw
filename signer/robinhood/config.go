@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net/url"
 	"os"
@@ -31,9 +31,12 @@ type Config struct {
 	ChainID               *big.Int
 	KMSKeyID              string
 	SignerAddress         common.Address
-	TimelockAddress       common.Address
-	RecoveryAddress       common.Address
-	GuardianAddress       common.Address
+	OwnerAddress          common.Address
+	FactoryAddress        common.Address
+	FactoryCodeHash       common.Hash
+	RegistryAddress       common.Address
+	RegistryCodeHash      common.Hash
+	PolicyDigest          common.Hash
 	VaultAddress          common.Address
 	VaultCodeHash         common.Hash
 	RiskManagerAddress    common.Address
@@ -49,26 +52,9 @@ type Config struct {
 	MaxReplacementAge     time.Duration
 	RequestTimeout        time.Duration
 	ReconcileInterval     time.Duration
-	Accounts              []robinhoodAccountBinding
-}
-
-type robinhoodAccountBinding struct {
-	ExecutionAccountID  string `json:"executionAccountId"`
-	KMSKeyID            string `json:"kmsKeyId"`
-	SignerAddress       string `json:"signerAddress"`
-	TimelockAddress     string `json:"timelockAddress"`
-	RecoveryAddress     string `json:"recoveryAddress"`
-	GuardianAddress     string `json:"guardianAddress"`
-	VaultAddress        string `json:"vaultAddress"`
-	VaultCodeHash       string `json:"vaultCodeHash"`
-	RiskManagerAddress  string `json:"riskManagerAddress"`
-	RiskManagerCodeHash string `json:"riskManagerCodeHash"`
-	SpotAdapterAddress  string `json:"spotAdapterAddress"`
-	SpotAdapterCodeHash string `json:"spotAdapterCodeHash"`
-}
-
-type robinhoodAccountRegistry struct {
-	Accounts []robinhoodAccountBinding `json:"accounts"`
+	ProvisionerURL        string
+	BridgeHMACKey         []byte
+	BridgeCallerID        string
 }
 
 func loadConfig() (Config, error) {
@@ -108,47 +94,20 @@ func loadConfig() (Config, error) {
 	if config.DatabaseURL == "" {
 		return Config{}, errors.New("signer database is required")
 	}
-	if path := os.Getenv("ROBINHOOD_SIGNER_ACCOUNTS_FILE"); path != "" {
-		config.Accounts, err = loadRobinhoodAccountRegistry(path)
-		if err != nil {
-			return Config{}, err
-		}
-	} else {
-		config.ExecutionAccountID = os.Getenv("ROBINHOOD_EXECUTION_ACCOUNT_ID")
-		config.KMSKeyID = os.Getenv("AWS_KMS_KEY_ID")
-		if config.SignerAddress, err = requiredAddress("ROBINHOOD_SIGNER_ADDRESS"); err != nil {
-			return Config{}, err
-		}
-		if config.TimelockAddress, err = requiredAddress("ROBINHOOD_TIMELOCK_ADDRESS"); err != nil {
-			return Config{}, err
-		}
-		if config.RecoveryAddress, err = requiredAddress("ROBINHOOD_RECOVERY_ADDRESS"); err != nil {
-			return Config{}, err
-		}
-		if config.GuardianAddress, err = requiredAddress("ROBINHOOD_GUARDIAN_ADDRESS"); err != nil {
-			return Config{}, err
-		}
-		if config.VaultAddress, err = requiredAddress("ROBINHOOD_VAULT_ADDRESS"); err != nil {
-			return Config{}, err
-		}
-		if config.RiskManagerAddress, err = requiredAddress("ROBINHOOD_RISK_MANAGER_ADDRESS"); err != nil {
-			return Config{}, err
-		}
-		if config.SpotAdapterAddress, err = requiredAddress("ROBINHOOD_SPOT_ADAPTER_ADDRESS"); err != nil {
-			return Config{}, err
-		}
-		if config.VaultCodeHash, err = requiredHash("ROBINHOOD_VAULT_CODE_HASH"); err != nil {
-			return Config{}, err
-		}
-		if config.RiskManagerCodeHash, err = requiredHash("ROBINHOOD_RISK_MANAGER_CODE_HASH"); err != nil {
-			return Config{}, err
-		}
-		if config.SpotAdapterCodeHash, err = requiredHash("ROBINHOOD_SPOT_ADAPTER_CODE_HASH"); err != nil {
-			return Config{}, err
-		}
-		if err := validateAccountConfig(config); err != nil {
-			return Config{}, err
-		}
+	config.ProvisionerURL, err = normalizeProvisionerURL(os.Getenv("ROBINHOOD_PROVISIONER_URL"))
+	if err != nil {
+		return Config{}, err
+	}
+	config.BridgeHMACKey, err = hex.DecodeString(os.Getenv("ROBINHOOD_SIGNER_BRIDGE_HMAC_KEY"))
+	if err != nil || len(config.BridgeHMACKey) != 32 {
+		return Config{}, errors.New("ROBINHOOD_SIGNER_BRIDGE_HMAC_KEY must be a 32-byte hex key")
+	}
+	config.BridgeCallerID = os.Getenv("ROBINHOOD_SIGNER_BRIDGE_CALLER_ID")
+	if !validCallerID(config.BridgeCallerID) || config.BridgeCallerID == config.CallerID {
+		return Config{}, errors.New("ROBINHOOD_SIGNER_BRIDGE_CALLER_ID must be a distinct lowercase service identifier")
+	}
+	if bytes.Equal(config.APIHMACKey, config.BridgeHMACKey) {
+		return Config{}, errors.New("coordinator and provisioner bridge HMAC keys must be distinct")
 	}
 	if err := validatePrivateRPC(config.RPCURL); err != nil {
 		return Config{}, err
@@ -206,114 +165,25 @@ func loadConfig() (Config, error) {
 		}
 		config.MaxConcurrentRequests = uint8(parsed)
 	}
-	if _, err := config.accountConfigs(); err != nil {
-		return Config{}, err
-	}
 	return config, nil
-}
-
-func loadRobinhoodAccountRegistry(path string) ([]robinhoodAccountBinding, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, errors.New("open Robinhood account registry")
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return nil, errors.New("Robinhood account registry must be an owner-only regular file")
-	}
-	decoder := json.NewDecoder(io.LimitReader(file, 1<<20))
-	decoder.DisallowUnknownFields()
-	var registry robinhoodAccountRegistry
-	if err := decoder.Decode(&registry); err != nil {
-		return nil, errors.New("decode Robinhood account registry")
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return nil, errors.New("Robinhood account registry must contain one JSON value")
-	}
-	if len(registry.Accounts) == 0 || len(registry.Accounts) > 1000 {
-		return nil, errors.New("Robinhood account registry must contain 1 to 1000 accounts")
-	}
-	identities := make(map[string]struct{}, len(registry.Accounts))
-	signers := make(map[string]struct{}, len(registry.Accounts))
-	vaults := make(map[string]struct{}, len(registry.Accounts))
-	for _, account := range registry.Accounts {
-		if !validExecutionAccountID(account.ExecutionAccountID) || account.KMSKeyID == "" ||
-			!validAddressText(account.SignerAddress) || !validAddressText(account.TimelockAddress) ||
-			!validAddressText(account.RecoveryAddress) || !validAddressText(account.GuardianAddress) ||
-			!validAddressText(account.VaultAddress) || !validAddressText(account.RiskManagerAddress) ||
-			!validAddressText(account.SpotAdapterAddress) || !validHashText(account.VaultCodeHash) ||
-			!validHashText(account.RiskManagerCodeHash) || !validHashText(account.SpotAdapterCodeHash) {
-			return nil, errors.New("Robinhood account registry contains an invalid binding")
-		}
-		signer := strings.ToLower(account.SignerAddress)
-		vault := strings.ToLower(account.VaultAddress)
-		if _, exists := identities[account.ExecutionAccountID]; exists {
-			return nil, errors.New("duplicate execution account binding")
-		}
-		if _, exists := signers[signer]; exists {
-			return nil, errors.New("duplicate Robinhood signer binding")
-		}
-		if _, exists := vaults[vault]; exists {
-			return nil, errors.New("duplicate Robinhood vault binding")
-		}
-		identities[account.ExecutionAccountID] = struct{}{}
-		signers[signer] = struct{}{}
-		vaults[vault] = struct{}{}
-	}
-	return registry.Accounts, nil
-}
-
-func (config Config) accountConfigs() ([]Config, error) {
-	if len(config.Accounts) == 0 {
-		if err := validateAccountConfig(config); err != nil {
-			return nil, err
-		}
-		return []Config{config}, nil
-	}
-	accounts := make([]Config, 0, len(config.Accounts))
-	for _, binding := range config.Accounts {
-		account := config
-		account.Accounts = nil
-		account.ExecutionAccountID = binding.ExecutionAccountID
-		account.KMSKeyID = binding.KMSKeyID
-		account.SignerAddress = common.HexToAddress(binding.SignerAddress)
-		account.TimelockAddress = common.HexToAddress(binding.TimelockAddress)
-		account.RecoveryAddress = common.HexToAddress(binding.RecoveryAddress)
-		account.GuardianAddress = common.HexToAddress(binding.GuardianAddress)
-		account.VaultAddress = common.HexToAddress(binding.VaultAddress)
-		account.VaultCodeHash = common.HexToHash(binding.VaultCodeHash)
-		account.RiskManagerAddress = common.HexToAddress(binding.RiskManagerAddress)
-		account.RiskManagerCodeHash = common.HexToHash(binding.RiskManagerCodeHash)
-		account.SpotAdapterAddress = common.HexToAddress(binding.SpotAdapterAddress)
-		account.SpotAdapterCodeHash = common.HexToHash(binding.SpotAdapterCodeHash)
-		if err := validateAccountConfig(account); err != nil {
-			return nil, err
-		}
-		accounts = append(accounts, account)
-	}
-	return accounts, nil
 }
 
 func validateAccountConfig(config Config) error {
 	if !validExecutionAccountID(config.ExecutionAccountID) || config.KMSKeyID == "" ||
-		config.SignerAddress == (common.Address{}) || config.TimelockAddress == (common.Address{}) ||
-		config.RecoveryAddress == (common.Address{}) || config.GuardianAddress == (common.Address{}) ||
+		config.SignerAddress == (common.Address{}) || config.OwnerAddress == (common.Address{}) ||
+		config.FactoryAddress == (common.Address{}) || config.RegistryAddress == (common.Address{}) ||
 		config.VaultAddress == (common.Address{}) || config.RiskManagerAddress == (common.Address{}) ||
 		config.SpotAdapterAddress == (common.Address{}) || config.VaultCodeHash == (common.Hash{}) ||
-		config.RiskManagerCodeHash == (common.Hash{}) || config.SpotAdapterCodeHash == (common.Hash{}) {
+		config.RiskManagerCodeHash == (common.Hash{}) || config.SpotAdapterCodeHash == (common.Hash{}) ||
+		config.FactoryCodeHash == (common.Hash{}) || config.RegistryCodeHash == (common.Hash{}) ||
+		config.PolicyDigest == (common.Hash{}) {
 		return errors.New("Robinhood execution account binding is incomplete")
 	}
-	roles := []common.Address{
-		config.SignerAddress,
-		config.TimelockAddress,
-		config.RecoveryAddress,
-		config.GuardianAddress,
-	}
+	roles := []common.Address{config.SignerAddress, config.OwnerAddress, config.FactoryAddress, config.RegistryAddress}
 	for index, role := range roles {
 		for _, other := range roles[index+1:] {
 			if role == other {
-				return errors.New("signer, timelock, recovery, and guardian roles must be distinct")
+				return errors.New("signer, owner, factory, and registry must be distinct")
 			}
 		}
 	}
@@ -336,9 +206,12 @@ type deploymentManifest struct {
 	ExecutionAccountID  string `json:"execution_account_id"`
 	ChainID             string `json:"chain_id"`
 	Signer              string `json:"signer"`
-	Timelock            string `json:"timelock"`
-	Recovery            string `json:"recovery"`
-	Guardian            string `json:"guardian"`
+	Owner               string `json:"owner"`
+	Factory             string `json:"factory"`
+	FactoryCodeHash     string `json:"factory_code_hash"`
+	Registry            string `json:"registry"`
+	RegistryCodeHash    string `json:"registry_code_hash"`
+	PolicyDigest        string `json:"policy_digest"`
 	Vault               string `json:"vault"`
 	VaultCodeHash       string `json:"vault_code_hash"`
 	RiskManager         string `json:"risk_manager"`
@@ -352,9 +225,12 @@ func (config Config) manifest() (deploymentManifest, string) {
 		ExecutionAccountID:  config.ExecutionAccountID,
 		ChainID:             config.ChainID.String(),
 		Signer:              strings.ToLower(config.SignerAddress.Hex()),
-		Timelock:            strings.ToLower(config.TimelockAddress.Hex()),
-		Recovery:            strings.ToLower(config.RecoveryAddress.Hex()),
-		Guardian:            strings.ToLower(config.GuardianAddress.Hex()),
+		Owner:               strings.ToLower(config.OwnerAddress.Hex()),
+		Factory:             strings.ToLower(config.FactoryAddress.Hex()),
+		FactoryCodeHash:     strings.ToLower(config.FactoryCodeHash.Hex()),
+		Registry:            strings.ToLower(config.RegistryAddress.Hex()),
+		RegistryCodeHash:    strings.ToLower(config.RegistryCodeHash.Hex()),
+		PolicyDigest:        strings.ToLower(config.PolicyDigest.Hex()),
 		Vault:               strings.ToLower(config.VaultAddress.Hex()),
 		VaultCodeHash:       strings.ToLower(config.VaultCodeHash.Hex()),
 		RiskManager:         strings.ToLower(config.RiskManagerAddress.Hex()),
@@ -371,23 +247,40 @@ func (config Config) manifest() (deploymentManifest, string) {
 }
 
 func validExecutionAccountID(value string) bool {
-	if len(value) < 8 || len(value) > 64 {
+	if len(value) != 36 {
 		return false
 	}
-	for _, character := range value {
-		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+	normalized := strings.ToLower(value)
+	if normalized[14] != '4' || !strings.ContainsRune("89ab", rune(normalized[19])) {
+		return false
+	}
+	for index, character := range normalized {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if character != '-' {
+				return false
+			}
+			continue
+		}
+		if (character < 'a' || character > 'f') && (character < '0' || character > '9') {
 			return false
 		}
 	}
 	return true
 }
 
-func requiredAddress(name string) (common.Address, error) {
-	value := os.Getenv(name)
-	if !common.IsHexAddress(value) || common.HexToAddress(value) == (common.Address{}) {
-		return common.Address{}, fmt.Errorf("%s must be a non-zero address", name)
+func normalizeProvisionerURL(raw string) (string, error) {
+	if raw != "" && !strings.Contains(raw, "://") {
+		raw = "http://" + raw
 	}
-	return common.HexToAddress(value), nil
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("ROBINHOOD_PROVISIONER_URL must be an HTTP(S) origin")
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return "", errors.New("ROBINHOOD_PROVISIONER_URL must not contain a path")
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
 func validCallerID(value string) bool {
@@ -400,17 +293,6 @@ func validCallerID(value string) bool {
 		}
 	}
 	return true
-}
-
-func requiredHash(name string) (common.Hash, error) {
-	value := os.Getenv(name)
-	if len(value) != 66 || !strings.HasPrefix(value, "0x") {
-		return common.Hash{}, fmt.Errorf("%s must be a bytes32 hash", name)
-	}
-	if _, err := hex.DecodeString(value[2:]); err != nil {
-		return common.Hash{}, fmt.Errorf("%s must be a bytes32 hash", name)
-	}
-	return common.HexToHash(value), nil
 }
 
 func validatePrivateRPC(value string) error {

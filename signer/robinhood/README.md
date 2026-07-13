@@ -1,27 +1,25 @@
 # Robinhood writer
 
 Private, fail-closed Robinhood Chain transaction writer. The service accepts one fixed operation:
-`RwaStrategyVault.executeSpot(SpotIntent)`. It has no target, calldata, transfer, withdrawal,
+`RwaUserStrategyVaultV1.executeSpot(SpotIntent)`. It has no target, calldata, transfer, withdrawal,
 recovery, market-configuration, agent-management, or governance API.
 
-Production mode requires independent primary and reconciliation RPC providers, a non-exportable
-AWS KMS `ECC_SECG_P256K1` signing key, a migrated PostgreSQL journal, and a pinned deployment
-manifest. Startup and every new signature verify the KMS address, chain ID, runtime code hashes,
-vault wiring, settlement asset, timelock, recovery Safe, and guardian through both providers.
+Every request carries an opaque `execution_account_id`. The signer resolves the account through the
+private Robinhood provisioner using a dedicated HMAC key with replay protection and authenticated
+responses. Static account files, raw KMS references, vault addresses, and signer addresses are not
+accepted from callers or environment configuration.
 
-Production account routing uses the owner-only JSON registry selected with
-`ROBINHOOD_SIGNER_ACCOUNTS_FILE`. Each entry binds an opaque execution-account ID to one KMS key and
-one canonical vault, risk manager, adapter, signer, and code-hash graph. Requests contain only the
-execution-account ID as routing identity; the signer resolves the graph and rejects unknown
-accounts or any configured, on-chain, signed, or returned identity mismatch. The legacy
-single-account configuration additionally requires `ROBINHOOD_EXECUTION_ACCOUNT_ID`.
+Before each new signature, the provisioner and signer independently verify the active KMS key,
+chain ID, factory, registry, policy digest, graph runtime hashes, owner, agent, risk manager, and
+adapter wiring through independent RPC providers. Any changed binding latches the writer unready and
+requires reconciliation plus a signer restart. The KMS public key must recover to the provisioned
+agent address.
 
 Nonce advancement and signed-transaction persistence commit atomically. The reconciler validates
-every stored transaction before broadcast, follows every fee-replacement candidate until a
-canonical winner is known, and requires both providers to agree on receipt, `safe`, and
-`finalized` evidence. Invalid records are quarantined and keep the signer unready.
+every stored transaction before broadcast, follows fee-replacement candidates until a canonical
+winner is known, and requires both providers to agree on receipt, `safe`, and `finalized` evidence.
+Invalid records are quarantined and keep the signer unready.
 
-The write route uses timestamped HMAC service authentication with persistent replay protection.
-It exposes no raw target, calldata, transfer, withdrawal, or governance operation. The service is
-disabled unless `ROBINHOOD_SIGNER_ENABLED=true`. See
+The service is disabled unless `ROBINHOOD_SIGNER_ENABLED=true`. Production also requires a migrated
+PostgreSQL journal, private independent RPC endpoints, and the provisioner bridge. See
 [`docs/execution-control-plane.md`](../../docs/execution-control-plane.md).

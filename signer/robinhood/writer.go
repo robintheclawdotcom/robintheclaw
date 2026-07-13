@@ -113,6 +113,8 @@ func (writer *Writer) verifyClient(ctx context.Context, client chainClient) (*ty
 		address  common.Address
 		codeHash common.Hash
 	}{
+		{"factory", writer.config.FactoryAddress, writer.config.FactoryCodeHash},
+		{"registry", writer.config.RegistryAddress, writer.config.RegistryCodeHash},
 		{"vault", writer.config.VaultAddress, writer.config.VaultCodeHash},
 		{"risk manager", writer.config.RiskManagerAddress, writer.config.RiskManagerCodeHash},
 		{"spot adapter", writer.config.SpotAdapterAddress, writer.config.SpotAdapterCodeHash},
@@ -127,10 +129,10 @@ func (writer *Writer) verifyClient(ctx context.Context, client chainClient) (*ty
 		expected common.Address
 	}{
 		{"agent", writer.config.SignerAddress},
+		{"owner", writer.config.OwnerAddress},
+		{"registry", writer.config.RegistryAddress},
 		{"riskManager", writer.config.RiskManagerAddress},
 		{"spotAdapter", writer.config.SpotAdapterAddress},
-		{"admin", writer.config.TimelockAddress},
-		{"recoveryRecipient", writer.config.RecoveryAddress},
 	}
 	for _, check := range vaultChecks {
 		value, err := writer.readAddress(ctx, client, writer.config.VaultAddress, check.method, head.Number)
@@ -148,19 +150,35 @@ func (writer *Writer) verifyClient(ctx context.Context, client chainClient) (*ty
 		method   string
 		expected common.Address
 	}{
+		{"registry owner", writer.config.RegistryAddress, "ownerOfVault", writer.config.OwnerAddress},
+		{"registry factory", writer.config.RegistryAddress, "factoryOfVault", writer.config.FactoryAddress},
+		{"registry risk manager", writer.config.RegistryAddress, "riskManagerOfVault", writer.config.RiskManagerAddress},
+		{"registry spot adapter", writer.config.RegistryAddress, "spotAdapterOfVault", writer.config.SpotAdapterAddress},
 		{"risk manager executor", writer.config.RiskManagerAddress, "executor", writer.config.VaultAddress},
-		{"risk manager admin", writer.config.RiskManagerAddress, "admin", writer.config.TimelockAddress},
-		{"risk manager guardian", writer.config.RiskManagerAddress, "guardian", writer.config.GuardianAddress},
+		{"risk manager config admin", writer.config.RiskManagerAddress, "configAdmin", writer.config.RegistryAddress},
+		{"risk manager treasury", writer.config.RiskManagerAddress, "treasury", writer.config.OwnerAddress},
 		{"risk manager settlement asset", writer.config.RiskManagerAddress, "settlementAsset", settlementAsset},
 		{"spot adapter vault", writer.config.SpotAdapterAddress, "vault", writer.config.VaultAddress},
-		{"spot adapter admin", writer.config.SpotAdapterAddress, "admin", writer.config.TimelockAddress},
+		{"spot adapter config admin", writer.config.SpotAdapterAddress, "configAdmin", writer.config.RegistryAddress},
 		{"spot adapter settlement asset", writer.config.SpotAdapterAddress, "settlementAsset", settlementAsset},
 	}
 	for _, check := range contractChecks {
-		value, err := writer.readAddress(ctx, client, check.address, check.method, head.Number)
+		arguments := []any(nil)
+		if check.address == writer.config.RegistryAddress {
+			arguments = []any{writer.config.VaultAddress}
+		}
+		value, err := writer.readAddress(ctx, client, check.address, check.method, head.Number, arguments...)
 		if err != nil || value != check.expected {
 			return nil, fmt.Errorf("%s mismatch", check.name)
 		}
+	}
+	policyDigest, err := writer.readHash(ctx, client, writer.config.FactoryAddress, "policyDigest", head.Number)
+	if err != nil || policyDigest != writer.config.PolicyDigest {
+		return nil, errors.New("factory policy digest mismatch")
+	}
+	registry, err := writer.readAddress(ctx, client, writer.config.FactoryAddress, "registry", head.Number)
+	if err != nil || registry != writer.config.RegistryAddress {
+		return nil, errors.New("factory registry mismatch")
 	}
 	return head, nil
 }
@@ -516,8 +534,8 @@ func (writer *Writer) validateRecord(record TransactionRecord) (*types.Transacti
 	return &transaction, nil
 }
 
-func (writer *Writer) readAddress(ctx context.Context, client chainClient, target common.Address, method string, blockNumber *big.Int) (common.Address, error) {
-	input, err := vaultABI.Pack(method)
+func (writer *Writer) readAddress(ctx context.Context, client chainClient, target common.Address, method string, blockNumber *big.Int, arguments ...any) (common.Address, error) {
+	input, err := vaultABI.Pack(method, arguments...)
 	if err != nil {
 		return common.Address{}, err
 	}
@@ -526,6 +544,18 @@ func (writer *Writer) readAddress(ctx context.Context, client chainClient, targe
 		return common.Address{}, err
 	}
 	return unpackAddress(method, output)
+}
+
+func (writer *Writer) readHash(ctx context.Context, client chainClient, target common.Address, method string, blockNumber *big.Int) (common.Hash, error) {
+	input, err := vaultABI.Pack(method)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	output, err := client.CallContract(ctx, ethereum.CallMsg{To: &target, Data: input}, blockNumber)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return unpackHash(method, output)
 }
 
 func (writer *Writer) RunReconciler(ctx context.Context) {

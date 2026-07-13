@@ -24,6 +24,7 @@ type fakeChain struct {
 	headers         map[uint64]*types.Header
 	codes           map[common.Address][]byte
 	getters         map[common.Address]map[string]common.Address
+	hashes          map[common.Address]map[string]common.Hash
 	gas             uint64
 	tip             *big.Int
 	nonce           uint64
@@ -78,11 +79,13 @@ func (chain *fakeChain) CallContract(_ context.Context, message ethereum.CallMsg
 		if !bytes.Equal(message.Data[:4], method.ID) {
 			continue
 		}
-		value, ok := chain.getters[*message.To][name]
-		if !ok {
-			return nil, errors.New("unknown getter")
+		if value, ok := chain.getters[*message.To][name]; ok {
+			return method.Outputs.Pack(value)
 		}
-		return method.Outputs.Pack(value)
+		if value, ok := chain.hashes[*message.To][name]; ok {
+			return method.Outputs.Pack(value)
+		}
+		return nil, errors.New("unknown getter")
 	}
 	return nil, errors.New("unknown call")
 }
@@ -140,13 +143,16 @@ func newWriterFixture(t *testing.T) writerFixture {
 	vault := common.HexToAddress("0x0000000000000000000000000000000000000011")
 	risk := common.HexToAddress("0x0000000000000000000000000000000000000012")
 	adapter := common.HexToAddress("0x0000000000000000000000000000000000000013")
-	timelock := common.HexToAddress("0x0000000000000000000000000000000000000014")
-	recovery := common.HexToAddress("0x0000000000000000000000000000000000000015")
-	guardian := common.HexToAddress("0x0000000000000000000000000000000000000016")
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000014")
+	factory := common.HexToAddress("0x0000000000000000000000000000000000000015")
+	registry := common.HexToAddress("0x0000000000000000000000000000000000000016")
 	settlement := common.HexToAddress("0x0000000000000000000000000000000000000017")
 	vaultCode := []byte{1, 2, 3}
 	riskCode := []byte{4, 5, 6}
 	adapterCode := []byte{7, 8, 9}
+	factoryCode := []byte{10, 11, 12}
+	registryCode := []byte{13, 14, 15}
+	policyDigest := common.HexToHash("0x" + strings.Repeat("a", 64))
 	latest := testHeader(100)
 	chain := &fakeChain{
 		chainID:   big.NewInt(4663),
@@ -156,18 +162,25 @@ func newWriterFixture(t *testing.T) writerFixture {
 		headers:   map[uint64]*types.Header{100: latest},
 		codes: map[common.Address][]byte{
 			vault: vaultCode, risk: riskCode, adapter: adapterCode,
+			factory: factoryCode, registry: registryCode,
 		},
 		getters: map[common.Address]map[string]common.Address{
 			vault: {
 				"agent": signer.Address(), "riskManager": risk, "spotAdapter": adapter,
-				"admin": timelock, "recoveryRecipient": recovery, "settlementAsset": settlement,
+				"owner": owner, "registry": registry, "settlementAsset": settlement,
 			},
 			risk: {
-				"executor": vault, "admin": timelock, "guardian": guardian,
+				"executor": vault, "configAdmin": registry, "treasury": owner,
 				"settlementAsset": settlement,
 			},
-			adapter: {"vault": vault, "admin": timelock, "settlementAsset": settlement},
+			adapter: {"vault": vault, "configAdmin": registry, "settlementAsset": settlement},
+			factory: {"registry": registry},
+			registry: {
+				"ownerOfVault": owner, "factoryOfVault": factory,
+				"riskManagerOfVault": risk, "spotAdapterOfVault": adapter,
+			},
 		},
+		hashes:   map[common.Address]map[string]common.Hash{factory: {"policyDigest": policyDigest}},
 		gas:      100_000,
 		tip:      big.NewInt(2),
 		nonce:    7,
@@ -176,12 +189,15 @@ func newWriterFixture(t *testing.T) writerFixture {
 	}
 	config := Config{
 		Enabled:             true,
-		ExecutionAccountID:  "account-canary-1",
+		ExecutionAccountID:  "11111111-1111-4111-8111-111111111111",
 		ChainID:             big.NewInt(4663),
 		SignerAddress:       signer.Address(),
-		TimelockAddress:     timelock,
-		RecoveryAddress:     recovery,
-		GuardianAddress:     guardian,
+		OwnerAddress:        owner,
+		FactoryAddress:      factory,
+		FactoryCodeHash:     crypto.Keccak256Hash(factoryCode),
+		RegistryAddress:     registry,
+		RegistryCodeHash:    crypto.Keccak256Hash(registryCode),
+		PolicyDigest:        policyDigest,
 		VaultAddress:        vault,
 		VaultCodeHash:       crypto.Keccak256Hash(vaultCode),
 		RiskManagerAddress:  risk,

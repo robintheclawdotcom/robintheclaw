@@ -15,11 +15,18 @@ const vaultABIJSON = `[
   {"type":"function","name":"riskManager","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"spotAdapter","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"settlementAsset","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
-  {"type":"function","name":"admin","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
-  {"type":"function","name":"recoveryRecipient","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+  {"type":"function","name":"owner","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+  {"type":"function","name":"registry","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+  {"type":"function","name":"treasury","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+  {"type":"function","name":"configAdmin","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"guardian","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"executor","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
-  {"type":"function","name":"vault","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]}
+  {"type":"function","name":"vault","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+  {"type":"function","name":"policyDigest","stateMutability":"view","inputs":[],"outputs":[{"type":"bytes32"}]},
+  {"type":"function","name":"ownerOfVault","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"address"}]},
+  {"type":"function","name":"factoryOfVault","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"address"}]},
+  {"type":"function","name":"riskManagerOfVault","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"address"}]},
+  {"type":"function","name":"spotAdapterOfVault","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"address"}]}
 ]`
 
 var vaultABI = mustABI(vaultABIJSON)
@@ -56,6 +63,18 @@ func unpackAddress(method string, output []byte) (common.Address, error) {
 		return common.Address{}, errors.New("invalid contract address response")
 	}
 	return address, nil
+}
+
+func unpackHash(method string, output []byte) (common.Hash, error) {
+	values, err := vaultABI.Unpack(method, output)
+	if err != nil || len(values) != 1 {
+		return common.Hash{}, errors.New("invalid contract response")
+	}
+	value, ok := values[0].([32]byte)
+	if !ok || common.BytesToHash(value[:]) == (common.Hash{}) {
+		return common.Hash{}, errors.New("invalid contract hash response")
+	}
+	return common.BytesToHash(value[:]), nil
 }
 
 func mustABI(source string) abi.ABI {

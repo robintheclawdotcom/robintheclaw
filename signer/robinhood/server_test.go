@@ -39,7 +39,7 @@ func TestUnknownJSONFieldsAreRejected(t *testing.T) {
 	writer.ready.Store(true)
 	config := Config{
 		Enabled:               true,
-		ExecutionAccountID:    "account-canary-1",
+		ExecutionAccountID:    "11111111-1111-4111-8111-111111111111",
 		APIHMACKey:            []byte(strings.Repeat("a", 32)),
 		CallerID:              "execution-coordinator",
 		MaxRequestsPerMinute:  60,
@@ -50,7 +50,7 @@ func TestUnknownJSONFieldsAreRejected(t *testing.T) {
 		writer: writer,
 	}
 	response := httptest.NewRecorder()
-	body := []byte(`{"execution_account_id":"account-canary-1","request_id":"x","target":"0x01"}`)
+	body := []byte(`{"execution_account_id":"11111111-1111-4111-8111-111111111111","request_id":"x","target":"0x01"}`)
 	request := authenticatedRequest(config, body, strings.Repeat("n", 32))
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
@@ -64,14 +64,14 @@ func TestAuthorizationNonceCannotBeReplayed(t *testing.T) {
 	writer.ready.Store(true)
 	config := Config{
 		Enabled:               true,
-		ExecutionAccountID:    "account-canary-1",
+		ExecutionAccountID:    "11111111-1111-4111-8111-111111111111",
 		APIHMACKey:            []byte(strings.Repeat("a", 32)),
 		CallerID:              "execution-coordinator",
 		MaxRequestsPerMinute:  60,
 		MaxConcurrentRequests: 4,
 	}
 	server := &Server{config: config, writer: writer}
-	body := []byte(`{"execution_account_id":"account-canary-1","request_id":"x","target":"0x01"}`)
+	body := []byte(`{"execution_account_id":"11111111-1111-4111-8111-111111111111","request_id":"x","target":"0x01"}`)
 	nonce := strings.Repeat("r", 32)
 	first := httptest.NewRecorder()
 	server.Handler().ServeHTTP(first, authenticatedRequest(config, body, nonce))
@@ -164,7 +164,7 @@ func TestUnknownExecutionAccountIsRejectedBeforeJournalUse(t *testing.T) {
 	fixture.config.MaxConcurrentRequests = 4
 	server := &Server{config: fixture.config, writer: fixture.writer}
 	request := validRequest()
-	request.ExecutionAccountID = "account-canary-2"
+	request.ExecutionAccountID = "22222222-2222-4222-8222-222222222222"
 	body, err := json.Marshal(request)
 	if err != nil {
 		t.Fatal(err)

@@ -22,6 +22,7 @@ type Server struct {
 	config  Config
 	writer  *Writer
 	writers map[string]*Writer
+	manager *accountWriterManager
 	once    sync.Once
 	slots   chan struct{}
 	rate    requestRate
@@ -45,8 +46,8 @@ func (server *Server) live(response http.ResponseWriter, _ *http.Request) {
 	writeJSON(response, http.StatusOK, map[string]string{"status": "live"})
 }
 
-func (server *Server) ready(response http.ResponseWriter, _ *http.Request) {
-	if !server.config.Enabled || !server.anyWriterReady() {
+func (server *Server) ready(response http.ResponseWriter, request *http.Request) {
+	if !server.config.Enabled || !server.anyWriterReady(request.Context()) {
 		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"status": "unready"})
 		return
 	}
@@ -54,7 +55,7 @@ func (server *Server) ready(response http.ResponseWriter, _ *http.Request) {
 }
 
 func (server *Server) executeSpot(response http.ResponseWriter, request *http.Request) {
-	if !server.config.Enabled || (server.writer == nil && len(server.writers) == 0) {
+	if !server.config.Enabled || (server.writer == nil && len(server.writers) == 0 && server.manager == nil) {
 		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "signer unavailable"})
 		return
 	}
@@ -96,7 +97,11 @@ func (server *Server) executeSpot(response http.ResponseWriter, request *http.Re
 		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
-	writer := server.writerFor(payload.ExecutionAccountID)
+	writer, err := server.writerFor(request.Context(), payload.ExecutionAccountID)
+	if err != nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "execution account resolution unavailable"})
+		return
+	}
 	if writer == nil {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "execution account is not registered"})
 		return
@@ -172,24 +177,30 @@ func (server *Server) authorized(request *http.Request, body []byte) bool {
 	if json.Unmarshal(body, &binding) != nil {
 		return false
 	}
-	writer := server.writerFor(binding.ExecutionAccountID)
-	if writer == nil {
+	writer, err := server.writerFor(request.Context(), binding.ExecutionAccountID)
+	if err != nil || writer == nil {
 		return false
 	}
 	return writer.journal.ClaimAuthNonce(request.Context(), nonce, expiresAt) == nil
 }
 
-func (server *Server) writerFor(executionAccountID string) *Writer {
+func (server *Server) writerFor(ctx context.Context, executionAccountID string) (*Writer, error) {
+	if server.manager != nil {
+		return server.manager.writer(ctx, executionAccountID)
+	}
 	if writer := server.writers[executionAccountID]; writer != nil {
-		return writer
+		return writer, nil
 	}
 	if server.writer != nil && executionAccountID == server.config.ExecutionAccountID {
-		return server.writer
+		return server.writer, nil
 	}
-	return nil
+	return nil, nil
 }
 
-func (server *Server) anyWriterReady() bool {
+func (server *Server) anyWriterReady(ctx context.Context) bool {
+	if server.manager != nil {
+		return server.manager.ready(ctx)
+	}
 	configured := 0
 	if server.writer != nil {
 		configured++
