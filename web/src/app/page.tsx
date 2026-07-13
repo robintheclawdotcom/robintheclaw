@@ -351,6 +351,7 @@ export default function Home() {
                   <article><span>[ research ]</span><h2>Adaptive research</h2><p>Builds a compounding event store for convergence, regime, hedge-ratio, and routing models.</p></article>
                   <article><span>[ contracts ]</span><h2>Execution foundation</h2><p>Custody, delegated execution, and venue policy establish the base for the Robin execution layer.</p></article>
                   <article><span>[ verifier ]</span><h2>Record integrity</h2><p>Onchain records support inspection, research, and a durable history of strategy operations.</p></article>
+                  <article><span>[ zk ]</span><h2>Provable performance</h2><p>Proves net return over a set of trades cleared a threshold, checkable onchain, without revealing the trades.</p></article>
                 </div>
               </section>
 

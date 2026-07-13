@@ -25,4 +25,6 @@ tooling.
    hidden-Markov regimes, and portfolio covariance.
 4. Venue adapters and the complete order lifecycle are the next execution milestone.
 5. Records are available as a supporting tool for research and operations.
-6. Secrets belong in ignored local files or managed secret storage.
+6. A zero-knowledge proof of PnL lets an agent prove its net return over a set of trades cleared a
+   threshold without revealing the trades, verifiable on-chain (`zk/`).
+7. Secrets belong in ignored local files or managed secret storage.

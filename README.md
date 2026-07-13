@@ -32,6 +32,7 @@ runtime/     continuous market capture and research runtime
 signal/      read-only basis scanner (measurement before execution)
 sdk/         TypeScript client (later)
 verifier/    record-integrity tool
+zk/          zero-knowledge proof that net return cleared a threshold, trades private
 web/         public Next.js site and developer interface
 docs/        system design and integration notes
 ```
@@ -77,13 +78,23 @@ set during its build so the public documentation and repository documentation de
 system boundaries. The [edge research methodology](docs/research-methodology.md) defines the
 model hierarchy, RWA-specific data requirements, and evidence needed to promote a strategy.
 
+## Verifiable performance
+
+An agent can prove its net return over a set of trades cleared a threshold without revealing any
+individual trade. The `zk/` circuit produces a zero-knowledge proof checkable on-chain against the
+agent identity, the claimed basis-point threshold, and a commitment binding the trades. This is how
+a track record becomes something anyone can check rather than something you take on faith, while the
+strategy that produced it stays private.
+
 ## Direction
 
 Robin is designed to grow from market intelligence into a full trading platform for tokenized
 markets. The roadmap extends the current stack with cointegration and Ornstein-Uhlenbeck spread
 models, adaptive Kalman hedge ratios, hidden-Markov regime classification, portfolio covariance,
-and execution-aware venue routing. The planned large-model research loop will turn event data and
-market context into better hypotheses, tests, and post-trade analysis.
+and execution-aware venue routing. Proof-of-PnL is the first verifiability primitive; binding a
+proof to the complete anchored record, so a claim cannot cherry-pick winners, is the next step. The
+planned large-model research loop will turn event data and market context into better hypotheses,
+tests, and post-trade analysis.
 
 Tokenized stocks on Robinhood Chain are geo-restricted and are not available to U.S. persons.
 
