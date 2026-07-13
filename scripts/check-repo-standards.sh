@@ -18,7 +18,10 @@ req=(
   .githooks/pre-push
   scripts/check-git-identity.sh
   scripts/check-no-leaks.sh
+  scripts/check-node-packages.sh
+  scripts/check-rust-crates.sh
   scripts/setup-git-hooks.sh
+  scripts/validate-blueprint.rb
   runtime/Cargo.toml
   runtime/migrations/0001_capture.sql
   runtime/src/bin/collector.rs
@@ -27,6 +30,7 @@ req=(
   .github/dependabot.yml
   .github/workflows/ci.yml
   .github/workflows/identity-firewall.yml
+  render.yaml
 )
 
 miss=0

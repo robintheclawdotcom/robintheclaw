@@ -15,88 +15,115 @@ jobs:
       run:
         working-directory: contracts
     steps:
-      - uses: actions/checkout@v4
-      - uses: foundry-rs/foundry-toolchain@v1
-      - name: Format check
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+      - name: Format
         run: forge fmt --check
       - name: Build
         run: forge build --sizes
       - name: Test
         run: forge test -vvv
 
-  engine:
+  rust:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: engine
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
           components: rustfmt, clippy
-      - name: Format check
-        run: cargo fmt --check
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Test
-        run: cargo test
+      - run: bash scripts/check-rust-crates.sh
 
-  runtime:
+  node:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: runtime
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          components: rustfmt, clippy
-      - name: Format check
-        run: cargo fmt --check
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Test
-        run: cargo test
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            signal/package-lock.json
+            verifier/package-lock.json
+            web/package-lock.json
+      - run: bash scripts/check-node-packages.sh
 
-  app:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: app
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: Format check
-        run: cargo fmt --check
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Test
-        run: cargo test
-
-  verifier:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: verifier
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - run: npm ci
-      - run: npm test
-
-  standards:
+  policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Repo standards
+      - name: Repository policy
         run: bash scripts/check-repo-standards.sh
+      - name: Blueprint policy
+        run: ruby scripts/validate-blueprint.rb
       - name: Leak scan
         run: bash scripts/check-no-leaks.sh
         env:
           IDENTITY_DENYLIST: ${{ secrets.IDENTITY_DENYLIST }}
+
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.1 --locked
+      - name: Audit Rust locks
+        run: |
+          find . -mindepth 2 -maxdepth 2 -name Cargo.lock -not -path './contracts/*' -print0 | sort -z | while IFS= read -r -d '' lock; do
+            cargo audit --file "$lock"
+          done
+      - name: Audit Node locks
+        run: |
+          find . -mindepth 2 -maxdepth 2 -name package-lock.json -print0 | sort -z | while IFS= read -r -d '' lock; do
+            npm audit --prefix "$(dirname "$lock")" --audit-level=high
+          done
+
+  contract-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: recursive
+      - uses: crytic/slither-action@b52cc1cbfee9ca3e8722dd5224299d16c9a6b80f # v0.4.2
+        with:
+          target: contracts
+          fail-on: high
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - name: Install Aderyn
+        run: cargo install aderyn --version 0.3.4 --locked
+      - name: Run Aderyn
+        run: aderyn contracts --output /tmp/aderyn.md
+
+  supply-chain:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build release subject
+        run: git archive --format=tar.gz --output=robin-source.tar.gz HEAD
+      - uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: robin-source.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-evidence
+          path: |
+            robin-source.tar.gz
+            sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 90
