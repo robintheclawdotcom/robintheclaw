@@ -4,6 +4,8 @@ use thiserror::Error;
 pub const USD_SCALE: u64 = 1_000_000;
 pub const CANARY_LEG_CAP_MICROS: u64 = 25 * USD_SCALE;
 pub const CANARY_GROSS_CAP_MICROS: u64 = 50 * USD_SCALE;
+const LEG_NAV_DENOMINATOR: u64 = 400;
+const GROSS_NAV_DENOMINATOR: u64 = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +43,7 @@ pub struct PairIntent {
     pub perp_side: PerpSide,
     pub spot_notional_micros: u64,
     pub perp_notional_micros: u64,
+    pub nav_micros: u64,
     pub raw_spot_amount: u128,
     pub spot_decimals: u8,
     pub perp_base_amount: u64,
@@ -95,8 +98,11 @@ impl PairIntent {
         {
             return Err(PairIntentError::EmptyLeg);
         }
-        if self.spot_notional_micros > CANARY_LEG_CAP_MICROS
-            || self.perp_notional_micros > CANARY_LEG_CAP_MICROS
+        let nav_leg_cap = self.nav_micros / LEG_NAV_DENOMINATOR;
+        let leg_cap = CANARY_LEG_CAP_MICROS.min(nav_leg_cap);
+        if leg_cap == 0
+            || self.spot_notional_micros > leg_cap
+            || self.perp_notional_micros > leg_cap
         {
             return Err(PairIntentError::LegCapExceeded);
         }
@@ -104,7 +110,8 @@ impl PairIntent {
             .spot_notional_micros
             .checked_add(self.perp_notional_micros)
             .ok_or(PairIntentError::GrossCapExceeded)?;
-        if gross > CANARY_GROSS_CAP_MICROS {
+        let gross_cap = CANARY_GROSS_CAP_MICROS.min(self.nav_micros / GROSS_NAV_DENOMINATOR);
+        if gross_cap == 0 || gross > gross_cap {
             return Err(PairIntentError::GrossCapExceeded);
         }
         if self.leverage_micros == 0 || self.leverage_micros > USD_SCALE {
@@ -174,6 +181,7 @@ mod tests {
             perp_side: PerpSide::Short,
             spot_notional_micros: 25_000_000,
             perp_notional_micros: 25_000_000,
+            nav_micros: 10_000_000_000,
             raw_spot_amount: 2_000_000,
             spot_decimals: 6,
             perp_base_amount: 1_000_000,
@@ -233,5 +241,16 @@ mod tests {
         let mut value = intent();
         value.leverage_micros += 1;
         assert_eq!(value.validate(), Err(PairIntentError::InvalidLeverage));
+    }
+
+    #[test]
+    fn nav_relative_caps_are_enforced() {
+        let mut value = intent();
+        value.nav_micros = 4_000_000_000;
+        assert_eq!(value.validate(), Err(PairIntentError::LegCapExceeded));
+
+        value.spot_notional_micros = 10_000_000;
+        value.perp_notional_micros = 10_000_000;
+        assert_eq!(value.validate(), Ok(()));
     }
 }

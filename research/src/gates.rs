@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const THREE_SIGMA_P_VALUE_PPB: u32 = 1_350_000;
 const DSR_MIN_PPM: u32 = 990_000;
@@ -57,6 +58,31 @@ pub enum GateFailure {
 }
 
 impl PromotionEvidence {
+    pub fn calculate_hash(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update([
+            self.hypothesis_registered as u8,
+            self.testing_family_registered as u8,
+            self.frozen_dataset_verified as u8,
+            self.walk_forward_verified as u8,
+        ]);
+        hasher.update(self.adjusted_p_value_ppb.to_be_bytes());
+        hasher.update(self.deflated_sharpe_probability_ppm.to_be_bytes());
+        hasher.update(self.bootstrap_net_return_lower_bound_ppm.to_be_bytes());
+        hasher.update(self.canary_capacity_micros.to_be_bytes());
+        hasher.update([self.capacity_curve_bounded as u8]);
+        hasher.update(self.capture_days.to_be_bytes());
+        hasher.update(self.continuous_shadow_days.to_be_bytes());
+        hasher.update([
+            self.contract_audit_approved as u8,
+            self.executor_review_approved as u8,
+            self.key_review_approved as u8,
+            self.legal_approved as u8,
+            self.restore_drill_approved as u8,
+        ]);
+        hex::encode(hasher.finalize())
+    }
+
     pub fn canary_failures(&self) -> Vec<GateFailure> {
         let mut failures = Vec::new();
         let checks = [
@@ -129,6 +155,16 @@ mod tests {
     #[test]
     fn complete_evidence_promotes() {
         assert!(approved().can_promote_to_canary());
+    }
+
+    #[test]
+    fn evidence_hash_detects_changes() {
+        let evidence = approved();
+        let hash = evidence.calculate_hash();
+        let mut changed = evidence;
+        changed.capture_days += 1;
+        assert_eq!(hash.len(), 64);
+        assert_ne!(hash, changed.calculate_hash());
     }
 
     #[test]
