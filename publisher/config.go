@@ -1,9 +1,8 @@
 package publisher
 
 import (
-	"encoding/json"
+	"encoding/hex"
 	"errors"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -11,30 +10,28 @@ import (
 )
 
 type Config struct {
-	Enabled         bool
-	ListenAddress   string
-	PollInterval    time.Duration
-	LighterURL      string
-	PrimaryRPCURL   string
-	SecondaryRPCURL string
-	Coordinator     EndpointConfig
-	Application     EndpointConfig
-	Accounts        []AccountBinding
+	Enabled                     bool
+	ListenAddress               string
+	PollInterval                time.Duration
+	CoordinatorDatabaseURL      string
+	RobinhoodDatabaseURL        string
+	RobinhoodJournalDatabaseURL string
+	PrimaryRPCURL               string
+	SecondaryRPCURL             string
+	LighterBridge               EndpointConfig
+	Coordinator                 EndpointConfig
+	Application                 EndpointConfig
+	LighterMarketID             uint16
+	MinimumCollateralRaw        string
+	MinimumSettlementRaw        string
+	MinimumOwnerGasRaw          string
+	MinimumSignerGasRaw         string
 }
 
 type EndpointConfig struct {
-	URL     string `json:"url"`
-	Caller  string `json:"caller"`
-	KeyFile string `json:"keyFile"`
-}
-
-type configFile struct {
-	LighterURL      string           `json:"lighterUrl"`
-	PrimaryRPCURL   string           `json:"primaryRpcUrl"`
-	SecondaryRPCURL string           `json:"secondaryRpcUrl"`
-	Coordinator     EndpointConfig   `json:"coordinator"`
-	Application     EndpointConfig   `json:"application"`
-	Accounts        []AccountBinding `json:"accounts"`
+	URL     string
+	Caller  string
+	HMACKey string
 }
 
 func LoadConfig() (Config, error) {
@@ -46,20 +43,6 @@ func LoadConfig() (Config, error) {
 	if !enabled {
 		return Config{Enabled: false, ListenAddress: listen}, nil
 	}
-	path := os.Getenv("ACCOUNT_PUBLISHER_CONFIG_FILE")
-	if path == "" {
-		return Config{}, errors.New("ACCOUNT_PUBLISHER_CONFIG_FILE is required when enabled")
-	}
-	encoded, err := os.ReadFile(path)
-	if err != nil {
-		return Config{}, fmt.Errorf("read publisher config: %w", err)
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
-	decoder.DisallowUnknownFields()
-	var file configFile
-	if err := decoder.Decode(&file); err != nil {
-		return Config{}, errors.New("invalid publisher config")
-	}
 	interval := 4500 * time.Millisecond
 	if value := os.Getenv("ACCOUNT_PUBLISHER_POLL_MILLISECONDS"); value != "" {
 		milliseconds, err := strconv.Atoi(value)
@@ -68,10 +51,34 @@ func LoadConfig() (Config, error) {
 		}
 		interval = time.Duration(milliseconds) * time.Millisecond
 	}
+	marketID, err := strconv.ParseUint(os.Getenv("ACCOUNT_PUBLISHER_LIGHTER_MARKET_ID"), 10, 16)
+	if err != nil || marketID == 0 || marketID >= 255 {
+		return Config{}, errors.New("ACCOUNT_PUBLISHER_LIGHTER_MARKET_ID must be between 1 and 254")
+	}
 	config := Config{
 		Enabled: true, ListenAddress: listen, PollInterval: interval,
-		LighterURL: file.LighterURL, PrimaryRPCURL: file.PrimaryRPCURL, SecondaryRPCURL: file.SecondaryRPCURL,
-		Coordinator: file.Coordinator, Application: file.Application, Accounts: file.Accounts,
+		CoordinatorDatabaseURL:      os.Getenv("ACCOUNT_PUBLISHER_COORDINATOR_DATABASE_URL"),
+		RobinhoodDatabaseURL:        os.Getenv("ACCOUNT_PUBLISHER_ROBINHOOD_DATABASE_URL"),
+		RobinhoodJournalDatabaseURL: os.Getenv("ACCOUNT_PUBLISHER_ROBINHOOD_JOURNAL_DATABASE_URL"),
+		PrimaryRPCURL:               os.Getenv("ACCOUNT_PUBLISHER_PRIMARY_RPC_URL"),
+		SecondaryRPCURL:             os.Getenv("ACCOUNT_PUBLISHER_SECONDARY_RPC_URL"),
+		LighterBridge: EndpointConfig{
+			URL: os.Getenv("ACCOUNT_PUBLISHER_LIGHTER_BRIDGE_URL"), Caller: os.Getenv("LIGHTER_PUBLISHER_BRIDGE_CALLER_ID"),
+			HMACKey: os.Getenv("LIGHTER_PUBLISHER_BRIDGE_HMAC_KEY"),
+		},
+		Coordinator: EndpointConfig{
+			URL: os.Getenv("ACCOUNT_PUBLISHER_COORDINATOR_URL"), Caller: os.Getenv("ACCOUNT_PUBLISHER_COORDINATOR_CALLER_ID"),
+			HMACKey: os.Getenv("ACCOUNT_PUBLISHER_COORDINATOR_HMAC_KEY"),
+		},
+		Application: EndpointConfig{
+			URL: os.Getenv("ACCOUNT_PUBLISHER_APPLICATION_URL"), Caller: os.Getenv("ACCOUNT_PUBLISHER_APPLICATION_CALLER_ID"),
+			HMACKey: os.Getenv("ACCOUNT_PUBLISHER_APPLICATION_HMAC_KEY"),
+		},
+		LighterMarketID:      uint16(marketID),
+		MinimumCollateralRaw: os.Getenv("ACCOUNT_PUBLISHER_MINIMUM_COLLATERAL_RAW"),
+		MinimumSettlementRaw: os.Getenv("ACCOUNT_PUBLISHER_MINIMUM_SETTLEMENT_RAW"),
+		MinimumOwnerGasRaw:   os.Getenv("ACCOUNT_PUBLISHER_MINIMUM_OWNER_GAS_RAW"),
+		MinimumSignerGasRaw:  os.Getenv("ACCOUNT_PUBLISHER_MINIMUM_SIGNER_GAS_RAW"),
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -80,45 +87,27 @@ func LoadConfig() (Config, error) {
 }
 
 func validateConfig(config Config) error {
-	if config.LighterURL != lighterMainnetURL || len(config.Accounts) == 0 {
-		return errors.New("publisher must use the pinned Lighter mainnet API and at least one account")
+	if config.CoordinatorDatabaseURL == "" || config.RobinhoodDatabaseURL == "" || config.RobinhoodJournalDatabaseURL == "" {
+		return errors.New("publisher read-only database URLs are required")
 	}
-	ids := make(map[string]struct{})
-	lighterAccounts := make(map[uint64]struct{})
-	vaults := make(map[string]struct{})
-	tokenFiles := make(map[string]struct{})
-	for _, account := range config.Accounts {
-		if !validExecutionID(account.ExecutionAccountID) || account.Lighter.MarketID == 0 ||
-			!decimalAtLeast(account.Lighter.MinimumCollateralRaw, "50") {
-			return errors.New("invalid account binding")
+	if config.LighterMarketID == 0 || !decimalAtLeast(config.MinimumCollateralRaw, "50") ||
+		!decimalAtLeast(config.MinimumSettlementRaw, "25000000") ||
+		!decimalAtLeast(config.MinimumOwnerGasRaw, "1") || !decimalAtLeast(config.MinimumSignerGasRaw, "1") {
+		return errors.New("publisher market or minimums are unsafe")
+	}
+	keys := make(map[string]struct{}, 3)
+	for _, endpoint := range []EndpointConfig{config.LighterBridge, config.Coordinator, config.Application} {
+		if endpoint.URL == "" || endpoint.Caller == "" || endpoint.HMACKey == "" {
+			return errors.New("publisher signed endpoints are required")
 		}
-		if validUUID(account.ExecutionAccountID) {
-			if account.ReadinessAccountID != account.ExecutionAccountID {
-				return errors.New("product readiness account must match the execution account")
-			}
-		} else if account.ExecutionAccountID != "singleton-mainnet-canary" || account.ReadinessAccountID != "" {
-			return errors.New("only the internal singleton may omit product readiness publication")
+		decoded, err := hex.DecodeString(endpoint.HMACKey)
+		if err != nil || len(decoded) != 32 || endpoint.HMACKey != strings.ToLower(endpoint.HMACKey) {
+			return errors.New("publisher HMAC keys must be 32-byte lowercase hex")
 		}
-		if _, exists := ids[account.ExecutionAccountID]; exists {
-			return errors.New("duplicate execution account binding")
+		if _, exists := keys[endpoint.HMACKey]; exists {
+			return errors.New("publisher HMAC keys must be distinct")
 		}
-		if _, exists := lighterAccounts[account.Lighter.AccountIndex]; exists {
-			return errors.New("cross-account Lighter binding")
-		}
-		vault := strings.ToLower(account.Robinhood.Vault)
-		if _, exists := vaults[vault]; exists {
-			return errors.New("cross-account vault binding")
-		}
-		if _, exists := tokenFiles[account.Lighter.ReadOnlyTokenFile]; exists {
-			return errors.New("cross-account token binding")
-		}
-		if err := validateRobinhoodBinding(account.Robinhood); err != nil {
-			return err
-		}
-		ids[account.ExecutionAccountID] = struct{}{}
-		lighterAccounts[account.Lighter.AccountIndex] = struct{}{}
-		vaults[vault] = struct{}{}
-		tokenFiles[account.Lighter.ReadOnlyTokenFile] = struct{}{}
+		keys[endpoint.HMACKey] = struct{}{}
 	}
 	return nil
 }

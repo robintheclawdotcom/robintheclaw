@@ -147,9 +147,13 @@ func (value *service) sign(
 }
 
 func (value *service) activeSecret(ctx context.Context, executionID string) (credential, []byte, error) {
-	record, err := value.store.Active(ctx, strings.ToLower(executionID))
+	executionID = strings.ToLower(executionID)
+	record, err := value.store.Active(ctx, executionID)
 	if err != nil {
 		return credential{}, nil, errors.New("execution account has no active Lighter credential")
+	}
+	if record.ExecutionAccountID != executionID || record.AccountIndex <= 0 || record.APIKeyIndex < 2 || record.APIKeyIndex > 254 {
+		return credential{}, nil, errors.New("active Lighter credential identity mismatch")
 	}
 	registered, err := value.lighter.RegisteredPublicKey(record.AccountIndex, record.APIKeyIndex)
 	if err != nil {

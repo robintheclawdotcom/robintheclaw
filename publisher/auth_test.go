@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -45,12 +43,7 @@ func TestSignedClientUsesValidUniqueReplayNonces(t *testing.T) {
 		writer.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
-	dir := t.TempDir()
-	keyFile := filepath.Join(dir, "hmac")
-	if err := os.WriteFile(keyFile, []byte(key), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	client, err := NewSignedClient(server.URL, "account-publisher", keyFile, server.Client())
+	client, err := NewSignedClient(server.URL, "account-publisher", key, server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}

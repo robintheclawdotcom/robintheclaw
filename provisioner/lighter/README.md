@@ -1,0 +1,21 @@
+# Lighter credential provisioner
+
+The provisioner owns envelope-encrypted Lighter credentials. Product callers can prepare and confirm owner-authorized key associations. The transaction signer can request account-bound signatures. The account publisher can request read-only state using only an `executionAccountId`. No route accepts or returns an Ethereum private key, Lighter private key, withdrawal, or transfer request.
+
+The publisher bridge requires a caller and 32-byte hex HMAC key distinct from the product and signer credentials:
+
+- `LIGHTER_PUBLISHER_BRIDGE_CALLER_ID=account-publisher`
+- `LIGHTER_PUBLISHER_BRIDGE_HMAC_KEY`
+- `LIGHTER_PUBLISHER_MARKET_ID` pinned to the approved AAPL perpetual
+- optional `LIGHTER_PUBLISHER_MAX_REQUESTS_PER_MINUTE` and `LIGHTER_PUBLISHER_MAX_CONCURRENT`
+
+For each authenticated request, the service verifies the active database binding and registered Lighter public key, decrypts the credential with account-bound KMS context, derives expected nonce from the key-association nonce and append-only signed-transaction audit, and creates a short-lived auth token only in process. It validates account identity on account, order, trade, and nonce responses before returning public evidence. Credential rotation or blocking makes the route fail closed.
+
+The account publisher uses the same caller ID and HMAC value under those exact environment names. The two Render services must receive the same secret value; it must differ from every product, coordinator, application, and signer HMAC.
+
+The bridge uses the existing durable `lighter_provisioner_request_nonces` table for replay protection and requires no schema migration.
+
+```bash
+go test ./...
+go vet ./...
+```

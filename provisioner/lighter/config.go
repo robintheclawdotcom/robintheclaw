@@ -13,28 +13,35 @@ import (
 )
 
 type config struct {
-	Enabled                     bool
-	ListenAddress               string
-	DatabaseURL                 string
-	KMSKeyID                    string
-	APIURL                      string
-	ChainID                     uint32
-	CallerID                    string
-	HMACKey                     []byte
-	SignerCallerID              string
-	SignerHMACKey               []byte
-	SigningMaxRequestsPerMinute uint16
-	SigningMaxConcurrent        uint8
-	AssociationTTL              time.Duration
+	Enabled                       bool
+	ListenAddress                 string
+	DatabaseURL                   string
+	KMSKeyID                      string
+	APIURL                        string
+	ChainID                       uint32
+	CallerID                      string
+	HMACKey                       []byte
+	SignerCallerID                string
+	SignerHMACKey                 []byte
+	PublisherCallerID             string
+	PublisherHMACKey              []byte
+	SigningMaxRequestsPerMinute   uint16
+	SigningMaxConcurrent          uint8
+	PublisherMaxRequestsPerMinute uint16
+	PublisherMaxConcurrent        uint8
+	PublisherMarketID             uint16
+	AssociationTTL                time.Duration
 }
 
 func loadConfig() (config, error) {
 	value := config{
-		Enabled:                     strings.EqualFold(os.Getenv("LIGHTER_PROVISIONER_ENABLED"), "true"),
-		ListenAddress:               envOr("LISTEN_ADDRESS", "0.0.0.0:8080"),
-		SigningMaxRequestsPerMinute: 120,
-		SigningMaxConcurrent:        8,
-		AssociationTTL:              10 * time.Minute,
+		Enabled:                       strings.EqualFold(os.Getenv("LIGHTER_PROVISIONER_ENABLED"), "true"),
+		ListenAddress:                 envOr("LISTEN_ADDRESS", "0.0.0.0:8080"),
+		SigningMaxRequestsPerMinute:   120,
+		SigningMaxConcurrent:          8,
+		PublisherMaxRequestsPerMinute: 600,
+		PublisherMaxConcurrent:        16,
+		AssociationTTL:                10 * time.Minute,
 	}
 	if !value.Enabled {
 		return value, nil
@@ -60,6 +67,17 @@ func loadConfig() (config, error) {
 	if bytes.Equal(value.HMACKey, value.SignerHMACKey) {
 		return config{}, errors.New("product and signer bridge HMAC keys must be distinct")
 	}
+	value.PublisherHMACKey, err = hex.DecodeString(os.Getenv("LIGHTER_PUBLISHER_BRIDGE_HMAC_KEY"))
+	if err != nil || len(value.PublisherHMACKey) != 32 {
+		return config{}, errors.New("LIGHTER_PUBLISHER_BRIDGE_HMAC_KEY must be a 32-byte hex key")
+	}
+	value.PublisherCallerID = os.Getenv("LIGHTER_PUBLISHER_BRIDGE_CALLER_ID")
+	if !validCallerID(value.PublisherCallerID) || value.PublisherCallerID == value.CallerID || value.PublisherCallerID == value.SignerCallerID {
+		return config{}, errors.New("LIGHTER_PUBLISHER_BRIDGE_CALLER_ID must be a distinct lowercase service identifier")
+	}
+	if bytes.Equal(value.PublisherHMACKey, value.HMACKey) || bytes.Equal(value.PublisherHMACKey, value.SignerHMACKey) {
+		return config{}, errors.New("publisher bridge HMAC key must be distinct")
+	}
 	value.DatabaseURL = os.Getenv("LIGHTER_PROVISIONER_DATABASE_URL")
 	if value.DatabaseURL == "" {
 		return config{}, errors.New("LIGHTER_PROVISIONER_DATABASE_URL is required")
@@ -77,6 +95,11 @@ func loadConfig() (config, error) {
 		return config{}, errors.New("LIGHTER_CHAIN_ID must be 300 or 304")
 	}
 	value.ChainID = uint32(chainID)
+	marketID, err := strconv.ParseUint(os.Getenv("LIGHTER_PUBLISHER_MARKET_ID"), 10, 16)
+	if err != nil || marketID == 0 || marketID >= 255 {
+		return config{}, errors.New("LIGHTER_PUBLISHER_MARKET_ID must be between 1 and 254")
+	}
+	value.PublisherMarketID = uint16(marketID)
 	if raw := os.Getenv("LIGHTER_ASSOCIATION_TTL"); raw != "" {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil || parsed < time.Minute || parsed > 30*time.Minute {
@@ -97,6 +120,20 @@ func loadConfig() (config, error) {
 			return config{}, errors.New("LIGHTER_SIGNING_MAX_CONCURRENT must be between 1 and 32")
 		}
 		value.SigningMaxConcurrent = uint8(parsed)
+	}
+	if raw := os.Getenv("LIGHTER_PUBLISHER_MAX_REQUESTS_PER_MINUTE"); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 16)
+		if err != nil || parsed == 0 || parsed > 6000 {
+			return config{}, errors.New("LIGHTER_PUBLISHER_MAX_REQUESTS_PER_MINUTE must be between 1 and 6000")
+		}
+		value.PublisherMaxRequestsPerMinute = uint16(parsed)
+	}
+	if raw := os.Getenv("LIGHTER_PUBLISHER_MAX_CONCURRENT"); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 8)
+		if err != nil || parsed == 0 || parsed > 64 {
+			return config{}, errors.New("LIGHTER_PUBLISHER_MAX_CONCURRENT must be between 1 and 64")
+		}
+		value.PublisherMaxConcurrent = uint8(parsed)
 	}
 	return value, nil
 }

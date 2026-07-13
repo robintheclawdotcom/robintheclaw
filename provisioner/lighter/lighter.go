@@ -34,6 +34,7 @@ type lighterClient interface {
 	Broadcast(context.Context, association) error
 	RegisteredPublicKey(int64, uint8) (string, error)
 	AuthToken(string, int64, uint8, time.Time) (string, error)
+	ObserveAccount(context.Context, string, int64, uint8, uint16, uint64) (lighterAccountState, error)
 	SignCreateOrder(string, int64, uint8, createOrderRequest) (signedTransaction, error)
 	SignModifyOrder(string, int64, uint8, modifyOrderRequest) (signedTransaction, error)
 	SignCancelOrder(string, int64, uint8, cancelOrderRequest) (signedTransaction, error)

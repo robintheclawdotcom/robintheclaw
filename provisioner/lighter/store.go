@@ -33,6 +33,8 @@ type credentialStore interface {
 	Activate(context.Context, credential) (credential, error)
 	Block(context.Context, credential, string) error
 	Active(context.Context, string) (credential, error)
+	ExpectedNonce(context.Context, credential) (uint64, error)
+	VerifyActive(context.Context, credential) error
 	ClaimAuthNonce(context.Context, string, string, time.Time) (bool, error)
 	Audit(context.Context, credential, string, map[string]any) error
 	AuditActive(context.Context, credential, string, map[string]any) error
@@ -326,6 +328,54 @@ func (value *pgStore) Active(ctx context.Context, executionID string) (credentia
 		ON b.active_credential_id = c.id
 		WHERE c.execution_account_id = $1
 		AND c.status = 'linked' AND b.status = 'linked'`, executionID))
+}
+
+func (value *pgStore) ExpectedNonce(ctx context.Context, record credential) (uint64, error) {
+	if record.ChangeNonce < 0 || record.ChangeNonce == int64(^uint64(0)>>1) {
+		return 0, errors.New("active credential nonce is invalid")
+	}
+	var expected int64
+	err := value.pool.QueryRow(ctx, `
+		SELECT GREATEST(
+			$3::bigint,
+			COALESCE(MAX((audit.details->>'nonce')::bigint) + 1, $3::bigint)
+		)
+		FROM lighter_credential_bindings AS binding
+		JOIN lighter_credentials AS credential ON credential.id = binding.active_credential_id
+		LEFT JOIN lighter_credential_audit AS audit
+			ON audit.credential_id = credential.id
+			AND audit.event = 'transaction_signed'
+			AND audit.details->>'nonce' ~ '^[0-9]+$'
+		WHERE binding.execution_account_id = $1
+		  AND binding.status = 'linked'
+		  AND credential.id = $2
+		  AND credential.status = 'linked'
+		GROUP BY binding.execution_account_id`, record.ExecutionAccountID, record.ID, record.ChangeNonce+1).Scan(&expected)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, errors.New("execution account credential changed during observation")
+	}
+	if err != nil || expected < 0 {
+		return 0, errors.New("read expected Lighter nonce")
+	}
+	return uint64(expected), nil
+}
+
+func (value *pgStore) VerifyActive(ctx context.Context, record credential) error {
+	var active bool
+	err := value.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM lighter_credential_bindings AS binding
+			JOIN lighter_credentials AS credential ON credential.id = binding.active_credential_id
+			WHERE binding.execution_account_id = $1
+			  AND binding.status = 'linked'
+			  AND credential.id = $2
+			  AND credential.status = 'linked'
+		)`, record.ExecutionAccountID, record.ID).Scan(&active)
+	if err != nil || !active {
+		return errors.New("execution account credential changed during observation")
+	}
+	return nil
 }
 
 func (value *pgStore) ClaimAuthNonce(ctx context.Context, caller, nonce string, expiresAt time.Time) (bool, error) {

@@ -9,11 +9,12 @@ import (
 )
 
 type service struct {
-	store    credentialStore
-	envelope *envelope
-	lighter  lighterClient
-	ttl      time.Duration
-	now      func() time.Time
+	store             credentialStore
+	envelope          *envelope
+	lighter           lighterClient
+	ttl               time.Duration
+	now               func() time.Time
+	publisherMarketID uint16
 }
 
 type prepareRequest struct {

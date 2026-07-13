@@ -2,125 +2,78 @@ package publisher
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
-type lighterFixture struct {
-	Account json.RawMessage `json:"account"`
-	Orders  json.RawMessage `json:"orders"`
-	Trades  json.RawMessage `json:"trades"`
-	Nonce   json.RawMessage `json:"nonce"`
-}
-
-func TestLighterRESTReconstruction(t *testing.T) {
-	fixture := loadLighterFixture(t)
-	server := lighterServer(t, fixture, 0)
-	defer server.Close()
-	binding := lighterTestBinding(t)
-	client, err := NewLighterClient(server.URL, server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	observation, err := client.Collect(context.Background(), binding)
+func TestLighterBridgeRequestContainsOnlyExecutionAccountID(t *testing.T) {
+	client, binding, closeServer := lighterBridgeFixture(t, func(request map[string]any, response *lighterBridgeResponse) {
+		if len(request) != 1 || request["executionAccountId"] != "10000000-0000-4000-8000-000000000001" {
+			t.Fatalf("unexpected bridge request: %#v", request)
+		}
+	})
+	defer closeServer()
+	observation, err := client.Collect(context.Background(), "10000000-0000-4000-8000-000000000001", binding)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if observation.AccountIndex != 77 || observation.Nonce != 42 || observation.ExpectedNonce != 42 ||
-		observation.MaintenanceMarginRatioMicros != 4_000_000 || !observation.NoUnknownOrders ||
-		!observation.NoUnknownPositions || !observation.Flat || !observation.CollateralReady || !observation.RESTReconstructed {
+		!observation.CollateralReady || !observation.RESTReconstructed {
 		t.Fatalf("unexpected observation: %+v", observation)
 	}
 }
 
-func TestLighterRejectsCrossAccountOrder(t *testing.T) {
-	fixture := loadLighterFixture(t)
-	fixture.Orders = json.RawMessage(`{"code":200,"orders":[{"market_index":5,"owner_account_index":78,"status":"open"}]}`)
-	server := lighterServer(t, fixture, 0)
-	defer server.Close()
-	client, _ := NewLighterClient(server.URL, server.Client())
-	_, err := client.Collect(context.Background(), lighterTestBinding(t))
-	if err == nil {
-		t.Fatal("expected account substitution to fail")
+func TestLighterBridgeRejectsCredentialAccountSubstitution(t *testing.T) {
+	client, binding, closeServer := lighterBridgeFixture(t, func(_ map[string]any, response *lighterBridgeResponse) {
+		response.AccountIndex = 78
+	})
+	defer closeServer()
+	_, err := client.Collect(context.Background(), "10000000-0000-4000-8000-000000000001", binding)
+	if err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+		t.Fatalf("expected identity mismatch, got %v", err)
 	}
 }
 
-func TestLighterPropagatesRateLimit(t *testing.T) {
-	server := lighterServer(t, loadLighterFixture(t), http.StatusTooManyRequests)
-	defer server.Close()
-	client, _ := NewLighterClient(server.URL, server.Client())
-	_, err := client.Collect(context.Background(), lighterTestBinding(t))
-	if !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("expected rate limit, got %v", err)
-	}
-}
-
-func TestLighterRejectsTradingAuthToken(t *testing.T) {
-	if validLighterReadOnlyToken("1999999999:77:4:aaaaaaaaaaaaaaaa", 77, time.Now()) {
-		t.Fatal("transaction-capable auth token must be rejected")
-	}
-}
-
-func loadLighterFixture(t *testing.T) lighterFixture {
+func lighterBridgeFixture(t *testing.T, mutate func(map[string]any, *lighterBridgeResponse)) (*LighterClient, LighterBinding, func()) {
 	t.Helper()
-	encoded, err := os.ReadFile("testdata/lighter.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fixture lighterFixture
-	if err := json.Unmarshal(encoded, &fixture); err != nil {
-		t.Fatal(err)
-	}
-	return fixture
-}
-
-func lighterServer(t *testing.T, fixture lighterFixture, forcedStatus int) *httptest.Server {
-	t.Helper()
+	key := strings.Repeat("42", 32)
+	caller := "account-publisher"
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if forcedStatus != 0 {
-			writer.WriteHeader(forcedStatus)
-			return
+		body, _ := io.ReadAll(request.Body)
+		var input map[string]any
+		if err := json.Unmarshal(body, &input); err != nil {
+			t.Fatal(err)
 		}
-		if request.Header.Get("Authorization") != "ro:77:single:1999999999:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
-			writer.WriteHeader(http.StatusUnauthorized)
-			return
+		response := lighterBridgeResponse{
+			ExecutionAccountID: "10000000-0000-4000-8000-000000000001", AccountIndex: 77, APIKeyIndex: 4,
+			MarketID: 5, CredentialVersion: 1, Nonce: 42, ExpectedNonce: 42, CollateralRaw: "100",
+			MaintenanceRequirementRaw: "25", MaintenanceMarginRatioMicros: 4_000_000,
+			NoUnknownOrders: true, NoUnknownPositions: true, Flat: true, RESTReconstructed: true,
+			StateDigest: strings.Repeat("a", 64), ObservedAt: time.Now().UTC(),
 		}
-		var response json.RawMessage
-		switch request.URL.Path {
-		case "/api/v1/account":
-			response = fixture.Account
-		case "/api/v1/accountActiveOrders":
-			response = fixture.Orders
-		case "/api/v1/trades":
-			response = fixture.Trades
-		case "/api/v1/nextNonce":
-			response = fixture.Nonce
-		default:
-			writer.WriteHeader(http.StatusNotFound)
-			return
-		}
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write(response)
+		mutate(input, &response)
+		encoded, _ := json.Marshal(response)
+		digest := sha256.Sum256(encoded)
+		canonical := fmt.Sprintf("RESPONSE\n%s\n%s\n%s\n%d\n%x", request.URL.Path, caller, request.Header.Get("X-RTC-Nonce"), http.StatusOK, digest)
+		decodedKey, _ := hex.DecodeString(key)
+		mac := hmac.New(sha256.New, decodedKey)
+		_, _ = mac.Write([]byte(canonical))
+		writer.Header().Set("X-RTC-Response-Signature", hex.EncodeToString(mac.Sum(nil)))
+		_, _ = writer.Write(encoded)
 	}))
-	return server
-}
-
-func lighterTestBinding(t *testing.T) LighterBinding {
-	t.Helper()
-	dir := t.TempDir()
-	token := filepath.Join(dir, "token")
-	nonce := filepath.Join(dir, "nonce")
-	if err := os.WriteFile(token, []byte("ro:77:single:1999999999:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"), 0o600); err != nil {
+	client, err := NewLighterClient(EndpointConfig{URL: server.URL, Caller: caller, HMACKey: key}, server.Client())
+	if err != nil {
+		server.Close()
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(nonce, []byte("42\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return LighterBinding{AccountIndex: 77, APIKeyIndex: 4, MarketID: 5, ReadOnlyTokenFile: token, ExpectedNonceFile: nonce, MinimumCollateralRaw: "50"}
+	return client, LighterBinding{AccountIndex: 77, APIKeyIndex: 4, MarketID: 5, MinimumCollateralRaw: "50"}, server.Close
 }

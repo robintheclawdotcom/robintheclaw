@@ -15,10 +15,11 @@ import (
 
 type Service struct {
 	config      Config
-	lighter     *LighterClient
-	robinhood   *RobinhoodClient
-	coordinator *SignedClient
-	application *SignedClient
+	accounts    AccountSource
+	lighter     lighterCollector
+	robinhood   robinhoodCollector
+	coordinator snapshotClient
+	application snapshotClient
 	session     string
 	mu          sync.Mutex
 	sequences   map[string]int64
@@ -26,27 +27,50 @@ type Service struct {
 	lastSuccess atomic.Int64
 }
 
+type lighterCollector interface {
+	Collect(context.Context, string, LighterBinding) (LighterObservation, error)
+}
+
+type robinhoodCollector interface {
+	Collect(context.Context, RobinhoodBinding) (RobinhoodObservation, error)
+}
+
+type snapshotClient interface {
+	Post(context.Context, string, []byte) error
+}
+
 func NewService(config Config, client *http.Client) (*Service, error) {
 	if !config.Enabled {
 		return &Service{config: config}, nil
 	}
-	lighter, err := NewLighterClient(config.LighterURL, client)
+	startup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	accounts, err := NewPGAccountSource(startup, config)
 	if err != nil {
+		return nil, err
+	}
+	lighter, err := NewLighterClient(config.LighterBridge, client)
+	if err != nil {
+		accounts.Close()
 		return nil, err
 	}
 	robinhood, err := NewRobinhoodClient(config.PrimaryRPCURL, config.SecondaryRPCURL, client)
 	if err != nil {
+		accounts.Close()
 		return nil, err
 	}
-	coordinator, err := NewSignedClient(config.Coordinator.URL, config.Coordinator.Caller, config.Coordinator.KeyFile, client)
+	coordinator, err := NewSignedClient(config.Coordinator.URL, config.Coordinator.Caller, config.Coordinator.HMACKey, client)
 	if err != nil {
+		accounts.Close()
 		return nil, err
 	}
-	application, err := NewSignedClient(config.Application.URL, config.Application.Caller, config.Application.KeyFile, client)
+	application, err := NewSignedClient(config.Application.URL, config.Application.Caller, config.Application.HMACKey, client)
 	if err != nil {
+		accounts.Close()
 		return nil, err
 	}
-	if coordinator.key == application.key {
+	if coordinator.key == application.key || coordinator.key == lighter.bridge.key || application.key == lighter.bridge.key {
+		accounts.Close()
 		return nil, errors.New("coordinator and readiness HMAC keys must be distinct")
 	}
 	sessionBytes := make([]byte, 16)
@@ -54,7 +78,7 @@ func NewService(config Config, client *http.Client) (*Service, error) {
 		return nil, err
 	}
 	return &Service{
-		config: config, lighter: lighter, robinhood: robinhood, coordinator: coordinator,
+		config: config, accounts: accounts, lighter: lighter, robinhood: robinhood, coordinator: coordinator,
 		application: application, session: hex.EncodeToString(sessionBytes), sequences: make(map[string]int64),
 	}, nil
 }
@@ -90,8 +114,17 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	if !s.config.Enabled {
 		return errors.New("publisher disabled")
 	}
-	allSucceeded := true
-	for _, account := range s.config.Accounts {
+	discovery, err := s.accounts.List(ctx)
+	if err != nil {
+		s.ready.Store(false)
+		return err
+	}
+	if len(discovery.Accounts) == 0 {
+		s.ready.Store(false)
+		return errors.New("no active execution accounts")
+	}
+	allSucceeded := len(discovery.RejectedIDs) == 0
+	for _, account := range discovery.Accounts {
 		accountCtx, cancel := context.WithTimeout(ctx, 4500*time.Millisecond)
 		type lighterCollection struct {
 			observation LighterObservation
@@ -104,7 +137,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		lighterResultCh := make(chan lighterCollection, 1)
 		robinhoodResultCh := make(chan robinhoodCollection, 1)
 		go func() {
-			observation, err := s.lighter.Collect(accountCtx, account.Lighter)
+			observation, err := s.lighter.Collect(accountCtx, account.ExecutionAccountID, account.Lighter)
 			lighterResultCh <- lighterCollection{observation: observation, err: err}
 		}()
 		go func() {
@@ -192,10 +225,10 @@ func (s *Service) publishAccount(ctx context.Context, account AccountBinding, li
 			return err
 		}
 	}
-	return s.publishReadiness(ctx, account.ReadinessAccountID, lighter, robinhood)
+	return s.publishReadiness(ctx, account.ReadinessAccountID, account.PolicyActive, lighter, robinhood)
 }
 
-func (s *Service) publishReadiness(ctx context.Context, accountID string, lighter LighterObservation, robinhood RobinhoodObservation) error {
+func (s *Service) publishReadiness(ctx context.Context, accountID string, policyActive bool, lighter LighterObservation, robinhood RobinhoodObservation) error {
 	if accountID == "" {
 		return nil
 	}
@@ -210,7 +243,10 @@ func (s *Service) publishReadiness(ctx context.Context, accountID string, lighte
 		readiness("execution_gas_ready", robinhood.SignerGasReady, "robinhood-dual-rpc", digest, now),
 		readiness("lighter_funded", lighter.CollateralReady, "lighter-auth-rest", digest, now),
 		readiness("lighter_linked", lighter.RESTReconstructed && lighter.Nonce == lighter.ExpectedNonce, "lighter-auth-rest", digest, now),
-		readiness("policy_active", false, "mainnet-policy-operator", EvidenceDigest("operator-activation-required"), now),
+		readiness("policy_active", policyActive, "coordinator-account-policy", EvidenceDigest(struct {
+			ExecutionAccountID string
+			Active             bool
+		}{accountID, policyActive}), now),
 		readiness("reconciled", reconciled, "account-state-reconciler", digest, now),
 		readiness("robinhood_deployed", robinhood.WiringVerified && robinhood.FinalityHealthy, "robinhood-dual-rpc", digest, now),
 		readiness("robinhood_funded", robinhood.FundingReady, "robinhood-dual-rpc", digest, now),
@@ -269,5 +305,11 @@ func (s *Service) HealthHandler() http.Handler {
 }
 
 func (s *Service) String() string {
-	return fmt.Sprintf("account publisher enabled=%t accounts=%d", s.config.Enabled, len(s.config.Accounts))
+	return fmt.Sprintf("account publisher enabled=%t accounts=dynamic", s.config.Enabled)
+}
+
+func (s *Service) Close() {
+	if s.accounts != nil {
+		s.accounts.Close()
+	}
 }

@@ -22,11 +22,12 @@ func newTestService() (*service, *memoryStore, *fakeLighter) {
 	lighter := &fakeLighter{recoveredOwner: testOwner}
 	fixedNow := time.Unix(2_000_000_000, 0)
 	return &service{
-		store:    store,
-		envelope: vault,
-		lighter:  lighter,
-		ttl:      10 * time.Minute,
-		now:      func() time.Time { return fixedNow },
+		store:             store,
+		envelope:          vault,
+		lighter:           lighter,
+		ttl:               10 * time.Minute,
+		now:               func() time.Time { return fixedNow },
+		publisherMarketID: 5,
 	}, store, lighter
 }
 

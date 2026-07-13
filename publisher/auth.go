@@ -6,13 +6,14 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -25,7 +26,7 @@ type SignedClient struct {
 	client  *http.Client
 }
 
-func NewSignedClient(baseURL, caller, keyFile string, client *http.Client) (*SignedClient, error) {
+func NewSignedClient(baseURL, caller, keyHex string, client *http.Client) (*SignedClient, error) {
 	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, errors.New("invalid signed endpoint URL")
@@ -36,18 +37,20 @@ func NewSignedClient(baseURL, caller, keyFile string, client *http.Client) (*Sig
 	if !validCaller(caller) {
 		return nil, errors.New("invalid caller id")
 	}
-	keyBytes, err := readSecretFile(keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("read HMAC key: %w", err)
-	}
-	decoded, err := hex.DecodeString(strings.TrimSpace(string(keyBytes)))
-	if err != nil || len(decoded) != 32 || strings.TrimSpace(string(keyBytes)) != strings.ToLower(strings.TrimSpace(string(keyBytes))) {
+	decoded, err := hex.DecodeString(keyHex)
+	if err != nil || len(decoded) != 32 || keyHex != strings.ToLower(keyHex) {
 		return nil, errors.New("HMAC key must be 32-byte lowercase hex")
 	}
 	var key [32]byte
 	copy(key[:], decoded)
 	if client == nil {
 		client = &http.Client{Timeout: 4 * time.Second}
+	} else {
+		clone := *client
+		client = &clone
+	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errors.New("signed endpoint redirect refused")
 	}
 	return &SignedClient{baseURL: strings.TrimRight(baseURL, "/"), caller: caller, key: key, client: client}, nil
 }
@@ -88,15 +91,63 @@ func (c *SignedClient) Post(ctx context.Context, path string, body []byte) error
 	return nil
 }
 
-func readSecretFile(path string) ([]byte, error) {
-	info, err := os.Stat(path)
+func (c *SignedClient) Call(ctx context.Context, path string, body []byte, target any) error {
+	nonceBytes := make([]byte, 24)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return err
+	}
+	nonce := hex.EncodeToString(nonceBytes)
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	digest := sha256.Sum256(body)
+	canonical := strings.Join([]string{"POST", path, c.caller, timestamp, nonce, hex.EncodeToString(digest[:])}, "\n")
+	mac := hmac.New(sha256.New, c.key[:])
+	_, _ = mac.Write([]byte(canonical))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, errors.New("secret file must not be accessible by group or other")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-RTC-Caller", c.caller)
+	request.Header.Set("X-RTC-Timestamp", timestamp)
+	request.Header.Set("X-RTC-Nonce", nonce)
+	request.Header.Set("X-RTC-Signature", hex.EncodeToString(mac.Sum(nil)))
+	response, err := c.client.Do(request)
+	if err != nil {
+		return err
 	}
-	return os.ReadFile(path)
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 64<<10+1))
+	if err != nil || len(responseBody) > 64<<10 {
+		return errors.New("invalid authenticated response")
+	}
+	provided, err := hex.DecodeString(response.Header.Get("X-RTC-Response-Signature"))
+	if err != nil || len(provided) != sha256.Size {
+		return errors.New("unauthenticated response")
+	}
+	responseDigest := sha256.Sum256(responseBody)
+	responseCanonical := strings.Join([]string{
+		"RESPONSE", path, c.caller, nonce, strconv.Itoa(response.StatusCode), hex.EncodeToString(responseDigest[:]),
+	}, "\n")
+	responseMAC := hmac.New(sha256.New, c.key[:])
+	_, _ = responseMAC.Write([]byte(responseCanonical))
+	if subtle.ConstantTimeCompare(responseMAC.Sum(nil), provided) != 1 {
+		return errors.New("unauthenticated response")
+	}
+	if response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusMethodNotAllowed {
+		return ErrRateLimited
+	}
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("authenticated endpoint returned status %d", response.StatusCode)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return errors.New("invalid authenticated response")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("invalid authenticated response")
+	}
+	return nil
 }
 
 func validCaller(value string) bool {

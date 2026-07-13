@@ -21,6 +21,7 @@ var ErrRateLimited = errors.New("upstream rate limited")
 type AccountBinding struct {
 	ExecutionAccountID string           `json:"executionAccountId"`
 	ReadinessAccountID string           `json:"readinessExecutionAccountId,omitempty"`
+	PolicyActive       bool             `json:"policyActive"`
 	Lighter            LighterBinding   `json:"lighter"`
 	Robinhood          RobinhoodBinding `json:"robinhood"`
 }
@@ -29,8 +30,6 @@ type LighterBinding struct {
 	AccountIndex         uint64 `json:"accountIndex"`
 	APIKeyIndex          uint8  `json:"apiKeyIndex"`
 	MarketID             uint16 `json:"marketId"`
-	ReadOnlyTokenFile    string `json:"readOnlyTokenFile"`
-	ExpectedNonceFile    string `json:"expectedNonceFile"`
 	MinimumCollateralRaw string `json:"minimumCollateralRaw"`
 }
 
@@ -46,8 +45,7 @@ type RobinhoodBinding struct {
 	MinimumSettlementRaw string   `json:"minimumSettlementRaw"`
 	MinimumOwnerGasRaw   string   `json:"minimumOwnerGasRaw"`
 	MinimumSignerGasRaw  string   `json:"minimumSignerGasRaw"`
-	ReceiptJournalFile   string   `json:"receiptJournalFile"`
-	ReceiptHashes        []string `json:"-"`
+	ReceiptHashes        []string `json:"receiptHashes"`
 }
 
 type LighterObservation struct {

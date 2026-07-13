@@ -189,6 +189,26 @@ func (value *memoryStore) Active(_ context.Context, executionID string) (credent
 	return cloneCredential(record), nil
 }
 
+func (value *memoryStore) ExpectedNonce(_ context.Context, record credential) (uint64, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	bound, exists := value.bindings[record.ExecutionAccountID]
+	if !exists || bound.Status != "linked" || bound.ActiveCredentialID != record.ID || record.ChangeNonce < 0 {
+		return 0, errors.New("execution account credential changed during observation")
+	}
+	return uint64(record.ChangeNonce) + 1, nil
+}
+
+func (value *memoryStore) VerifyActive(_ context.Context, record credential) error {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	bound, exists := value.bindings[record.ExecutionAccountID]
+	if !exists || bound.Status != "linked" || bound.ActiveCredentialID != record.ID || value.records[record.ID].Status != statusLinked {
+		return errors.New("execution account credential changed during observation")
+	}
+	return nil
+}
+
 func (value *memoryStore) ClaimAuthNonce(_ context.Context, caller, nonce string, expiresAt time.Time) (bool, error) {
 	value.mu.Lock()
 	defer value.mu.Unlock()
@@ -257,12 +277,14 @@ func copyStringMap(source map[string]string) map[string]string {
 }
 
 type fakeLighter struct {
-	mu             sync.Mutex
-	generated      int
-	recoveredOwner string
-	registered     string
-	broadcastErr   error
-	broadcasts     int
+	mu                   sync.Mutex
+	generated            int
+	recoveredOwner       string
+	registered           string
+	broadcastErr         error
+	broadcasts           int
+	observedAccountIndex int64
+	observeErr           error
 }
 
 func (value *fakeLighter) GenerateKey() (string, string, error) {
@@ -305,6 +327,22 @@ func (value *fakeLighter) RegisteredPublicKey(_ int64, _ uint8) (string, error) 
 
 func (*fakeLighter) AuthToken(_ string, accountIndex int64, apiKeyIndex uint8, expiresAt time.Time) (string, error) {
 	return fmt.Sprintf("auth-%d-%d-%d", accountIndex, apiKeyIndex, expiresAt.Unix()), nil
+}
+
+func (value *fakeLighter) ObserveAccount(_ context.Context, _ string, accountIndex int64, apiKeyIndex uint8, marketID uint16, expectedNonce uint64) (lighterAccountState, error) {
+	if value.observeErr != nil {
+		return lighterAccountState{}, value.observeErr
+	}
+	if value.observedAccountIndex != 0 {
+		accountIndex = value.observedAccountIndex
+	}
+	return lighterAccountState{
+		AccountIndex: uint64(accountIndex), APIKeyIndex: apiKeyIndex, MarketID: marketID,
+		Nonce: expectedNonce, ExpectedNonce: expectedNonce, CollateralRaw: "100",
+		MaintenanceRequirementRaw: "25", MaintenanceMarginRatioMicros: 4_000_000,
+		NoUnknownOrders: true, NoUnknownPositions: true, Flat: true, RESTReconstructed: true,
+		StateDigest: strings.Repeat("a", 64), ObservedAt: time.Unix(2_000_000_000, 0).UTC(),
+	}, nil
 }
 
 func (*fakeLighter) SignCreateOrder(_ string, accountIndex int64, apiKeyIndex uint8, request createOrderRequest) (signedTransaction, error) {

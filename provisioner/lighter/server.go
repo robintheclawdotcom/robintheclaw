@@ -17,12 +17,14 @@ import (
 const maxBodyBytes = 64 << 10
 
 type server struct {
-	config       config
-	service      *service
-	store        credentialStore
-	now          func() time.Time
-	signingSlots chan struct{}
-	signingRate  provisionerRate
+	config         config
+	service        *service
+	store          credentialStore
+	now            func() time.Time
+	signingSlots   chan struct{}
+	signingRate    provisionerRate
+	publisherSlots chan struct{}
+	publisherRate  provisionerRate
 }
 
 type provisionerRate struct {
@@ -59,24 +61,39 @@ func (value *server) handler() http.Handler {
 	mux.Handle("POST /v1/signer/cancel-order", value.authorizeSigner(http.HandlerFunc(value.cancelOrder)))
 	mux.Handle("POST /v1/signer/cancel-all", value.authorizeSigner(http.HandlerFunc(value.cancelAll)))
 	mux.Handle("POST /v1/signer/auth-token", value.authorizeSigner(http.HandlerFunc(value.authToken)))
+	mux.Handle("POST /v1/publisher/account-state", value.authorizePublisher(http.HandlerFunc(value.publisherAccountState)))
 	return securityHeaders(mux)
 }
 
 func (value *server) authorizeSigner(next http.Handler) http.Handler {
+	return value.authorizePrivate(
+		next, value.config.SignerHMACKey, value.config.SignerCallerID,
+		value.signingSlots, &value.signingRate, value.config.SigningMaxRequestsPerMinute, "signing",
+	)
+}
+
+func (value *server) authorizePublisher(next http.Handler) http.Handler {
+	return value.authorizePrivate(
+		next, value.config.PublisherHMACKey, value.config.PublisherCallerID,
+		value.publisherSlots, &value.publisherRate, value.config.PublisherMaxRequestsPerMinute, "publisher",
+	)
+}
+
+func (value *server) authorizePrivate(next http.Handler, key []byte, caller string, slots chan struct{}, rate *provisionerRate, limit uint16, label string) http.Handler {
 	limited := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if value.signingSlots == nil {
-			writeError(w, http.StatusServiceUnavailable, "signing bridge disabled")
+		if slots == nil {
+			writeError(w, http.StatusServiceUnavailable, label+" bridge disabled")
 			return
 		}
 		select {
-		case value.signingSlots <- struct{}{}:
-			defer func() { <-value.signingSlots }()
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
 		default:
-			writeError(w, http.StatusTooManyRequests, "signing bridge busy")
+			writeError(w, http.StatusTooManyRequests, label+" bridge busy")
 			return
 		}
-		if !value.signingRate.allow(value.now(), value.config.SigningMaxRequestsPerMinute) {
-			writeError(w, http.StatusTooManyRequests, "signing rate limit exceeded")
+		if !rate.allow(value.now(), limit) {
+			writeError(w, http.StatusTooManyRequests, label+" rate limit exceeded")
 			return
 		}
 		next.ServeHTTP(w, request)
@@ -89,12 +106,12 @@ func (value *server) authorizeSigner(next http.Handler) http.Handler {
 		canonical := fmt.Sprintf(
 			"RESPONSE\n%s\n%s\n%s\n%d\n%x",
 			request.URL.Path,
-			value.config.SignerCallerID,
+			caller,
 			request.Header.Get("X-RTC-Nonce"),
 			response.status,
 			digest,
 		)
-		mac := hmac.New(sha256.New, value.config.SignerHMACKey)
+		mac := hmac.New(sha256.New, key)
 		_, _ = mac.Write([]byte(canonical))
 		for key, values := range response.header {
 			for _, item := range values {
@@ -105,7 +122,7 @@ func (value *server) authorizeSigner(next http.Handler) http.Handler {
 		w.WriteHeader(response.status)
 		_, _ = w.Write(body)
 	})
-	return value.authorizeWith(value.config.SignerHMACKey, value.config.SignerCallerID, signed)
+	return value.authorizeWith(key, caller, signed)
 }
 
 func (value *server) authorizeWith(key []byte, caller string, next http.Handler) http.Handler {
@@ -219,6 +236,19 @@ func (value *server) authToken(w http.ResponseWriter, request *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (value *server) publisherAccountState(w http.ResponseWriter, request *http.Request) {
+	var body publisherAccountStateRequest
+	if err := decodeBody(w, request, &body); err != nil {
+		return
+	}
+	result, err := value.service.publisherAccountState(request.Context(), body)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (value *server) createOrder(w http.ResponseWriter, request *http.Request) {
 	var body createOrderRequest
 	if err := decodeBody(w, request, &body); err != nil {
@@ -289,6 +319,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errNotFound):
 		writeError(w, http.StatusNotFound, "link not found")
+	case errors.Is(err, errObservationRateLimited):
+		writeError(w, http.StatusTooManyRequests, "Lighter observation rate limited")
 	case errors.Is(err, errBindingMismatch), errors.Is(err, errRotationOpen):
 		writeError(w, http.StatusConflict, err.Error())
 	default:

@@ -1,33 +1,40 @@
 # Account state publisher
 
-This service reconstructs account-scoped Lighter and Robinhood Chain state and publishes short-lived, HMAC-authenticated snapshots to the execution coordinator and product readiness API. It starts disabled. It never sends orders, transfers, or withdrawals.
+This service reconstructs account-scoped Lighter and Robinhood Chain state and publishes short-lived, HMAC-authenticated snapshots to the execution coordinator and product readiness API. It starts disabled and has no order, transfer, withdrawal, or activation endpoint.
 
-The Lighter adapter is pinned to `https://mainnet.zklighter.elliot.ai` and uses only the documented account, active-order, trade, and next-nonce REST endpoints. Its credential is a read-only token stored in a mode-0600 file. Lighter documents that read-only tokens can access authenticated data without transaction-signing authority, that API-key nonces are account-specific, and that REST rate limits require backoff: [API keys](https://apidocs.lighter.xyz/docs/api-keys), [rate limits](https://apidocs.lighter.xyz/docs/rate-limits), [WebSocket reference](https://apidocs.lighter.xyz/docs/websocket-reference).
+Every cycle begins with authoritative account discovery. The publisher reads active registered accounts from the coordinator, exact active graphs from the Robinhood provisioner, and deployment and execution transaction hashes from the Robinhood signer journal. It uses database roles with `SELECT` only and also sets each connection to read-only. A missing or mismatched tenant graph omits that tenant and keeps the service unready; a cross-tenant collision or malformed shared journal aborts the cycle. Accounts that become blocked or closed are absent from the next cycle and receive no new snapshots.
 
-The Robinhood adapter requires two different RPC provider hostnames. At the same finalized block it compares chain ID, sync status, safe/finalized heads, canonical registry/vault bindings, vault code hash, owner and execution gas, USDG balance, risk state, and every receipt in the account-bound journal. A difference, reorg, missing receipt, failed receipt, or rate limit fails closed. Robinhood documents chain ID 4663, standard EVM JSON-RPC, ETH gas, the production RPC choices, and canonical token addresses: [connecting](https://docs.robinhood.com/chain/connecting/), [token contracts](https://docs.robinhood.com/chain/contracts/).
+Lighter credentials never enter this process. The publisher sends only `executionAccountId` to the private Lighter provisioner bridge. The provisioner resolves and verifies the account-bound credential, reconstructs account, active-order, trade, and next-nonce state, and returns public evidence over a separately keyed, replay-protected HMAC channel. The publisher verifies the response signature and exact execution-account, Lighter-account, API-key, market, and credential-version identity.
 
-## Activation boundary
+The Robinhood adapter requires two independent RPC provider hostnames. At the same finalized block it compares chain ID, sync status, safe and finalized heads, canonical registry and vault bindings, vault code hash, owner and execution gas, USDG balance, risk state, and every authoritative receipt. A difference, reorg, missing receipt, failed receipt, or rate limit fails closed.
 
-`policy_active` is deliberately published as `false`. The state publishers cannot authorize capital. An operator-controlled, signed activation authority still has to prove the audit, legal and venue, oracle, route, key, reconciliation, alerting, exit, and observation-period gates before replacing that evidence.
+## Policy activation boundary
 
-The official Lighter account WebSocket channels do not document one contiguous sequence shared by orders, positions, collateral, and trades. `StreamTracker` therefore fails closed on session or sequence gaps and requires a complete REST reconstruction before health can recover; the current daemon performs the authoritative REST reconstruction every cycle. A reviewed adapter for a documented cross-channel sequence is still required before relying on WebSocket deltas to reduce polling load for larger cohorts.
+`policy_active` is derived only from coordinator state for the exact registered execution account. Global, strategy, and account controls must all be `ACTIVE`; the account and strategy manifest digests must equal the registered digest; and venue approval, oracle, sequencer, reconciliation, exit authority, alerting, and safe rotation must all be ready. Missing rows, nulls, mismatches, or one false gate publish `false`. This service cannot write any of those controls or gates.
 
 ## Configuration
 
-Set `ACCOUNT_PUBLISHER_ENABLED=true` and point `ACCOUNT_PUBLISHER_CONFIG_FILE` at a non-secret JSON file. HMAC keys, Lighter read-only tokens, receipt journals, and signer-owned expected-nonce files are referenced by path and must be mode 0600. The coordinator and application HMAC keys must be different. `ACCOUNT_PUBLISHER_POLL_MILLISECONDS` may be 4000–4500; the default is 4500, below Lighter's documented standard-account REST limit for one authenticated account.
+Set:
 
-Each account binding contains:
+- `ACCOUNT_PUBLISHER_ENABLED=true`
+- `ACCOUNT_PUBLISHER_COORDINATOR_DATABASE_URL` to a coordinator role with `SELECT` only
+- `ACCOUNT_PUBLISHER_ROBINHOOD_DATABASE_URL` to a Robinhood provisioner role with `SELECT` only
+- `ACCOUNT_PUBLISHER_ROBINHOOD_JOURNAL_DATABASE_URL` to a Robinhood signer-journal role with `SELECT` only
+- `ACCOUNT_PUBLISHER_PRIMARY_RPC_URL` and `ACCOUNT_PUBLISHER_SECONDARY_RPC_URL` to independent Robinhood RPC providers
+- `ACCOUNT_PUBLISHER_LIGHTER_BRIDGE_URL` plus shared `LIGHTER_PUBLISHER_BRIDGE_CALLER_ID` and `LIGHTER_PUBLISHER_BRIDGE_HMAC_KEY`
+- `ACCOUNT_PUBLISHER_COORDINATOR_URL`, `ACCOUNT_PUBLISHER_COORDINATOR_CALLER_ID`, and `ACCOUNT_PUBLISHER_COORDINATOR_HMAC_KEY`
+- `ACCOUNT_PUBLISHER_APPLICATION_URL`, `ACCOUNT_PUBLISHER_APPLICATION_CALLER_ID`, and `ACCOUNT_PUBLISHER_APPLICATION_HMAC_KEY`
+- `ACCOUNT_PUBLISHER_LIGHTER_MARKET_ID` pinned to the approved AAPL perpetual
+- `ACCOUNT_PUBLISHER_MINIMUM_COLLATERAL_RAW`, `ACCOUNT_PUBLISHER_MINIMUM_SETTLEMENT_RAW`, `ACCOUNT_PUBLISHER_MINIMUM_OWNER_GAS_RAW`, and `ACCOUNT_PUBLISHER_MINIMUM_SIGNER_GAS_RAW`
+- optionally, `ACCOUNT_PUBLISHER_POLL_MILLISECONDS` from 4000 through 4500
 
-- an opaque execution account ID and, for user accounts, the same UUID in `readinessExecutionAccountId`;
-- the exact Lighter account, API-key, and AAPL market indexes;
-- the Lighter read-only token path and signer-owned next-nonce path;
-- the canonical registry, factory, vault, risk, adapter, owner, and signer addresses;
-- the expected vault code hash and minimum balances;
-- a mode-0600 receipt journal path whose JSON is `{"vault":"0x...","hashes":["0x..."]}`.
+The three HMAC environment secrets must be distinct 32-byte lowercase hex values. There is no mounted config file, account list, Lighter credential, expected-nonce file, or receipt-journal file in publisher configuration. Render can wire service URLs with `fromService` and keep the HMACs as synchronized secret environment variables.
 
-The receipt journal is re-read on every cycle. A vault mismatch, duplicate hash, or malformed hash blocks publication. The signer-owned nonce file must be replaced atomically after nonce reservation; a missing or mismatched value makes `nonce_aligned` false.
+The database roles require `SELECT` on:
 
-The pre-existing `singleton-mainnet-canary` coordinator account is the only binding allowed to omit `readinessExecutionAccountId`; it has no product-owned agent record. All user accounts must publish to both destinations under the same UUID.
+- coordinator: `execution_account_registrations`, `execution_accounts`, `execution_control`, `execution_strategy_control`, `execution_account_control`, and `execution_account_readiness`;
+- Robinhood provisioner: `robinhood_execution_bindings` excluding any need to expose `kms_key_id`;
+- Robinhood signer: `robinhood_signer_deployments` and `robinhood_signer_transactions` excluding signed transaction bytes.
 
 ```bash
 go test ./...

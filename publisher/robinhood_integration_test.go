@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -55,19 +53,14 @@ func TestRobinhoodDualRPCDisagreementPublishesUnhealthy(t *testing.T) {
 
 func robinhoodTestBinding(t *testing.T) RobinhoodBinding {
 	t.Helper()
-	dir := t.TempDir()
-	journal := filepath.Join(dir, "receipts")
-	encoded := `{"vault":"0x9999999999999999999999999999999999999999","hashes":["0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"]}`
-	if err := os.WriteFile(journal, []byte(encoded), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	return RobinhoodBinding{
 		Registry: "0x6666666666666666666666666666666666666666", Factory: "0x2222222222222222222222222222222222222222",
 		Vault: "0x9999999999999999999999999999999999999999", RiskManager: "0x3333333333333333333333333333333333333333",
 		SpotAdapter: "0x4444444444444444444444444444444444444444", Owner: "0x1111111111111111111111111111111111111111",
 		Signer:               "0x5555555555555555555555555555555555555555",
 		VaultCodeHash:        "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-		MinimumSettlementRaw: "25000000", MinimumOwnerGasRaw: "1", MinimumSignerGasRaw: "1", ReceiptJournalFile: journal,
+		MinimumSettlementRaw: "25000000", MinimumOwnerGasRaw: "1", MinimumSignerGasRaw: "1",
+		ReceiptHashes: []string{"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
 	}
 }
 

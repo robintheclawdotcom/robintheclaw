@@ -19,19 +19,39 @@ func newTestServer() (*server, *fakeLighter) {
 	service, store, lighter := newTestService()
 	return &server{
 		config: config{
-			Enabled:                     true,
-			CallerID:                    "product-api",
-			HMACKey:                     bytes.Repeat([]byte{0x42}, 32),
-			SignerCallerID:              "lighter-signer",
-			SignerHMACKey:               bytes.Repeat([]byte{0x24}, 32),
-			SigningMaxRequestsPerMinute: 120,
-			SigningMaxConcurrent:        4,
+			Enabled:                       true,
+			CallerID:                      "product-api",
+			HMACKey:                       bytes.Repeat([]byte{0x42}, 32),
+			SignerCallerID:                "lighter-signer",
+			SignerHMACKey:                 bytes.Repeat([]byte{0x24}, 32),
+			PublisherCallerID:             "account-publisher",
+			PublisherHMACKey:              bytes.Repeat([]byte{0x66}, 32),
+			SigningMaxRequestsPerMinute:   120,
+			SigningMaxConcurrent:          4,
+			PublisherMaxRequestsPerMinute: 600,
+			PublisherMaxConcurrent:        4,
 		},
-		service:      service,
-		store:        store,
-		now:          service.now,
-		signingSlots: make(chan struct{}, 4),
+		service:        service,
+		store:          store,
+		now:            service.now,
+		signingSlots:   make(chan struct{}, 4),
+		publisherSlots: make(chan struct{}, 4),
 	}, lighter
+}
+
+func signedPublisherRequest(t *testing.T, server *server, path, body, nonce string) *http.Request {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	timestamp := fmt.Sprintf("%d", server.now().Unix())
+	digest := sha256.Sum256([]byte(body))
+	canonical := fmt.Sprintf("POST\n%s\n%s\n%s\n%s\n%x", path, server.config.PublisherCallerID, timestamp, nonce, digest)
+	mac := hmac.New(sha256.New, server.config.PublisherHMACKey)
+	_, _ = mac.Write([]byte(canonical))
+	request.Header.Set("X-RTC-Caller", server.config.PublisherCallerID)
+	request.Header.Set("X-RTC-Timestamp", timestamp)
+	request.Header.Set("X-RTC-Nonce", nonce)
+	request.Header.Set("X-RTC-Signature", hex.EncodeToString(mac.Sum(nil)))
+	return request
 }
 
 func signedSignerRequest(t *testing.T, server *server, path, body, nonce string) *http.Request {

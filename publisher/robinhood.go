@@ -135,11 +135,6 @@ func (c *RobinhoodClient) Collect(ctx context.Context, binding RobinhoodBinding)
 	if err := validateRobinhoodBinding(binding); err != nil {
 		return RobinhoodObservation{}, err
 	}
-	receiptHashes, err := loadReceiptJournal(binding)
-	if err != nil {
-		return RobinhoodObservation{}, err
-	}
-	binding.ReceiptHashes = receiptHashes
 	c.mu.Lock()
 	prior := c.finalized[binding.Vault]
 	c.mu.Unlock()
@@ -397,49 +392,21 @@ func validateRobinhoodBinding(binding RobinhoodBinding) error {
 	}
 	if !validHash(binding.VaultCodeHash) || !decimalAtLeast(binding.MinimumSettlementRaw, "25000000") ||
 		!decimalAtLeast(binding.MinimumOwnerGasRaw, "1") || !decimalAtLeast(binding.MinimumSignerGasRaw, "1") ||
-		binding.ReceiptJournalFile == "" {
+		len(binding.ReceiptHashes) == 0 {
 		return errors.New("unsafe Robinhood minimums")
 	}
+	seen := make(map[string]struct{}, len(binding.ReceiptHashes))
 	for _, hash := range binding.ReceiptHashes {
 		if !validHash(hash) {
 			return errors.New("invalid receipt hash")
 		}
-	}
-	return nil
-}
-
-type receiptJournal struct {
-	Vault  string   `json:"vault"`
-	Hashes []string `json:"hashes"`
-}
-
-func loadReceiptJournal(binding RobinhoodBinding) ([]string, error) {
-	encoded, err := readSecretFile(binding.ReceiptJournalFile)
-	if err != nil {
-		return nil, fmt.Errorf("read receipt journal: %w", err)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.DisallowUnknownFields()
-	var journal receiptJournal
-	if err := decoder.Decode(&journal); err != nil || !strings.EqualFold(journal.Vault, binding.Vault) {
-		return nil, errors.New("receipt journal binding mismatch")
-	}
-	if len(journal.Hashes) == 0 {
-		return nil, errors.New("receipt journal is empty")
-	}
-	seen := make(map[string]struct{}, len(journal.Hashes))
-	for index, hash := range journal.Hashes {
 		hash = strings.ToLower(hash)
-		if !validHash(hash) {
-			return nil, errors.New("invalid receipt hash")
-		}
 		if _, exists := seen[hash]; exists {
-			return nil, errors.New("duplicate receipt hash")
+			return errors.New("duplicate receipt hash")
 		}
 		seen[hash] = struct{}{}
-		journal.Hashes[index] = hash
 	}
-	return journal.Hashes, nil
+	return nil
 }
 
 func sameEndpointObservation(left, right endpointObservation) bool {
