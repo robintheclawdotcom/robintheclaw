@@ -30,6 +30,14 @@ req=(
   config/validate-live-policy.mjs
   config/validate-live-policy.test.mjs
   scripts/validate-mainnet-release.sh
+  docs/production-audit-mainnet-live-execution.md
+  liveexec/scripts/validate.sh
+  ops/mainnet-live/validate.mjs
+  publisher/cmd/account-publisher/main.go
+  provisioner/lighter/main.go
+  provisioner/robinhood/main.go
+  signer/lighter/main.go
+  signer/robinhood/main.go
   runtime/Cargo.toml
   runtime/migrations/0001_capture.sql
   runtime/src/bin/collector.rs

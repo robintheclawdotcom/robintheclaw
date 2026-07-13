@@ -30,7 +30,10 @@ jobs:
         with:
           go-version: "1.26.5"
           cache-dependency-path: |
+            liveexec/go.mod
+            provisioner/robinhood/go.sum
             provisioner/lighter/go.sum
+            publisher/go.mod
             signer/lighter/go.sum
             signer/robinhood/go.sum
       - uses: github/codeql-action/init@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3
@@ -39,7 +42,7 @@ jobs:
           build-mode: manual
       - name: Build private service modules
         run: |
-          for module in provisioner/lighter signer/lighter signer/robinhood; do
+          for module in liveexec publisher provisioner/lighter provisioner/robinhood signer/lighter signer/robinhood; do
             (cd "$module" && go build ./...)
           done
       - uses: github/codeql-action/analyze@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3
