@@ -2,9 +2,9 @@ use crate::lighter_provisioner::PublicLink;
 use crate::product::{
     command_transition, ActivityPage, ActivityRecord, AgentCommandRecord, AgentCommandWorkItem,
     AgentReadiness, AgentRecord, AgentSnapshot, ConfirmedVault, ExecutionAccountRecord,
-    ExecutionBindingRecord, IdentitySnapshot, MeResponse, PreferencesInput, PreferencesRecord,
-    ReadinessEvidenceInput, SmartAccountRecord, UserRecord, VaultRecord, WalletRecord,
-    LIVE_STRATEGY_MANIFEST_SHA256, LIVE_STRATEGY_VERSION,
+    ExecutionBindingRecord, IdentitySnapshot, MeResponse, OwnerAction, PreferencesInput,
+    PreferencesRecord, ReadinessEvidenceInput, SmartAccountRecord, UserRecord, VaultRecord,
+    WalletRecord, LIVE_STRATEGY_MANIFEST_SHA256, LIVE_STRATEGY_VERSION,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -48,6 +48,10 @@ impl ProductStore {
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
         Ok(Self { pool: Some(pool) })
+    }
+
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self { pool: Some(pool) }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -863,7 +867,8 @@ impl ProductStore {
             r#"
             SELECT id, agent_id, execution_account_id, idempotency_key,
                 command, status, agent_status, target_agent_status, error_reason,
-                result_evidence_digest, completed_at, created_at, updated_at
+                result_evidence_digest, result_owner_actions AS owner_actions,
+                completed_at, created_at, updated_at
             FROM agent_commands
             WHERE agent_id = $1 AND idempotency_key = $2
             "#,
@@ -912,7 +917,8 @@ impl ProductStore {
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id, agent_id, execution_account_id, idempotency_key,
                 command, status, agent_status, target_agent_status, error_reason,
-                result_evidence_digest, completed_at, created_at, updated_at
+                result_evidence_digest, result_owner_actions AS owner_actions,
+                completed_at, created_at, updated_at
             "#,
         )
         .bind(command_id)
@@ -947,7 +953,8 @@ impl ProductStore {
             r#"
             SELECT c.id, c.agent_id, c.execution_account_id, c.idempotency_key,
                 c.command, c.status, c.agent_status, c.target_agent_status,
-                c.error_reason, c.result_evidence_digest, c.completed_at,
+                c.error_reason, c.result_evidence_digest,
+                c.result_owner_actions AS owner_actions, c.completed_at,
                 c.created_at, c.updated_at
             FROM agent_commands c JOIN agents a ON a.id = c.agent_id
             WHERE c.id = $1 AND c.agent_id = $2 AND a.user_id = $3
@@ -1160,11 +1167,15 @@ impl ProductStore {
                 WHERE outbox.command_id = selected.command_id
                 RETURNING outbox.command_id
             )
-            UPDATE agent_commands command SET status = 'processing', updated_at = now()
+            UPDATE agent_commands command SET status = 'processing',
+                dispatch_requested_at = coalesce(command.dispatch_requested_at, clock_timestamp()),
+                updated_at = now()
             FROM claimed
             WHERE command.id = claimed.command_id
             RETURNING command.id, command.agent_id, command.execution_account_id,
-                command.command, command.agent_status, command.target_agent_status
+                command.command, command.agent_status, command.target_agent_status,
+                (EXTRACT(EPOCH FROM command.dispatch_requested_at) * 1000)::bigint
+                    AS requested_at_ms
             "#,
         )
         .bind(worker_id)
@@ -1174,19 +1185,68 @@ impl ProductStore {
         .map_err(Into::into)
     }
 
+    pub async fn recover_agent_commands(&self, limit: u32) -> Result<Vec<AgentCommandWorkItem>> {
+        if limit == 0 || limit > 100 {
+            return Err(anyhow!("invalid command recovery limit"));
+        }
+        sqlx::query_as::<_, AgentCommandWorkItem>(
+            r#"
+            SELECT command.id, command.agent_id, command.execution_account_id,
+                command.command, command.agent_status, command.target_agent_status,
+                (EXTRACT(EPOCH FROM command.dispatch_requested_at) * 1000)::bigint
+                    AS requested_at_ms
+            FROM agent_commands command
+            JOIN agent_command_outbox outbox ON outbox.command_id = command.id
+            WHERE command.status IN ('processing', 'awaiting_signature')
+              AND command.dispatch_requested_at IS NOT NULL
+              AND outbox.delivered_at IS NULL
+            ORDER BY command.updated_at, command.id
+            LIMIT $1
+            "#,
+        )
+        .bind(i64::from(limit))
+        .fetch_all(self.pool()?)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn await_agent_command_signature(
+        &self,
+        command_id: Uuid,
+        evidence_digest: &str,
+        owner_actions: &[OwnerAction],
+    ) -> Result<()> {
+        validate_evidence_digest(evidence_digest)?;
+        if owner_actions.is_empty() {
+            return Err(anyhow!("owner signature command omitted its actions"));
+        }
+        let updated = sqlx::query(
+            r#"
+            UPDATE agent_commands SET status = 'awaiting_signature',
+                result_evidence_digest = $2, result_owner_actions = $3,
+                updated_at = now()
+            WHERE id = $1 AND command = 'withdraw'
+              AND status IN ('processing', 'awaiting_signature')
+            "#,
+        )
+        .bind(command_id)
+        .bind(evidence_digest)
+        .bind(sqlx::types::Json(owner_actions))
+        .execute(self.pool()?)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(anyhow!("agent command is not awaiting an owner signature"));
+        }
+        Ok(())
+    }
+
     pub async fn complete_reconciled_agent_command(
         &self,
         command_id: Uuid,
         evidence_digest: &str,
         error_reason: Option<&str>,
     ) -> Result<AgentCommandRecord> {
-        if evidence_digest.len() != 64
-            || !evidence_digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(anyhow!("invalid command evidence digest"));
-        }
+        validate_evidence_digest(evidence_digest)?;
         if error_reason.is_some_and(|reason| reason.trim().is_empty()) {
             return Err(anyhow!("invalid command failure reason"));
         }
@@ -1217,7 +1277,8 @@ impl ProductStore {
             sqlx::query(
                 r#"
                 UPDATE agent_commands SET status = 'failed', error_reason = $2,
-                    result_evidence_digest = $3, completed_at = now(), updated_at = now()
+                    result_evidence_digest = $3, result_owner_actions = '[]'::jsonb,
+                    completed_at = now(), updated_at = now()
                 WHERE id = $1
                 "#,
             )
@@ -1241,7 +1302,8 @@ impl ProductStore {
             sqlx::query(
                 r#"
                 UPDATE agent_commands SET status = 'completed', agent_status = $2,
-                    result_evidence_digest = $3, completed_at = now(), updated_at = now()
+                    result_evidence_digest = $3, result_owner_actions = '[]'::jsonb,
+                    completed_at = now(), updated_at = now()
                 WHERE id = $1
                 "#,
             )
@@ -1266,7 +1328,8 @@ impl ProductStore {
             r#"
             SELECT id, agent_id, execution_account_id, idempotency_key,
                 command, status, agent_status, target_agent_status, error_reason,
-                result_evidence_digest, completed_at, created_at, updated_at
+                result_evidence_digest, result_owner_actions AS owner_actions,
+                completed_at, created_at, updated_at
             FROM agent_commands WHERE id = $1 AND status = $2
             "#,
         )
@@ -1450,6 +1513,17 @@ impl ProductStore {
             .as_ref()
             .ok_or_else(|| anyhow!("application database is not configured"))
     }
+}
+
+fn validate_evidence_digest(value: &str) -> Result<()> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Ok(());
+    }
+    Err(anyhow!("invalid command evidence digest"))
 }
 
 async fn insert_readiness_snapshot(

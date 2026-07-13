@@ -588,7 +588,7 @@ impl Store {
                 request.command.as_str(),
                 "launch" | "pause" | "resume" | "close" | "withdraw"
             )
-            || request.requested_at_ms.abs_diff(now_ms) > 30_000
+            || request.requested_at_ms > now_ms.saturating_add(30_000)
         {
             return Err(StoreError::InvalidAction);
         }

@@ -1,3 +1,5 @@
+use app::product::OwnerAction;
+use app::product_store::ProductStore;
 use chrono::{Duration, Utc};
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -197,4 +199,54 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
     .execute(&pool)
     .await
     .is_err());
+
+    let command_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO agent_commands (
+            id, agent_id, execution_account_id, idempotency_key, command,
+            status, agent_status, target_agent_status
+        ) VALUES ($1, $2, $3, 'withdraw-integration', 'withdraw',
+                  'pending', 'provisioning', 'provisioning')
+        "#,
+    )
+    .bind(command_id)
+    .bind(agent_id)
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO agent_command_outbox (command_id) VALUES ($1)")
+        .bind(command_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let store = ProductStore::from_pool(pool.clone());
+    let claimed = store
+        .claim_agent_commands("integration-worker", 1)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, command_id);
+    assert!(claimed[0].requested_at_ms > 0);
+    let action = OwnerAction {
+        chain_id: 4663,
+        from: "0x1111111111111111111111111111111111111111".into(),
+        to: "0x2222222222222222222222222222222222222222".into(),
+        data: "0x12345678".into(),
+        value: "0".into(),
+    };
+    store
+        .await_agent_command_signature(command_id, &"a".repeat(64), &[action])
+        .await
+        .unwrap();
+    let recovered = store.recover_agent_commands(1).await.unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].requested_at_ms, claimed[0].requested_at_ms);
+    let record = store
+        .complete_reconciled_agent_command(command_id, &"b".repeat(64), None)
+        .await
+        .unwrap();
+    assert_eq!(record.status, "completed");
+    assert!(record.owner_actions.is_empty());
 }

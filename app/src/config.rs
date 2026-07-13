@@ -81,6 +81,10 @@ pub struct Config {
     pub lighter_api_key_index: u64,
     pub readiness_caller_id: String,
     pub readiness_hmac_key: String,
+    pub coordinator_command_url: String,
+    pub coordinator_command_caller_id: String,
+    pub coordinator_command_hmac_key: String,
+    pub command_worker_id: String,
 }
 
 impl Config {
@@ -150,6 +154,13 @@ impl Config {
             lighter_api_key_index: env_u64("LIGHTER_API_KEY_INDEX", 254),
             readiness_caller_id: env_or("READINESS_CALLER_ID", ""),
             readiness_hmac_key: env_or("READINESS_HMAC_KEY", ""),
+            coordinator_command_url: env_or("COORDINATOR_COMMAND_URL", ""),
+            coordinator_command_caller_id: env_or(
+                "COORDINATOR_COMMAND_CALLER_ID",
+                "product-command-worker",
+            ),
+            coordinator_command_hmac_key: env_or("COORDINATOR_CONTROL_HMAC_KEY", ""),
+            command_worker_id: env_or("COMMAND_WORKER_ID", "product-command-worker-1"),
         }
     }
 

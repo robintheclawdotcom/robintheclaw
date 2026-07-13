@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use app::api::configure_routes;
 use app::auth::AuthService;
+use app::command_dispatcher::{self, CoordinatorCommandClient};
 use app::config::Config;
 use app::event_bus::EventBus;
 use app::evm::{EvmIndexer, EvmRpc};
@@ -63,6 +64,14 @@ async fn main() -> std::io::Result<()> {
         .map_err(|error| {
             std::io::Error::other(format!("readiness publisher configuration failed: {error}"))
         })?;
+    let command_client = CoordinatorCommandClient::new(
+        &config.coordinator_command_url,
+        &config.coordinator_command_caller_id,
+        &config.coordinator_command_hmac_key,
+    )
+    .map_err(|error| {
+        std::io::Error::other(format!("coordinator command configuration failed: {error}"))
+    })?;
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -81,6 +90,11 @@ async fn main() -> std::io::Result<()> {
     });
 
     orchestrator::spawn_background_services(state.clone());
+    command_dispatcher::spawn(
+        state.product_store.clone(),
+        command_client,
+        config.command_worker_id.clone(),
+    );
 
     info!(
         "starting http server on {bind_addr} (chain id {})",

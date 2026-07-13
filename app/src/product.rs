@@ -323,6 +323,8 @@ pub struct AgentCommandRecord {
     pub target_agent_status: String,
     pub error_reason: Option<String>,
     pub result_evidence_digest: Option<String>,
+    #[sqlx(json)]
+    pub owner_actions: Vec<OwnerAction>,
     pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -336,6 +338,17 @@ pub struct AgentCommandWorkItem {
     pub command: String,
     pub agent_status: String,
     pub target_agent_status: String,
+    pub requested_at_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct OwnerAction {
+    pub chain_id: u64,
+    pub from: String,
+    pub to: String,
+    pub data: String,
+    pub value: String,
 }
 
 pub struct ReadinessEvidenceInput<'a> {
