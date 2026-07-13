@@ -3,10 +3,10 @@
 ## Prerequisites
 
 - Node.js 20 or newer for `signal/`, `verifier/`, and `web/`.
-- Rust stable for `engine/`.
+- Rust stable for `engine/` and `app/`.
 - Rust stable for the private `runtime/` collector.
 - Foundry with Solidity 0.8.28 for `contracts/`.
-- Public Robinhood Chain RPC access. The checked-in RPC URLs require no API key.
+- A provider Robinhood Chain testnet RPC for authenticated application work.
 
 Never place private keys, exchange credentials, or deployment tokens in tracked files. Local
 credentials belong under ignored `keys/` files with restrictive file permissions.
@@ -19,9 +19,10 @@ Run these from the repository root after a clean dependency install:
 node config/validate.mjs
 (cd contracts && forge fmt --check && forge test -vvv)
 (cd engine && cargo fmt --check && cargo clippy -- -D warnings && cargo test)
+(cd app && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test)
 (cd runtime && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test)
 (cd verifier && npm test)
-(cd web && npm ci && npm run build)
+(cd web && npm ci && npm test && npm run typecheck && npm run build)
 ./scripts/check-no-leaks.sh
 ```
 
@@ -81,6 +82,23 @@ unable to select a testnet asset automatically.
 `DeployTestnet.s.sol` is the proof-path deployment. It is fixed to chain 46630, deploys a named
 `tUSDG` fixture, and configures no execution target. It validates role separation and establishes
 only custody plus attestation plumbing.
+
+`DeployUxTestnet.s.sol` is the application deployment. It is fixed to chain 46630 and deploys the
+test asset, one-claim faucet, and versioned personal-vault factory. Set `DEPLOYER`, `AGENT`,
+`WINDOW_CAP`, and `WINDOW_SECONDS`, then record the confirmed addresses only in managed service
+settings.
+
+## Product application
+
+The authenticated Rust routes require `DATABASE_URL`, `PRIVY_APP_ID`, `PRIVY_APP_SECRET`,
+`PRIVY_VERIFICATION_KEY`, provider `APP_RPC_URL`, `ALCHEMY_API_KEY`, `ALCHEMY_POLICY_ID`, and the three confirmed
+testnet contract addresses. The web application requires the public Privy app ID, Alchemy API key,
+WalletConnect project ID, and the private API host. Render owns these values; do not place them in
+tracked environment files.
+
+The API runs migrations at startup. It accepts Privy access tokens through a bearer header or the
+HTTP-only same-origin session cookie, then resolves wallet ownership from Privy server-side. The
+server never trusts client-supplied wallet lists or signs an owner operation.
 
 ## Record integrity
 

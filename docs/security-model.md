@@ -8,6 +8,7 @@
 - Integrity of the disclosed trade-log record.
 - Availability of the owner halt action and public verification path.
 - Integrity and confidentiality of raw market evidence, research datasets, and shadow records.
+- Privy sessions, linked-wallet ownership, personal smart-account identity, and application data.
 
 ## Trust boundaries
 
@@ -28,6 +29,12 @@ of unobserved market data.
 - Ignored secret paths and a repository leak scan before release.
 - Private worker-only R2 credentials and a no-public-IP research database.
 - Runtime contains no signer, wallet material, or venue write client.
+- ES256 validation on every authenticated API request and an HTTP-only same-origin session cookie.
+- Privy server-side wallet resolution, cross-user address uniqueness, and no automatic account merge.
+- Stable smart-account vault ownership independent of the active funding wallet.
+- Idempotent receipt verification against the exact factory event and deployed contract state.
+- Sponsorship limited by managed target, selector, and per-account policy.
+- Dedicated application database with user-scoped reads and writes.
 
 ## Known limitations
 

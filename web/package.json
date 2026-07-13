@@ -6,18 +6,34 @@
     "dev": "next dev",
     "prebuild": "node scripts/sync-docs.mjs",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@alchemy/common": "5.0.6",
+    "@alchemy/wallet-apis": "5.0.6",
+    "@privy-io/react-auth": "3.34.0",
+    "@solana-program/memo": "0.11.2",
+    "@solana-program/system": "0.12.2",
+    "@solana-program/token": "0.14.0",
+    "@solana/kit": "6.10.0",
+    "@tanstack/react-query": "5.101.2",
     "next": "16.2.10",
     "react": "19.2.7",
-    "react-dom": "19.2.7"
+    "react-dom": "19.2.7",
+    "viem": "2.52.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@testing-library/react": "16.3.2",
     "@types/node": "24.10.4",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
-    "typescript": "5.9.3"
+    "jsdom": "27.4.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
   },
   "overrides": {
     "postcss": "8.5.10"

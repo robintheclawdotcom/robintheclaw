@@ -1,14 +1,14 @@
 # Robin the Claw
 
-A delta-neutral trading system for tokenized markets on Robinhood Chain. Robin the Claw finds
+A consumer-grade, autonomous delta-neutral trading system for tokenized markets on Robinhood Chain. Robin the Claw finds
 cross-venue basis between tokenized-equity spot liquidity and matching perpetuals, then turns
-that market structure into coordinated trading plans. The ambition is a complete autonomous
-stack: venue-native data, adaptive models, matched execution, and continuous learning.
+that market structure into coordinated trading plans. The stack combines venue-native data,
+adaptive models, matched execution, continuous learning, and a no-code strategy application.
 
 ## Why
 
 Tokenized markets are becoming a serious venue for global, programmable financial products.
-Robin the Claw is being built to give those markets an intelligent, disciplined execution layer
+Robin the Claw gives those markets an intelligent, disciplined execution layer
 that can recognize relative-value opportunities and act on them with precision.
 
 - **Market intelligence:** discovers tokenized-equity pools, compares them with perpetual markets,
@@ -19,6 +19,8 @@ that can recognize relative-value opportunities and act on them with precision.
   proprietary event store, then promotes the strongest ideas into the strategy stack.
 - **Execution foundation:** pairs custody and delegated execution contracts with a clean path to
   venue adapters, position workflows, and operational control.
+- **Personal strategy accounts:** email, passkey, social, and wallet login lead to a stable smart
+  account, a personal vault, a unified dashboard, and gas-sponsored testnet operations.
 - **Record integrity:** commits strategy records onchain as a supporting tool for research,
   operations, and inspection.
 
@@ -26,13 +28,14 @@ that can recognize relative-value opportunities and act on them with precision.
 
 ```
 config/      canonical chain + venue addresses and deployment readiness gates
-contracts/   Foundry workspace (MandateGuard, StrategyVault, AttestationAnchor)
+app/         authenticated Rust product API, Postgres persistence, and activity indexing
+contracts/   Foundry workspace for shared and personal strategy vaults
 engine/      deterministic basis, sizing, risk, and neutral-plan engine
 runtime/     continuous market capture and research runtime
 signal/      read-only basis scanner (measurement before execution)
 sdk/         TypeScript client (later)
 verifier/    record-integrity tool
-web/         public Next.js site and developer interface
+web/         public site plus authenticated Robin application
 docs/        system design and integration notes
 ```
 
@@ -44,8 +47,11 @@ Robin already has working foundations across the stack:
 - `engine/` transforms observations into delta-neutral spot/perp plans with adaptive sizing.
 - `runtime/` continuously captures venue and chain events into the research dataset.
 - `contracts/` establish the onchain custody, strategy-role, and execution-policy foundation.
+- `app/` authenticates Privy sessions, persists product state, verifies vault receipts, and builds
+  real dashboard responses.
 - `verifier/` provides an inspectable record pipeline alongside the strategy stack.
-- `web/` publishes the architecture, developer documentation, and testnet progress.
+- `web/` provides the public narrative, one-click onboarding, strategy controls, activity,
+  settings, and multi-wallet portfolio management.
 
 ```bash
 # read the live basis across the universe
@@ -59,10 +65,11 @@ The first onchain foundation is deployed on Robinhood Chain testnet. Venue adapt
 full execution lifecycle are the next major build-out. The initial universe is the 21 Stock
 Tokens that also have a live perp.
 
-## Public site
+## Website and application
 
-The public site lives in `web/`. It is a static Next.js export, so it can be deployed to a CDN
-without exposing the execution runtime or its credentials.
+The public site and authenticated product live in `web/`. Authenticated requests pass through
+same-origin Next.js handlers to the private Rust API; provider credentials and the application
+database remain in managed service settings.
 
 ```bash
 cd web
@@ -74,7 +81,9 @@ npm run build
 
 The full specification lives in [docs/index.md](docs/index.md). The website copies that source
 set during its build so the public documentation and repository documentation describe the same
-system boundaries. The [edge research methodology](docs/research-methodology.md) defines the
+system boundaries. The [user experience specification](docs/user-experience.md) defines the
+account model, onboarding state machine, dashboard, and multi-wallet behavior. The
+[edge research methodology](docs/research-methodology.md) defines the
 model hierarchy, RWA-specific data requirements, and evidence needed to promote a strategy.
 
 ## Direction

@@ -118,6 +118,28 @@ impl EvmRpc {
             .ok_or_else(|| anyhow!("invalid eth_sendRawTransaction response"))
     }
 
+    pub async fn wallet_get_calls_status(&self, call_id: &str) -> Result<serde_json::Value> {
+        self.call("wallet_getCallsStatus", serde_json::json!([call_id]), true)
+            .await
+    }
+
+    pub async fn eth_get_transaction_receipt(
+        &self,
+        transaction_hash: &str,
+    ) -> Result<serde_json::Value> {
+        let value = self
+            .call(
+                "eth_getTransactionReceipt",
+                serde_json::json!([transaction_hash]),
+                true,
+            )
+            .await?;
+        if value.is_null() {
+            return Err(anyhow!("transaction receipt is not available"));
+        }
+        Ok(value)
+    }
+
     async fn call(
         &self,
         method: &str,

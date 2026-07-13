@@ -4,10 +4,15 @@
 //! basis-scanner service, a Postgres store, the signer and execution path) build on the same API.
 
 pub mod api;
+pub mod auth;
 pub mod config;
 pub mod event_bus;
 pub mod evm;
 pub mod orchestrator;
+pub mod privy;
+pub mod product;
+pub mod product_indexer;
+pub mod product_store;
 pub mod state;
 pub mod store;
 pub mod ws;

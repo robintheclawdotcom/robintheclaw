@@ -2,6 +2,8 @@
 //! subscribes and receives every platform event the orchestrator bridges in. Transport is
 //! swappable behind the hub; only the socket session below is WebSocket-specific.
 
+use crate::api::error::ApiError;
+use crate::auth::require_user;
 use crate::state::AppState;
 use actix::{Actor, ActorContext, AsyncContext, StreamHandler};
 use actix_web::{web, HttpRequest, HttpResponse};
@@ -79,4 +81,14 @@ pub async fn ws_index(
 ) -> Result<HttpResponse, actix_web::Error> {
     let rx = state.ws_hub.subscribe();
     ws::start(WsSession { rx: Some(rx) }, &req, stream)
+}
+
+pub async fn product_ws_index(
+    req: HttpRequest,
+    stream: web::Payload,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    require_user(&req, &state)?;
+    let rx = state.ws_hub.subscribe();
+    ws::start(WsSession { rx: Some(rx) }, &req, stream).map_err(ApiError::internal)
 }

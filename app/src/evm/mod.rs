@@ -1,3 +1,4 @@
+pub mod abi;
 pub mod indexer;
 pub mod rpc;
 

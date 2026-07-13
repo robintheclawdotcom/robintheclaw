@@ -1,0 +1,61 @@
+"use client";
+
+import Link from "next/link";
+import type { ActivityRecord } from "../lib/app-types";
+import { formatAddress, formatDate, titleFromKind } from "../lib/format";
+
+export function PageHeader({ eyebrow, title, description, action }: {
+  eyebrow: string;
+  title: string;
+  description: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <header className="page-header">
+      <div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{description}</p></div>
+      {action && <div className="page-actions">{action}</div>}
+    </header>
+  );
+}
+
+export function EmptyState({ title, body, action }: { title: string; body: string; action?: React.ReactNode }) {
+  return <div className="empty-state"><span>○</span><h3>{title}</h3><p>{body}</p>{action}</div>;
+}
+
+export function ErrorNotice({ error, retry }: { error: unknown; retry?: () => void }) {
+  const message = error instanceof Error ? error.message : "Something went wrong.";
+  return (
+    <div className="notice notice-error" role="alert">
+      <div><strong>Action needed</strong><p>{message}</p></div>
+      {retry && <button className="button button-secondary" onClick={retry}>Try again</button>}
+    </div>
+  );
+}
+
+export function LoadingPanel({ label = "Loading your account…" }: { label?: string }) {
+  return <div className="loading-panel" role="status"><i />{label}</div>;
+}
+
+export function ActivityList({ items, compact = false }: { items: ActivityRecord[]; compact?: boolean }) {
+  if (!items.length) return <EmptyState title="No activity yet" body="Vault operations, strategy changes, and account events will appear here." />;
+  return (
+    <div className={`activity-list ${compact ? "compact" : ""}`}>
+      {items.map((item) => (
+        <article key={item.id}>
+          <span className="activity-icon" aria-hidden="true">↗</span>
+          <div><strong>{titleFromKind(item.kind)}</strong><small>{formatDate(item.occurredAt)}</small></div>
+          {item.transactionHash && <a href={`https://explorer.testnet.chain.robinhood.com/tx/${item.transactionHash}`} target="_blank" rel="noreferrer" aria-label={`View ${titleFromKind(item.kind)} transaction`}>{formatAddress(item.transactionHash)}</a>}
+        </article>
+      ))}
+    </div>
+  );
+}
+
+export function SetupCard() {
+  return (
+    <section className="setup-card">
+      <div><span className="eyebrow">Ready when you are</span><h2>Activate your personal strategy vault</h2><p>Create and fund your testnet vault in one sponsored operation. No gas, extension, or chain setup required.</p></div>
+      <Link className="button button-primary" href="/app/onboarding">Set up Robin</Link>
+    </section>
+  );
+}

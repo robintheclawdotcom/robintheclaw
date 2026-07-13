@@ -130,4 +130,5 @@ fn spawn_event_bridge(state: &Arc<AppState>) {
 pub fn spawn_background_services(state: Arc<AppState>) {
     spawn_indexer(&state);
     spawn_event_bridge(&state);
+    crate::product_indexer::spawn(state);
 }

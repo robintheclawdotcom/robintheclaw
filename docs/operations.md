@@ -36,8 +36,28 @@ The Render service is Git-backed and deploys `main` automatically. The repositor
 run `./scripts/renderctl guard`. After a push, confirm that the deploy references the expected
 commit, reaches `live`, and that `https://robintheclaw.com` returns the new public copy.
 
-The public site is static documentation. It must not receive execution keys, exchange credentials,
-wallet material, or private strategy thresholds.
+The public site and authenticated application run in the `robintheclaw` Next.js service. The
+browser receives only the public Privy app ID, Alchemy API key, and WalletConnect project ID.
+Authenticated requests use the same-origin proxy to the private `robin-api` service.
+
+`robin-api` is a private Rust service in the same region. It connects to the dedicated
+`robin-app` Postgres database and receives the Privy secret, ES256 verification key, provider RPC,
+Alchemy API key and sponsorship policy, and confirmed application contract addresses through managed
+settings. The product database is separate from `robin-research`.
+
+Before enabling onboarding:
+
+1. Deploy `DeployUxTestnet.s.sol` on chain ID 46630 and confirm the asset, faucet, and factory.
+2. Create an Alchemy sponsorship policy limited to those contracts, child vaults and guards, the
+   required selectors, and per-account quotas.
+3. Configure all `sync: false` application values in Render. Use a provider RPC for `APP_RPC_URL`.
+4. Configure Privy allowed origins, email/passkey login, Google and Apple OAuth, embedded EVM
+   wallet creation for all users, and the WalletConnect project.
+5. Run an embedded-user onboarding smoke test, verify the factory receipt in `robin-api`, reload
+   during confirmation, link two external wallets, change the funding source, pause, resume,
+   deposit, withdraw, unlink, sign out, and recover the same account.
+6. Confirm that dashboard values match provider RPC and that positions and P&L remain empty before
+   real execution.
 
 The private collector is a separate Render worker named `robin-research-collector`. It has no
 public URL. Its Postgres database allows no public IPs, and its R2 credentials are worker-only
@@ -57,5 +77,9 @@ source-health incident; do not substitute a local persistent disk for the immuta
 | Signal API outage or stale feed | Do not create plans or orders. | Restore source health and document the gap. |
 | Runtime archive or database failure | Stop treating captures as complete; preserve logs and mark the source degraded. | Restore both stores, reconcile gaps, and create a new dataset boundary. |
 | Verifier mismatch | Stop publication claims and preserve the raw records. | Identify canonicalization, batch, or deployment mismatch before resuming. |
+| Privy session expiry | Ask the user to sign in again; keep the saved onboarding call ID. | Confirm the operation after the session is restored. |
+| Sponsored call pending | Preserve the call ID and show the pending state. | Recheck inclusion and confirm idempotently. |
+| Included call, API delay | Do not prepare another vault. | Replay `vaults/confirm` from the saved call ID. |
+| Wallet account conflict | Keep both user records separate. | Recover the account already linked to the wallet. |
 
 No process may clear a chain halt without the owner. A software restart is not an incident remedy.

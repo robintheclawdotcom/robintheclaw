@@ -5,8 +5,11 @@ each execution to an approved target and selector, a rolling notional cap, and a
 `AttestationAnchor` stores append-only Merkle roots; the vault is its only publisher, so disclosed
 results are anchored through the same custody boundary.
 
-This is not a public deposit vault. It has no share or NAV accounting and must not receive funds
-from anyone other than its configured owner.
+The existing proof contracts remain intact. The consumer application uses
+`PersonalStrategyVaultFactory` to create one deterministic vault per smart-account owner and
+factory version. A personal vault deploys its guard and anchor in its constructor, accepts funding
+from linked wallets, and keeps withdrawal and strategy control with its owner. It has no pooled
+shares or pooled NAV accounting.
 
 ## Local checks
 
@@ -46,3 +49,10 @@ replace that gate with an assumed address.
 allowlisted venue. It exists to verify owner/agent roles, custody, and onchain attestations; it
 cannot execute a trade. Use it only on Robinhood testnet and record its addresses in a local,
 ignored deployment file.
+
+## Personal-vault testnet path
+
+`script/DeployUxTestnet.s.sol` deploys `tUSDG`, `TestAssetFaucet`, and
+`PersonalStrategyVaultFactory` on chain ID 46630. The faucet permits one fixed claim per smart
+account. The factory uses CREATE2, rejects duplicate creation, and emits every child contract
+address needed by the application receipt verifier.

@@ -4,9 +4,11 @@ node_modules/
 dist/
 .next/
 *.log
+*.tsbuildinfo
 .DS_Store
 .harden-skill/
 web/public/docs/
+web/output/
 
 # secrets / private strategy core (never public)
 keys/

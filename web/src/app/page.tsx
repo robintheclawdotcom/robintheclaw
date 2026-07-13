@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { testnetProof } from "../lib/testnet-proof";
 
-type DocId = "overview" | "signal" | "contracts" | "verifier" | "engine" | "testnet" | "methodology" | "readiness" | "architecture" | "developer" | "operations" | "security" | "venues";
+type DocId = "overview" | "experience" | "signal" | "contracts" | "verifier" | "engine" | "testnet" | "methodology" | "readiness" | "architecture" | "developer" | "operations" | "security" | "venues";
 
 const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }> = {
   overview: {
@@ -12,7 +12,7 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
     body: (
       <>
         <p>
-          Robin the Claw is building the delta-neutral trading stack for tokenized markets on
+          Robin the Claw is an autonomous delta-neutral trading stack for tokenized markets on
           Robinhood Chain: venue-native data, adaptive models, matched execution, and a durable
           operating layer for autonomous strategies.
         </p>
@@ -26,6 +26,11 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
         </div>
       </>
     ),
+  },
+  experience: {
+    file: "docs/user-experience.md",
+    title: "User experience",
+    body: <PublishedDoc file="user-experience.md" />,
   },
   signal: {
     file: "signal/README.md",
@@ -254,6 +259,7 @@ export default function Home() {
           <nav className="desktop-nav" aria-label="Primary navigation">
             <button className={view === "home" ? "nav-active" : ""} onClick={openHome}>home</button>
             <button className={view === "docs" ? "nav-active" : ""} onClick={openDocs}>docs</button>
+            <a className="open-app-link" href="/app">open app</a>
           </nav>
           <div className="terminal-title">robin@claw · /public · zsh</div>
           <div className="desktop-actions">
@@ -287,6 +293,7 @@ export default function Home() {
               <div className="drawer-links">
                 <button className={view === "home" ? "active" : ""} onClick={openHome}>home</button>
                 <button className={view === "docs" ? "active" : ""} onClick={openDocs}>docs</button>
+                <a className="drawer-app-link" href="/app">open app</a>
                 <button className="drawer-theme" onClick={toggleTheme}><span className="theme-dot" />theme: {theme}</button>
               </div>
               {view === "docs" && <div className="drawer-docs"><DocsTree doc={doc} onSelect={selectDoc} /></div>}
@@ -372,7 +379,7 @@ export default function Home() {
 
               <section className="docs-cta">
                 <div><h2>Explore the research and execution stack</h2><p>Market intelligence, adaptive models, strategy planning, contracts, and operations.</p></div>
-                <button onClick={openDocs}>docs →</button>
+                <div className="docs-cta-actions"><a href="/app">open app →</a><button onClick={openDocs}>docs</button></div>
               </section>
             </div>
           ) : (

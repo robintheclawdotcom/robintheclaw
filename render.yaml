@@ -13,6 +13,67 @@ services:
       - robintheclaw.com
     previews:
       generation: automatic
+    envVars:
+      - key: APP_API_BASE_URL
+        fromService:
+          type: pserv
+          name: robin-api
+          property: hostport
+      - key: NEXT_PUBLIC_PRIVY_APP_ID
+        sync: false
+      - key: NEXT_PUBLIC_ALCHEMY_API_KEY
+        sync: false
+      - key: NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
+        sync: false
+  - type: pserv
+    name: robin-api
+    runtime: rust
+    plan: starter
+    region: virginia
+    rootDir: app
+    buildCommand: cargo build --release --bin app
+    startCommand: ./target/release/app
+    healthCheckPath: /health
+    autoDeploy: yes
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: RUST_LOG
+        value: info
+      - key: DATABASE_URL
+        fromDatabase:
+          name: robin-app
+          property: connectionString
+      - key: APP_CHAIN_ID
+        value: "46630"
+      - key: APP_RPC_URL
+        sync: false
+      - key: PRIVY_APP_ID
+        sync: false
+      - key: PRIVY_APP_SECRET
+        sync: false
+      - key: PRIVY_VERIFICATION_KEY
+        sync: false
+      - key: ALCHEMY_POLICY_ID
+        sync: false
+      - key: ALCHEMY_API_KEY
+        sync: false
+      - key: PERSONAL_VAULT_FACTORY
+        sync: false
+      - key: TEST_ASSET_ADDRESS
+        sync: false
+      - key: TEST_FAUCET_ADDRESS
+        sync: false
+      - key: TEST_ASSET_SYMBOL
+        value: tUSDG
+      - key: TEST_ASSET_DECIMALS
+        value: "6"
+      - key: TEST_CLAIM_AMOUNT
+        value: "1000000000"
+      - key: EVM_ENABLED
+        value: "false"
+      - key: CORS_ORIGINS
+        value: https://robintheclaw.com
   - type: worker
     name: robin-research-collector
     runtime: rust
@@ -42,6 +103,12 @@ services:
       - key: AWS_REGION
         value: auto
 databases:
+  - name: robin-app
+    databaseName: robin_app
+    user: robin_app
+    plan: basic-1gb
+    region: virginia
+    ipAllowList: []
   - name: robin-research
     databaseName: robin_research
     user: robin_runtime

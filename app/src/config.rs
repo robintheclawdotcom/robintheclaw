@@ -58,6 +58,21 @@ pub struct Config {
     pub indexer_max_logs: usize,
 
     pub geo_blocking_enabled: bool,
+
+    pub database_url: Option<String>,
+    pub privy_app_id: Option<String>,
+    pub privy_app_secret: Option<String>,
+    pub privy_verification_key: Option<String>,
+    pub app_rpc_url: String,
+    pub app_chain_id: u64,
+    pub personal_vault_factory: String,
+    pub test_asset_address: String,
+    pub test_faucet_address: String,
+    pub test_asset_symbol: String,
+    pub test_asset_decimals: u8,
+    pub test_claim_amount: String,
+    pub alchemy_policy_id: Option<String>,
+    pub alchemy_wallet_rpc_url: String,
 }
 
 impl Config {
@@ -88,7 +103,48 @@ impl Config {
             indexer_confirmations: env_u64("INDEXER_CONFIRMATIONS", 5),
             indexer_max_logs: env_u64("INDEXER_MAX_LOGS", 20_000) as usize,
             geo_blocking_enabled: env_bool("GEO_BLOCKING_ENABLED", true),
+            database_url: env::var("DATABASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            privy_app_id: env::var("PRIVY_APP_ID")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            privy_app_secret: env::var("PRIVY_APP_SECRET")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            privy_verification_key: env::var("PRIVY_VERIFICATION_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            app_rpc_url: env_or("APP_RPC_URL", ""),
+            app_chain_id: env_u64("APP_CHAIN_ID", 46630),
+            personal_vault_factory: env_or("PERSONAL_VAULT_FACTORY", ""),
+            test_asset_address: env_or("TEST_ASSET_ADDRESS", ""),
+            test_faucet_address: env_or("TEST_FAUCET_ADDRESS", ""),
+            test_asset_symbol: env_or("TEST_ASSET_SYMBOL", "tUSDG"),
+            test_asset_decimals: env_u64("TEST_ASSET_DECIMALS", 6) as u8,
+            test_claim_amount: env_or("TEST_CLAIM_AMOUNT", "1000000000"),
+            alchemy_policy_id: env::var("ALCHEMY_POLICY_ID")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            alchemy_wallet_rpc_url: env::var("ALCHEMY_WALLET_RPC_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| {
+                    env::var("ALCHEMY_API_KEY")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                        .map(|key| format!("https://api.g.alchemy.com/v2/{key}"))
+                })
+                .unwrap_or_default(),
         }
+    }
+
+    pub fn product_contracts_ready(&self) -> bool {
+        !self.app_rpc_url.is_empty()
+            && !self.alchemy_wallet_rpc_url.is_empty()
+            && !self.personal_vault_factory.is_empty()
+            && !self.test_asset_address.is_empty()
+            && !self.test_faucet_address.is_empty()
     }
 
     /// Contract addresses the indexer follows, empties dropped.
