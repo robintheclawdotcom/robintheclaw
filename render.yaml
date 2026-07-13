@@ -50,6 +50,10 @@ services:
         value: "46630"
       - key: APP_RPC_URL
         sync: false
+      - key: PRODUCT_INDEXER_LOOKBACK_BLOCKS
+        value: "9"
+      - key: PRODUCT_INDEXER_BLOCK_RANGE
+        value: "10"
       - key: PRIVY_APP_ID
         sync: false
       - key: PRIVY_APP_SECRET

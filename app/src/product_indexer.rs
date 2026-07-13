@@ -31,48 +31,75 @@ async fn sync(state: &AppState) -> Result<()> {
     let target = latest.saturating_sub(state.config.indexer_confirmations);
     let from = match state.product_store.activity_cursor(CURSOR).await? {
         Some(block) => block.saturating_add(1),
-        None => target.saturating_sub(state.config.indexer_lookback_blocks),
+        None => target.saturating_sub(state.config.product_indexer_lookback_blocks),
     };
     if from > target {
         return Ok(());
     }
 
-    for log in state
-        .product_rpc
-        .eth_get_logs(&state.config.personal_vault_factory, None, from, target)
-        .await?
+    let watched = state.product_store.watched_contracts().await?;
+    for (chunk_from, chunk_to) in
+        block_ranges(from, target, state.config.product_indexer_block_range)
     {
-        let Some(owner) = log
-            .topics
-            .get(1)
-            .and_then(|topic| abi::decode_address(topic).ok())
-        else {
-            continue;
-        };
-        let Some(user_id) = state
-            .product_store
-            .user_for_smart_account(state.config.app_chain_id, &owner)
-            .await?
-        else {
-            continue;
-        };
-        persist(state, user_id, log).await?;
-    }
-
-    for (user_id, address) in state.product_store.watched_contracts().await? {
         for log in state
             .product_rpc
-            .eth_get_logs(&address, None, from, target)
+            .eth_get_logs(
+                &state.config.personal_vault_factory,
+                None,
+                chunk_from,
+                chunk_to,
+            )
             .await?
         {
+            let Some(owner) = log
+                .topics
+                .get(1)
+                .and_then(|topic| abi::decode_address(topic).ok())
+            else {
+                continue;
+            };
+            let Some(user_id) = state
+                .product_store
+                .user_for_smart_account(state.config.app_chain_id, &owner)
+                .await?
+            else {
+                continue;
+            };
             persist(state, user_id, log).await?;
         }
+
+        for (user_id, address) in &watched {
+            for log in state
+                .product_rpc
+                .eth_get_logs(address, None, chunk_from, chunk_to)
+                .await?
+            {
+                persist(state, *user_id, log).await?;
+            }
+        }
+
+        state
+            .product_store
+            .set_activity_cursor(CURSOR, chunk_to)
+            .await?;
     }
 
-    state
-        .product_store
-        .set_activity_cursor(CURSOR, target)
-        .await
+    Ok(())
+}
+
+fn block_ranges(from: u64, to: u64, range: u64) -> Vec<(u64, u64)> {
+    let range = range.max(1);
+    let mut ranges = Vec::new();
+    let mut start = from;
+    while start <= to {
+        let end = start.saturating_add(range - 1).min(to);
+        ranges.push((start, end));
+        if end == u64::MAX {
+            break;
+        }
+        start = end + 1;
+    }
+    ranges
 }
 
 async fn persist(state: &AppState, user_id: Uuid, log: RpcLog) -> Result<()> {
@@ -170,5 +197,14 @@ mod tests {
             Some(&"strategy_state_changed")
         );
         assert_eq!(topic("Deposited(address,uint256)").len(), 66);
+    }
+
+    #[test]
+    fn splits_log_queries_into_inclusive_ranges() {
+        assert_eq!(
+            block_ranges(100, 125, 10),
+            vec![(100, 109), (110, 119), (120, 125)]
+        );
+        assert_eq!(block_ranges(7, 7, 0), vec![(7, 7)]);
     }
 }

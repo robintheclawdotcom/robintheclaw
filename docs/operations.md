@@ -55,6 +55,8 @@ Before enabling onboarding:
    `claim`, `approve`, `createVault`, `deposit`, `withdraw`, and `setHalted` selectors, with
    per-account and global spend quotas.
 3. Configure all `sync: false` application values in Render. Use a provider RPC for `APP_RPC_URL`.
+   Keep `PRODUCT_INDEXER_BLOCK_RANGE` within the provider's `eth_getLogs` limit; the testnet
+   Blueprint uses 10 blocks and starts new databases with a 10-block lookback.
 4. Configure Privy allowed origins, email/passkey login, Google and Apple OAuth, and embedded EVM
    wallet creation for all users.
 5. Run an embedded-user onboarding smoke test, verify the factory receipt in `robin-api`, reload
