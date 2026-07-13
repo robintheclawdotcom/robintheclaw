@@ -313,7 +313,7 @@ export default function Home() {
               <section className="intro">
                 <Prompt>robin init</Prompt>
                 <p>
-                  Robin the Claw is building an autonomous trading stack for tokenized markets.
+                  Robin the Claw is an autonomous trading stack for tokenized markets.
                   It finds cross-venue basis, evaluates the opportunity, sizes a position, and
                   prepares matched spot and perp legs for disciplined execution.
                 </p>
@@ -372,7 +372,7 @@ export default function Home() {
 
               <section className="docs-cta">
                 <div><h2>Explore the execution stack</h2><p>Market intelligence, strategy planning, contracts, operations, and record integrity.</p></div>
-                <button onClick={openDocs}>robin docs →</button>
+                <button onClick={openDocs}>docs →</button>
               </section>
             </div>
           ) : (
