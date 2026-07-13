@@ -8,7 +8,7 @@ const mainnetDeployment = {
   transaction: "0xe8b7ca77feaf117e287eab146d7e79bdef83737a93453534bc9077da0e0ac961",
 };
 
-type DocId = "overview" | "experience" | "signal" | "contracts" | "verifier" | "engine" | "mainnet" | "methodology" | "readiness" | "architecture" | "developer" | "operations" | "security" | "venues";
+type DocId = "overview" | "experience" | "signal" | "contracts" | "verifier" | "engine" | "mainnet" | "methodology" | "research" | "execution" | "data" | "infrastructure" | "control" | "readiness" | "venue";
 
 const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }> = {
   overview: {
@@ -117,16 +117,41 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
     title: "Edge research methodology",
     body: <PublishedDoc file="research-methodology.md" />,
   },
-  readiness: {
-    file: "docs/production-audit-mainnet-readiness.md",
-    title: "Mainnet readiness",
-    body: <PublishedDoc file="production-audit-mainnet-readiness.md" />,
+  research: {
+    file: "docs/research-runtime.md",
+    title: "Research runtime",
+    body: <PublishedDoc file="research-runtime.md" />,
   },
-  architecture: { file: "docs/architecture.md", title: "Architecture", body: <PublishedDoc file="architecture.md" /> },
-  developer: { file: "docs/developer-guide.md", title: "Developer guide", body: <PublishedDoc file="developer-guide.md" /> },
-  operations: { file: "docs/operations.md", title: "Operations", body: <PublishedDoc file="operations.md" /> },
-  security: { file: "docs/security-model.md", title: "Security model", body: <PublishedDoc file="security-model.md" /> },
-  venues: { file: "docs/venue-gates.md", title: "Venue gates", body: <PublishedDoc file="venue-gates.md" /> },
+  execution: {
+    file: "docs/execution-control-plane.md",
+    title: "Execution control plane",
+    body: <PublishedDoc file="execution-control-plane.md" />,
+  },
+  data: {
+    file: "docs/data-plane-archive.md",
+    title: "Data archive",
+    body: <PublishedDoc file="data-plane-archive.md" />,
+  },
+  infrastructure: {
+    file: "docs/infrastructure-readiness.md",
+    title: "Infrastructure",
+    body: <PublishedDoc file="infrastructure-readiness.md" />,
+  },
+  control: {
+    file: "docs/control-plane-operations.md",
+    title: "Operator control plane",
+    body: <PublishedDoc file="control-plane-operations.md" />,
+  },
+  readiness: {
+    file: "docs/production-audit-full-system.md",
+    title: "Activation readiness",
+    body: <PublishedDoc file="production-audit-full-system.md" />,
+  },
+  venue: {
+    file: "docs/venue-lighter.md",
+    title: "Lighter venue integration",
+    body: <PublishedDoc file="venue-lighter.md" />,
+  },
 };
 
 function PublishedDoc({ file }: { file: string }) {
