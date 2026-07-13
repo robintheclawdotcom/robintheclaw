@@ -183,10 +183,14 @@ export function validateLivePolicy({
   }
 
   for (const flag of [
+    "ACCOUNT_PUBLISHER_ENABLED",
     "COORDINATOR_ENABLED",
     "LIGHTER_PROVISIONER_ENABLED",
     "LIGHTER_SIGNER_ENABLED",
+    "ROBINHOOD_PROVISIONER_ENABLED",
     "ROBINHOOD_SIGNER_ENABLED",
+    "ROBIN_QUOTE_AUTHORITY_ENABLED",
+    "ROBIN_STRATEGY_RUNNER_ENABLED",
   ]) {
     const pattern = new RegExp(`key:\\s*${flag}\\s*\\n\\s*value:\\s*["']?(true|false)["']?`, "g");
     const matches = [...render.matchAll(pattern)];

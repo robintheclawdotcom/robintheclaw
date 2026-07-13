@@ -8,10 +8,14 @@ import { validateLivePolicy } from "./validate-live-policy.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const strategyDir = join(root, "config", "strategies");
 const executionFlags = [
+  "ACCOUNT_PUBLISHER_ENABLED",
   "COORDINATOR_ENABLED",
   "LIGHTER_PROVISIONER_ENABLED",
   "LIGHTER_SIGNER_ENABLED",
+  "ROBINHOOD_PROVISIONER_ENABLED",
   "ROBINHOOD_SIGNER_ENABLED",
+  "ROBIN_QUOTE_AUTHORITY_ENABLED",
+  "ROBIN_STRATEGY_RUNNER_ENABLED",
 ];
 
 function fixture() {

@@ -11,13 +11,21 @@ envVarGroups:
     envVars:
       - key: LIGHTER_SIGNER_HMAC_KEY
         sync: false
-      - key: LIGHTER_ACCOUNT_INDEX
-        sync: false
-      - key: LIGHTER_API_KEY_INDEX
+  - name: robin-lighter-signer-bridge-auth
+    envVars:
+      - key: LIGHTER_SIGNER_BRIDGE_HMAC_KEY
         sync: false
   - name: robin-robinhood-signer-auth
     envVars:
       - key: ROBINHOOD_SIGNER_HMAC_KEY
+        sync: false
+  - name: robin-robinhood-provisioner-auth
+    envVars:
+      - key: ROBINHOOD_PROVISIONER_HMAC_KEY
+        sync: false
+  - name: robin-robinhood-signer-bridge-auth
+    envVars:
+      - key: ROBINHOOD_SIGNER_BRIDGE_HMAC_KEY
         sync: false
   - name: robin-coordinator-intent-auth
     envVars:
@@ -34,6 +42,14 @@ envVarGroups:
   - name: robin-coordinator-market-auth
     envVars:
       - key: COORDINATOR_MARKET_HMAC_KEY
+        sync: false
+  - name: robin-coordinator-account-auth
+    envVars:
+      - key: COORDINATOR_ACCOUNT_HMAC_KEY
+        sync: false
+  - name: robin-coordinator-control-auth
+    envVars:
+      - key: COORDINATOR_CONTROL_HMAC_KEY
         sync: false
 
 services:
@@ -112,8 +128,26 @@ services:
         value: "254"
       - fromGroup: robin-lighter-provisioner-auth
       - fromGroup: robin-readiness-publisher-auth
+      - fromGroup: robin-coordinator-control-auth
+      - fromGroup: robin-robinhood-provisioner-auth
       - key: READINESS_CALLER_ID
         value: readiness-publisher
+      - key: COORDINATOR_COMMAND_URL
+        fromService:
+          name: robin-execution-coordinator
+          type: pserv
+          property: hostport
+      - key: COORDINATOR_COMMAND_CALLER_ID
+        value: product-command-worker
+      - key: COMMAND_WORKER_ID
+        value: product-command-worker-1
+      - key: ROBINHOOD_PROVISIONER_URL
+        fromService:
+          name: robin-robinhood-provisioner
+          type: pserv
+          property: hostport
+      - key: ROBINHOOD_PROVISIONER_CALLER_ID
+        value: robin-api
       - key: APP_RPC_URL
         sync: false
       - key: PRODUCT_INDEXER_LOOKBACK_BLOCKS
@@ -252,6 +286,8 @@ services:
       - fromGroup: robin-coordinator-exit-auth
       - fromGroup: robin-coordinator-venue-auth
       - fromGroup: robin-coordinator-market-auth
+      - fromGroup: robin-coordinator-account-auth
+      - fromGroup: robin-coordinator-control-auth
       - key: INTENT_CALLER_ID
         value: shadow-processor
       - key: EXIT_CALLER_ID
@@ -260,6 +296,10 @@ services:
         value: runtime-collector
       - key: MARKET_QUOTE_CALLER_ID
         value: execution-authority
+      - key: ACCOUNT_SNAPSHOT_CALLER_ID
+        value: account-publisher
+      - key: CONTROL_CALLER_ID
+        value: product-command-worker
       - key: COORDINATOR_WORKER_ID
         value: coordinator-1
       - key: SIGNER_CALLER_ID
@@ -280,6 +320,84 @@ services:
           property: hostport
       - key: RUST_LOG
         value: info
+
+  - type: pserv
+    name: robin-account-publisher
+    runtime: go
+    plan: starter
+    region: virginia
+    buildCommand: cd publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/account-publisher ./cmd/account-publisher
+    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./publisher/bin/account-publisher
+    healthCheckPath: /healthz
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    buildFilter:
+      paths:
+        - publisher/**
+        - render.yaml
+    envVars:
+      - key: ACCOUNT_PUBLISHER_ENABLED
+        value: "false"
+      - key: GO_VERSION
+        value: "1.24.5"
+      - key: ACCOUNT_PUBLISHER_CONFIG_FILE
+        sync: false
+      - key: ACCOUNT_PUBLISHER_POLL_MILLISECONDS
+        value: "4500"
+
+  - type: pserv
+    name: robin-quote-authority
+    runtime: go
+    plan: starter
+    region: virginia
+    buildCommand: cd liveexec && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/quote-authority ./cmd/quote-authority
+    startCommand: ROBIN_QUOTE_AUTHORITY_LISTEN=0.0.0.0:$PORT ./liveexec/bin/quote-authority
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    buildFilter:
+      paths:
+        - liveexec/**
+        - config/**
+        - render.yaml
+    envVars:
+      - key: ROBIN_QUOTE_AUTHORITY_ENABLED
+        value: "false"
+      - key: GO_VERSION
+        value: "1.24.5"
+      - key: ROBIN_QUOTE_AUTHORITY_CALLER
+        value: strategy-runner
+      - key: ROBIN_QUOTE_AUTHORITY_HMAC_KEY
+        sync: false
+      - key: ROBIN_QUOTE_AUTHORITY_ED25519_PRIVATE_KEY
+        sync: false
+
+  - type: pserv
+    name: robin-strategy-runner
+    runtime: go
+    plan: starter
+    region: virginia
+    buildCommand: cd liveexec && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/strategy-runner ./cmd/strategy-runner
+    startCommand: ROBIN_STRATEGY_RUNNER_LISTEN=0.0.0.0:$PORT ./liveexec/bin/strategy-runner
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    buildFilter:
+      paths:
+        - liveexec/**
+        - config/**
+        - render.yaml
+    envVars:
+      - key: ROBIN_STRATEGY_RUNNER_ENABLED
+        value: "false"
+      - key: GO_VERSION
+        value: "1.24.5"
+      - key: ROBIN_STRATEGY_RUNNER_CALLER
+        value: evaluation-authority
+      - key: ROBIN_STRATEGY_RUNNER_HMAC_KEY
+        sync: false
+      - key: ROBIN_QUOTE_AUTHORITY_ED25519_PUBLIC_KEY
+        sync: false
 
   - type: pserv
     name: robin-lighter-provisioner
@@ -305,8 +423,11 @@ services:
           name: robin-lighter-credentials
           property: connectionString
       - fromGroup: robin-lighter-provisioner-auth
+      - fromGroup: robin-lighter-signer-bridge-auth
       - key: PROVISIONER_CALLER_ID
         value: robin-api
+      - key: LIGHTER_SIGNER_BRIDGE_CALLER_ID
+        value: lighter-signer
       - key: LIGHTER_API_URL
         value: https://mainnet.zklighter.elliot.ai
       - key: LIGHTER_CHAIN_ID
@@ -340,16 +461,86 @@ services:
       - key: GO_VERSION
         value: "1.26.5"
       - fromGroup: robin-lighter-signer-auth
+      - fromGroup: robin-lighter-signer-bridge-auth
       - key: SIGNER_CALLER_ID
         value: execution-coordinator
+      - key: LIGHTER_PROVISIONER_URL
+        fromService:
+          name: robin-lighter-provisioner
+          type: pserv
+          property: hostport
+      - key: LIGHTER_SIGNER_BRIDGE_CALLER_ID
+        value: lighter-signer
       - key: SIGNER_MAX_REQUESTS_PER_MINUTE
         value: "60"
       - key: SIGNER_MAX_CONCURRENT_REQUESTS
         value: "4"
-      - key: LIGHTER_API_PRIVATE_KEY
+
+  - type: pserv
+    name: robin-robinhood-provisioner
+    runtime: go
+    plan: starter
+    region: virginia
+    buildCommand: cd provisioner/robinhood && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/robinhood-provisioner .
+    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./provisioner/robinhood/bin/robinhood-provisioner
+    healthCheckPath: /livez
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    buildFilter:
+      paths:
+        - provisioner/robinhood/**
+        - contracts/**
+        - config/**
+        - render.yaml
+    envVars:
+      - key: ROBINHOOD_PROVISIONER_ENABLED
+        value: "false"
+      - key: GO_VERSION
+        value: "1.26.5"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: robin-robinhood-custody
+          property: connectionString
+      - fromGroup: robin-robinhood-provisioner-auth
+      - fromGroup: robin-robinhood-signer-bridge-auth
+      - key: ROBINHOOD_PROVISIONER_CALLER_ID
+        value: robin-api
+      - key: ROBINHOOD_SIGNER_BRIDGE_CALLER_ID
+        value: robinhood-signer
+      - key: ROBINHOOD_RPC_URL
         sync: false
-      - key: LIGHTER_CHAIN_ID
-        value: "304"
+      - key: ROBINHOOD_RECONCILIATION_RPC_URL
+        sync: false
+      - key: ROBINHOOD_CHAIN_ID
+        value: "4663"
+      - key: ROBINHOOD_USER_VAULT_FACTORY
+        sync: false
+      - key: ROBINHOOD_EXECUTION_REGISTRY
+        sync: false
+      - key: ROBINHOOD_POLICY_DIGEST
+        sync: false
+      - key: ROBINHOOD_FACTORY_CODE_HASH
+        sync: false
+      - key: ROBINHOOD_REGISTRY_CODE_HASH
+        sync: false
+      - key: ROBINHOOD_USER_VAULT_CODE_HASH
+        sync: false
+      - key: ROBINHOOD_RISK_MANAGER_CODE_HASH
+        sync: false
+      - key: ROBINHOOD_SPOT_ADAPTER_CODE_HASH
+        sync: false
+      - key: ROBINHOOD_FINALITY_BLOCKS
+        value: "64"
+      - key: ROBINHOOD_KMS_ALIAS_PREFIX
+        value: alias/robinhood/execution/
+      - key: PROVISIONER_MAX_REQUESTS_PER_MINUTE
+        value: "60"
+      - key: AWS_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
 
   - type: pserv
     name: robin-robinhood-signer
@@ -372,11 +563,19 @@ services:
         value: "1.26.5"
       - key: DATABASE_URL
         fromDatabase:
-          name: robin-research
-          property: connectionPoolString
+          name: robin-robinhood-custody
+          property: connectionString
       - fromGroup: robin-robinhood-signer-auth
+      - fromGroup: robin-robinhood-signer-bridge-auth
       - key: SIGNER_CALLER_ID
         value: execution-coordinator
+      - key: ROBINHOOD_PROVISIONER_URL
+        fromService:
+          name: robin-robinhood-provisioner
+          type: pserv
+          property: hostport
+      - key: ROBINHOOD_SIGNER_BRIDGE_CALLER_ID
+        value: robinhood-signer
       - key: ROBINHOOD_RPC_URL
         sync: false
       - key: ROBINHOOD_RECONCILIATION_RPC_URL
@@ -388,28 +587,6 @@ services:
       - key: AWS_ACCESS_KEY_ID
         sync: false
       - key: AWS_SECRET_ACCESS_KEY
-        sync: false
-      - key: AWS_KMS_KEY_ID
-        sync: false
-      - key: ROBINHOOD_SIGNER_ADDRESS
-        sync: false
-      - key: ROBINHOOD_TIMELOCK_ADDRESS
-        sync: false
-      - key: ROBINHOOD_RECOVERY_ADDRESS
-        sync: false
-      - key: ROBINHOOD_GUARDIAN_ADDRESS
-        sync: false
-      - key: ROBINHOOD_VAULT_ADDRESS
-        sync: false
-      - key: ROBINHOOD_VAULT_CODE_HASH
-        sync: false
-      - key: ROBINHOOD_RISK_MANAGER_ADDRESS
-        sync: false
-      - key: ROBINHOOD_RISK_MANAGER_CODE_HASH
-        sync: false
-      - key: ROBINHOOD_SPOT_ADAPTER_ADDRESS
-        sync: false
-      - key: ROBINHOOD_SPOT_ADAPTER_CODE_HASH
         sync: false
       - key: ROBINHOOD_MAX_GAS_LIMIT
         sync: false
@@ -457,6 +634,17 @@ databases:
   - name: robin-lighter-credentials
     databaseName: robin_lighter_credentials
     user: robin_lighter_provisioner
+    plan: pro-4gb
+    diskSizeGB: 100
+    storageAutoscalingEnabled: true
+    postgresMajorVersion: "18"
+    region: virginia
+    highAvailability:
+      enabled: true
+    ipAllowList: []
+  - name: robin-robinhood-custody
+    databaseName: robin_robinhood_custody
+    user: robin_robinhood_provisioner
     plan: pro-4gb
     diskSizeGB: 100
     storageAutoscalingEnabled: true
