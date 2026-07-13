@@ -52,7 +52,7 @@ main { min-height: 100vh; background: var(--bg); padding: clamp(18px, 2vw, 32px)
 .nav-active::after { position: absolute; right: 10px; bottom: 1px; left: 10px; height: 2px; border-radius: 999px; background: var(--accent); content: ""; }
 .desktop-actions { display: flex; align-items: center; gap: 6px; }
 .theme-toggle, .icon-link { display: flex; align-items: center; gap: 7px; min-height: 32px; border: 1px solid var(--border-strong); color: var(--muted); }
-.theme-toggle { padding: 5px 11px; }
+.theme-toggle { padding: 5px 11px; font-size: 13px; }
 .theme-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
 .icon-link { justify-content: center; width: 32px; border-radius: 6px; text-decoration: none; }
 .github-mark { width: 16px; height: 16px; filter: invert(1); }
