@@ -36,6 +36,32 @@ if (mainnet.universalRouter.toLowerCase() !== config.uniswapV4.UniversalRouter.t
   fail("mainnet router must match uniswapV4.UniversalRouter");
 }
 
+if (config.perp?.venue !== "lighter") fail("perp venue must be lighter");
+if (config.perp?.collateral?.symbol !== "USDC") fail("Lighter collateral must be USDC");
+if (config.perp?.collateral?.decimals !== 6) fail("Lighter USDC must use 6 decimals");
+if (config.perp?.collateral?.settlementChain !== "ethereum") {
+  fail("Lighter collateral settlement chain must be ethereum");
+}
+
+const spotTreasury = config.treasury?.spot;
+const perpTreasury = config.treasury?.perp;
+if (!spotTreasury || !perpTreasury) fail("treasury assets are required");
+if (spotTreasury.symbol !== "USDG" || spotTreasury.chainId !== config.chain.mainnet.chainId) {
+  fail("spot treasury must be Robinhood Chain USDG");
+}
+if (!address.test(spotTreasury.address)) fail("spot treasury asset is not an address");
+if (spotTreasury.address.toLowerCase() !== config.core.USDG.toLowerCase()) {
+  fail("spot treasury asset must match core.USDG");
+}
+if (spotTreasury.decimals !== 6) fail("spot USDG must use 6 decimals");
+if (
+  perpTreasury.symbol !== config.perp.collateral.symbol ||
+  perpTreasury.decimals !== config.perp.collateral.decimals ||
+  perpTreasury.settlementChain !== config.perp.collateral.settlementChain
+) {
+  fail("perp treasury must match the Lighter collateral configuration");
+}
+
 const testnet = config.deployment.testnet;
 if (testnet.status === "verified" && (!address.test(testnet.asset) || !address.test(testnet.universalRouter))) {
   fail("a verified testnet requires an asset and router");

@@ -33,9 +33,7 @@ pub struct NeutralPlan {
     pub net_delta_usd: f64,
 }
 
-/// Build the two matched legs of a delta-neutral basis trade. Share quantity is matched across
-/// legs (not notional), so a move in the underlying cancels and the captured edge is the basis on
-/// those shares. Perp rich (basis > 0) means long spot / short perp; perp cheap means the reverse.
+/// Build the supported long-spot, short-perp pair with matched share exposure.
 pub fn build(signal: &BasisSignal, per_leg_notional_usd: f64) -> Option<NeutralPlan> {
     if !signal.spot_price.is_finite()
         || !signal.perp_mark.is_finite()
@@ -48,10 +46,10 @@ pub fn build(signal: &BasisSignal, per_leg_notional_usd: f64) -> Option<NeutralP
     }
 
     let qty = per_leg_notional_usd / signal.spot_price;
-    let (spot_side, perp_side) = match signal.direction {
-        Direction::PerpRich => (Side::Long, Side::Short),
-        Direction::PerpCheap => (Side::Short, Side::Long),
-    };
+    if signal.direction != Direction::PerpRich {
+        return None;
+    }
+    let (spot_side, perp_side) = (Side::Long, Side::Short);
 
     let spot = Leg {
         venue: Venue::Spot,
@@ -105,10 +103,8 @@ mod tests {
     }
 
     #[test]
-    fn perp_cheap_is_short_spot_long_perp() {
-        let p = build(&sig(Direction::PerpCheap, 214.0, 212.0), 1_000.0).unwrap();
-        assert_eq!(p.spot.side, Side::Short);
-        assert_eq!(p.perp.side, Side::Long);
+    fn perp_cheap_is_rejected_without_a_borrow_venue() {
+        assert!(build(&sig(Direction::PerpCheap, 214.0, 212.0), 1_000.0).is_none());
     }
 
     #[test]

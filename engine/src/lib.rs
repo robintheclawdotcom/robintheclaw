@@ -6,11 +6,16 @@
 
 pub mod basis;
 pub mod neutral;
+pub mod portfolio;
 pub mod risk;
 pub mod sizing;
 
 pub use basis::{basis_bps, evaluate, BasisConfig, BasisObservation, BasisSignal, Direction};
 pub use neutral::{Leg, NeutralPlan, Side, Venue};
+pub use portfolio::{
+    check_portfolio, robust_size, FactorLimit, PortfolioDecline, PortfolioRiskInput, Regime,
+    RobustSizingInput, RobustSizingResult,
+};
 pub use risk::{
     check_order, record_close, record_fill, reset_daily, RiskCheck, RiskLimits, RiskState,
 };

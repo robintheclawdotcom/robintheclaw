@@ -23,6 +23,13 @@ broadcast/
 # rust build artifacts
 target/
 
+# python build and test artifacts
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
 # signal measurement output
 signal/data/
 signal/scan.log

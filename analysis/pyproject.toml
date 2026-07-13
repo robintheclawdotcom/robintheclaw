@@ -1,0 +1,36 @@
+[project]
+name = "robin-research"
+version = "0.1.0"
+description = "Offline statistical research and model-artifact pipeline"
+requires-python = ">=3.12"
+dependencies = [
+  "hmmlearn>=0.3.3,<0.4",
+  "numpy>=2.2,<2.5",
+  "scikit-learn>=1.6,<2",
+  "scipy>=1.15,<2",
+  "statsmodels>=0.14.4,<0.15",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3,<9",
+  "ruff>=0.9,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/robin_research"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]

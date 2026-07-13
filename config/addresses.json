@@ -45,8 +45,25 @@
     "venue": "lighter",
     "api": "https://mainnet.zklighter.elliot.ai",
     "websocket": "wss://mainnet.zklighter.elliot.ai/stream?readonly=true",
-    "collateral": "USDG",
+    "collateral": {
+      "symbol": "USDC",
+      "decimals": 6,
+      "settlementChain": "ethereum"
+    },
     "fundingIntervalHours": 1
+  },
+  "treasury": {
+    "spot": {
+      "symbol": "USDG",
+      "chainId": 4663,
+      "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "decimals": 6
+    },
+    "perp": {
+      "symbol": "USDC",
+      "settlementChain": "ethereum",
+      "decimals": 6
+    }
   },
   "stockTokens": {
     "AAPL": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
