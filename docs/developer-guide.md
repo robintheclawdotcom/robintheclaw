@@ -28,7 +28,7 @@ node config/validate.mjs
 `config/validate.mjs` validates chain IDs, address shapes, the mainnet address cross-checks, and
 the testnet readiness gate. It does not grant permission to deploy.
 
-## Signal measurement
+## Market intelligence
 
 ```sh
 cd signal
@@ -38,8 +38,9 @@ node src/basis.mjs
 ```
 
 `discover.mjs` recovers Uniswap v4 pool keys into ignored local data. `spot.mjs` compares the
-deepest discovered pool with Lighter's mark. `basis.mjs` is a perp-only sanity view. Output is
-measurement data, not an order recommendation. The scanner exits nonzero for an unknown symbol.
+deepest discovered pool with Lighter's mark. `basis.mjs` is a perp-only sanity view. Together they
+form the input layer for strategy research and planning. The scanner exits nonzero for an unknown
+symbol.
 
 ## Deterministic planning
 
@@ -81,13 +82,13 @@ unable to select a testnet asset automatically.
 `tUSDG` fixture, and configures no execution target. It validates role separation and establishes
 only custody plus attestation plumbing.
 
-## Public verification
+## Record integrity
 
 ```sh
 cd verifier
 npm run verify:testnet-proof
 ```
 
-The command reads the tracked deployment record and synthetic fixture, verifies all deployed role
-relationships, recomputes the root, and compares it with the chain. It needs only public RPC
-access and has no signing capability.
+The command reads the tracked deployment record and synthetic fixture, checks the deployed role
+relationships, recomputes the root, and compares it with the chain. It gives developers a direct
+view of the current on-chain foundation.

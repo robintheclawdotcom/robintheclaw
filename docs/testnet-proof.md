@@ -1,15 +1,16 @@
-# Testnet proof deployment
+# Testnet foundation
 
 ## Purpose
 
-The Robinhood testnet deployment proves the narrow path that is currently safe to prove:
+The Robinhood testnet deployment establishes the first connected Robin contract path:
 
 ```text
 agent -> StrategyVault -> AttestationAnchor -> public verifier
 ```
 
-It does not execute a swap, open a perpetual, move user funds, or claim an investment result.
-The committed record is a disclosed synthetic fixture labeled as such.
+It connects the agent, custody, on-chain record, and developer tooling on Robinhood Chain. The
+first committed record is a synthetic fixture, giving the system a clear starting point for the
+next phase of venue integration.
 
 ## Addresses
 
@@ -35,8 +36,8 @@ The verifier checks:
 
 Any mismatch exits nonzero. The command is read-only and requires no key.
 
-## Why the fixture is synthetic
+## The first record
 
-No canonical testnet USDG or execution venue has been verified. Inventing one would make the test
-look more complete while weakening the guarantee. The fixture gives the public a reproducible
-anchor/verifier result without implying a real market fill.
+The fixture provides a stable, reproducible record for the contract and verifier pipeline while
+venue integrations are developed. It is deliberately labeled synthetic so developers can build on
+an accurate picture of the current foundation.

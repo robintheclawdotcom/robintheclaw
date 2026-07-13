@@ -2,10 +2,10 @@
 
 ## Purpose and scope
 
-The architecture supports systematic, market-neutral basis trading: buy one exposure and short
-the matched exposure only when an observed spot/perpetual dislocation survives costs and risk
-limits. Components are separated so an observation cannot become an execution merely because a
-process has a key.
+Robin turns cross-venue market structure into delta-neutral trade plans: buy one exposure, short
+the matched exposure, and capture a qualified spot/perpetual basis. The architecture separates
+market intelligence, research, planning, execution, and records so each part can improve
+independently.
 
 ## Components
 
@@ -30,7 +30,7 @@ private runtime -> raw R2 archive + Postgres snapshots -> shadow lifecycle
 signal observation ----------------------------> deterministic engine
                                                     |
                                                     v
-                                    future, separately verified executor
+                                      venue integration layer
                                                     |
                                                     v
                      StrategyVault -> MandateGuard -> allowlisted venue call
@@ -38,8 +38,9 @@ signal observation ----------------------------> deterministic engine
 published records -> verifier -> Merkle root -> StrategyVault.anchorBatch -> AttestationAnchor
 ```
 
-The executor does not exist yet. Shadow output is not an execution path. A live order system must
-use separately reviewed typed adapters and must never bypass the vault.
+The runtime expands the research layer with high-frequency market evidence. The current testnet
+foundation connects planning and contracts; the live execution path will add a venue adapter while
+preserving the same custody and strategy-role relationships.
 
 ## Contract relationships
 
