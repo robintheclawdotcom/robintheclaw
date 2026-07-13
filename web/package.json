@@ -2,6 +2,9 @@
   "name": "robin-the-claw-web",
   "private": true,
   "version": "0.1.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "dev": "next dev",
     "prebuild": "node scripts/sync-docs.mjs",
