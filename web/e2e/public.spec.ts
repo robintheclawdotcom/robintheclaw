@@ -7,6 +7,7 @@ test("homepage leads with no-code strategy access", async ({ page }) => {
   await expect(page.getByText("typed contract layer live", { exact: false })).toBeVisible();
   await expect(page.getByText("Source-verified governance, custody, risk, and routing", { exact: false })).toBeVisible();
   await expect(page.getByText("No extension, seed phrase, CLI", { exact: false })).toBeVisible();
+  await expect(page.getByText(/testnet/i)).toHaveCount(0);
   await expect(page.getByText("git clone", { exact: false })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "open app", exact: false }).first()).toHaveAttribute("href", "/app");
   await expect(page.getByRole("link", { name: "inspect onchain", exact: false }).first()).toHaveAttribute(

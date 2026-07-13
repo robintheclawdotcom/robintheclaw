@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ErrorNotice, LoadingPanel, PageHeader } from "../../../components/app-ui";
 import { useAppApi, useRobinAuth, useSmartWallet } from "../../../components/app-providers";
+import { robinhoodMainnetChainId } from "../../../lib/chain";
 import { formatAddress } from "../../../lib/format";
 
 const PENDING_KEY = "robin:onboarding-call-id";
@@ -61,6 +62,9 @@ export default function OnboardingPage() {
     try {
       setPhase("preparing");
       const plan = await api.prepareVault();
+      if (plan.chainId !== robinhoodMainnetChainId) {
+        throw new Error("The vault plan does not target Robinhood Chain mainnet.");
+      }
       setPhase("signing");
       const callId = await smartWallet.executeCalls(plan.calls, undefined, (submittedId) => {
         window.localStorage.setItem(PENDING_KEY, submittedId);
@@ -110,7 +114,7 @@ export default function OnboardingPage() {
       <section className="onboarding-complete">
         <span className="success-mark">✓</span><span className="eyebrow">Setup complete</span>
         <h1>Your Robin strategy account is ready.</h1>
-        <p>Your personal vault is funded on Robinhood Chain testnet and ready for strategy control.</p>
+        <p>Your personal vault is funded on Robinhood Chain mainnet and ready for strategy control.</p>
         <Link className="button button-primary" href="/app">Open dashboard</Link>
       </section>
     );
@@ -131,7 +135,7 @@ export default function OnboardingPage() {
           <div className="button-row"><button className="button button-secondary" onClick={auth.linkWallet}>Link wallet</button><button className="button button-quiet" disabled={sync.isPending} onClick={() => sync.mutate()}>Refresh</button></div>
         </Step>
         <Step number="4" title="Personal vault" complete={false}>
-          <p>Robin will claim test assets, create your versioned vault, and fund it in one sponsored batch.</p>
+          <p>Robin will create your versioned mainnet vault and fund it in one sponsored batch.</p>
         </Step>
       </ol>
       {phase === "delayed" ? (
@@ -141,7 +145,7 @@ export default function OnboardingPage() {
         </div>
       ) : (
         <section className="activate-panel">
-          <div><strong>{phaseLabel(phase)}</strong><p>One wallet confirmation. Testnet gas is sponsored.</p></div>
+          <div><strong>{phaseLabel(phase)}</strong><p>One wallet confirmation. Mainnet gas is sponsored.</p></div>
           <button className="button button-primary" disabled={!recoveryReady || !me.smartAccount || phase !== "idle"} onClick={() => void activate()}>{phase === "idle" ? "Create and fund vault" : "Working…"}</button>
         </section>
       )}

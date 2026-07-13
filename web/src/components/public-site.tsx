@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { testnetProof } from "../lib/testnet-proof";
+import { robinhoodMainnetExplorer } from "../lib/chain";
 
 const mainnetDeployment = {
-  explorer: "https://robinhoodchain.blockscout.com",
+  explorer: robinhoodMainnetExplorer,
   transaction: "0xe8b7ca77feaf117e287eab146d7e79bdef83737a93453534bc9077da0e0ac961",
 };
 
-type DocId = "overview" | "experience" | "signal" | "contracts" | "verifier" | "engine" | "mainnet" | "testnet" | "application" | "methodology" | "readiness" | "architecture" | "developer" | "operations" | "security" | "venues";
+type DocId = "overview" | "experience" | "signal" | "contracts" | "verifier" | "engine" | "mainnet" | "methodology" | "readiness" | "architecture" | "developer" | "operations" | "security" | "venues";
 
 const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }> = {
   overview: {
@@ -88,35 +88,6 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
         <div className="code-block"><span>$</span> cd verifier && npm test</div>
       </>
     ),
-  },
-  testnet: {
-    file: "deployments/testnet-proof.json",
-    title: "Testnet foundation",
-    body: (
-      <>
-        <p>
-          The deployed testnet stack connects custody, strategy roles, and onchain records on
-          Robinhood Chain. It is the base for bringing venue integrations online in stages.
-        </p>
-        <h2>Connected onchain</h2>
-        <p>
-          The first testnet batch confirms the contract and record pipeline end to end. The
-          accompanying verifier lets developers inspect that foundation directly.
-        </p>
-        <div className="code-block"><span>$</span> cd verifier && npm run verify:testnet-proof</div>
-        <p>
-          <a href={`${testnetProof.explorer}/tx/${testnetProof.transaction}`} target="_blank" rel="noreferrer">
-            View the testnet anchor transaction ↗
-          </a>
-        </p>
-        <PublishedDoc file="testnet-proof.md" />
-      </>
-    ),
-  },
-  application: {
-    file: "docs/ux-testnet.md",
-    title: "Application testnet",
-    body: <PublishedDoc file="ux-testnet.md" />,
   },
   engine: {
     file: "engine/README.md",
@@ -363,20 +334,6 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
                     <p>Source-verified governance, custody, risk, and routing contracts are live on Robinhood Chain mainnet.</p>
                   </div>
                   <a href={`${mainnetDeployment.explorer}/tx/${mainnetDeployment.transaction}`} target="_blank" rel="noreferrer">
-                    inspect onchain ↗
-                  </a>
-                </div>
-              </section>
-
-              <section className="proof-status">
-                <Prompt>robin testnet --status</Prompt>
-                <div className="proof-panel">
-                  <div>
-                    <span className="proof-label">application testnet</span>
-                    <strong>personal vault stack live · sequence {testnetProof.sequence}</strong>
-                    <p>Personal vaults, account services, and the record pipeline are connected on Robinhood Chain testnet.</p>
-                  </div>
-                  <a href={`${testnetProof.explorer}/tx/${testnetProof.transaction}`} target="_blank" rel="noreferrer">
                     inspect onchain ↗
                   </a>
                 </div>

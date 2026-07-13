@@ -11,7 +11,7 @@ export const wallet = (address: string, type: "embedded" | "external", primary: 
 });
 
 export const vault = {
-  id: "vault-id", chainId: 46630, factoryVersion: 1,
+  id: "vault-id", chainId: 4663, factoryVersion: 1,
   assetAddress: "0x5555555555555555555555555555555555555555",
   vaultAddress, guardAddress: "0x6666666666666666666666666666666666666666",
   anchorAddress: "0x7777777777777777777777777777777777777777",
@@ -23,22 +23,22 @@ export function me(withVault = true) {
   return {
     user: { id: "user-id", privyDid: "did:privy:test-user", onboardingState: withVault ? "complete" : "vault", hasRecovery: true, createdAt: "2026-07-13T10:00:00Z", updatedAt: "2026-07-13T10:00:00Z" },
     wallets: [wallet(embedded, "embedded", true), wallet(external, "external", false)],
-    smartAccount: { chainId: 46630, address: embedded, provider: "alchemy-eip7702", createdAt: "2026-07-13T10:00:00Z" },
+    smartAccount: { chainId: 4663, address: embedded, provider: "alchemy-eip7702", createdAt: "2026-07-13T10:00:00Z" },
     preferences: { displayCurrency: "USD", activeFundingWallet: external, notificationsEnabled: true, updatedAt: "2026-07-13T10:00:00Z" },
     vault: withVault ? vault : null,
   };
 }
 
 export const dashboard = {
-  environment: "robinhood-testnet", asOf: "2026-07-13T10:05:00Z", infrastructureReady: true,
-  totalValue: { raw: "1000000000", decimals: 6, symbol: "tUSDG" },
-  availableBalance: { raw: "0", decimals: 6, symbol: "tUSDG" },
-  deployedCapital: { raw: "1000000000", decimals: 6, symbol: "tUSDG" }, pnl: null,
+  environment: "robinhood-mainnet", asOf: "2026-07-13T10:05:00Z", infrastructureReady: true,
+  totalValue: { raw: "1000000000", decimals: 6, symbol: "USDG" },
+  availableBalance: { raw: "0", decimals: 6, symbol: "USDG" },
+  deployedCapital: { raw: "1000000000", decimals: 6, symbol: "USDG" }, pnl: null,
   smartAccount: me().smartAccount,
-  vault: { record: vault, balance: { raw: "1000000000", decimals: 6, symbol: "tUSDG" }, halted: true, remainingCapacity: { raw: "5000000000", decimals: 6, symbol: "tUSDG" } },
+  vault: { record: vault, balance: { raw: "1000000000", decimals: 6, symbol: "USDG" }, halted: true, remainingCapacity: { raw: "5000000000", decimals: 6, symbol: "USDG" } },
   positions: [],
   opportunities: [{ symbol: "NVDA", basisBps: "42.5000", liquidity: "250000", observedAt: 1783936800 }],
-  activity: [], wallets: me().wallets.map((item) => ({ wallet: item, balance: { raw: item.isPrimary ? "0" : "250000000", decimals: 6, symbol: "tUSDG" } })),
+  activity: [], wallets: me().wallets.map((item) => ({ wallet: item, balance: { raw: item.isPrimary ? "0" : "250000000", decimals: 6, symbol: "USDG" } })),
 };
 
 export async function mockApplication(page: Page, options: { withVault?: boolean } = {}) {
@@ -53,7 +53,7 @@ async function respond(route: Route, withVault: boolean) {
   if (path.endsWith("/dashboard")) return json(route, dashboard);
   if (path.endsWith("/activity")) return json(route, { items: [], nextCursor: null });
   if (path.endsWith("/preferences")) return json(route, me(withVault).preferences);
-  if (path.endsWith("/vaults/prepare")) return json(route, { chainId: 46630, smartAccount: embedded, expectedVault: vaultAddress, calls: [{ to: vault.assetAddress, data: "0x095ea7b3", value: "0" }] });
+  if (path.endsWith("/vaults/prepare")) return json(route, { chainId: 4663, smartAccount: embedded, expectedVault: vaultAddress, calls: [{ to: vault.assetAddress, data: "0x095ea7b3", value: "0" }] });
   if (path.endsWith("/vaults/confirm")) return json(route, vault);
   if (path.endsWith("/wallets/sync")) {
     const synced = me(withVault);

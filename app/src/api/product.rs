@@ -391,7 +391,7 @@ fn ensure_contracts(state: &AppState) -> Result<(), ApiError> {
         Ok(())
     } else {
         Err(ApiError::ServiceUnavailable(
-            "Testnet onboarding contracts are not configured.".to_string(),
+            "Mainnet vault onboarding is not configured.".to_string(),
         ))
     }
 }

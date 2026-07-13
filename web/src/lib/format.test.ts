@@ -3,8 +3,8 @@ import { formatAddress, formatAmount, titleFromKind } from "./format";
 
 describe("product formatting", () => {
   it("formats integer token amounts without floating point loss", () => {
-    expect(formatAmount({ raw: "123456789012345678901", decimals: 6, symbol: "tUSDG" }))
-      .toBe("123,456,789,012,345.67 tUSDG");
+    expect(formatAmount({ raw: "123456789012345678901", decimals: 6, symbol: "USDG" }))
+      .toBe("123,456,789,012,345.67 USDG");
   });
 
   it("preserves negative values and absent P&L", () => {

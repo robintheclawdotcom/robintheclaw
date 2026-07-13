@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import type { ActivityRecord } from "../lib/app-types";
+import { mainnetTransactionUrl, robinhoodMainnetChainId } from "../lib/chain";
 import { formatAddress, formatDate, titleFromKind } from "../lib/format";
 
 export function PageHeader({ eyebrow, title, description, action }: {
@@ -44,7 +45,7 @@ export function ActivityList({ items, compact = false }: { items: ActivityRecord
         <article key={item.id}>
           <span className="activity-icon" aria-hidden="true">↗</span>
           <div><strong>{titleFromKind(item.kind)}</strong><small>{formatDate(item.occurredAt)}</small></div>
-          {item.transactionHash && <a href={`https://explorer.testnet.chain.robinhood.com/tx/${item.transactionHash}`} target="_blank" rel="noreferrer" aria-label={`View ${titleFromKind(item.kind)} transaction`}>{formatAddress(item.transactionHash)}</a>}
+          {item.transactionHash && item.chainId === robinhoodMainnetChainId && <a href={mainnetTransactionUrl(item.transactionHash)} target="_blank" rel="noreferrer" aria-label={`View ${titleFromKind(item.kind)} transaction`}>{formatAddress(item.transactionHash)}</a>}
         </article>
       ))}
     </div>
@@ -54,7 +55,7 @@ export function ActivityList({ items, compact = false }: { items: ActivityRecord
 export function SetupCard() {
   return (
     <section className="setup-card">
-      <div><span className="eyebrow">Ready when you are</span><h2>Activate your personal strategy vault</h2><p>Create and fund your testnet vault in one sponsored operation. No gas, extension, or chain setup required.</p></div>
+      <div><span className="eyebrow">Ready when you are</span><h2>Activate your personal strategy vault</h2><p>Create and fund your mainnet vault in one sponsored operation. No extension or chain setup required.</p></div>
       <Link className="button button-primary" href="/app/onboarding">Set up Robin</Link>
     </section>
   );

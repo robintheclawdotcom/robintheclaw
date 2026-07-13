@@ -9,7 +9,8 @@ test("email or passkey user opens a real empty-position dashboard", async ({ pag
   await expect(page.getByText("email, passkey, Google, Apple, or an EVM wallet", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Open Robin" }).click();
   await expect(page.getByRole("heading", { name: "Your strategy account" })).toBeVisible();
-  await expect(page.getByText("1,000 tUSDG").first()).toBeVisible();
+  await expect(page.getByText("1,000 USDG").first()).toBeVisible();
+  await expect(page.getByText("Robinhood mainnet", { exact: true })).toBeVisible();
   await expect(page.getByText("No positions yet")).toBeVisible();
   await expect(page.getByText("Available when live positions exist")).toBeVisible();
 });

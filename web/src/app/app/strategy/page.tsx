@@ -35,7 +35,7 @@ export default function StrategyPage() {
           </div>
           <section className="panel">
             <div className="panel-heading"><div><span className="eyebrow">Execution</span><h2>Positions</h2></div></div>
-            {dashboard.positions.length ? <div className="position-cards">{dashboard.positions.map((position) => <article key={position.id}><strong>{position.symbol}</strong><span>{position.status}</span><dl><div><dt>Entry basis</dt><dd>{position.entryBasisBps} bps</dd></div><div><dt>Current basis</dt><dd>{position.currentBasisBps} bps</dd></div><div><dt>Funding</dt><dd>{formatAmount(position.funding)}</dd></div><div><dt>P&amp;L</dt><dd>{formatAmount(position.pnl)}</dd></div></dl></article>)}</div> : <EmptyState title="No venue positions" body="The current release shows your real testnet vault and opportunity feed. Venue positions will appear only after they actually execute." />}
+            {dashboard.positions.length ? <div className="position-cards">{dashboard.positions.map((position) => <article key={position.id}><strong>{position.symbol}</strong><span>{position.status}</span><dl><div><dt>Entry basis</dt><dd>{position.entryBasisBps} bps</dd></div><div><dt>Current basis</dt><dd>{position.currentBasisBps} bps</dd></div><div><dt>Funding</dt><dd>{formatAmount(position.funding)}</dd></div><div><dt>P&amp;L</dt><dd>{formatAmount(position.pnl)}</dd></div></dl></article>)}</div> : <EmptyState title="No venue positions" body="The current release shows your mainnet vault and opportunity feed. Venue positions will appear only after they execute." />}
           </section>
         </>
       )}

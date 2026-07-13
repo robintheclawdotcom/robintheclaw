@@ -25,7 +25,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <AuthPanel
           eyebrow="Application setup"
           title="The Robin app is ready for provider configuration."
-          body="Connect the deployment to Privy, Alchemy, and the application API to enable sign-in and one-click testnet onboarding."
+          body="Connect the deployment to Privy, Alchemy, and the application API to enable sign-in and sponsored mainnet onboarding."
         />
       </main>
     );
@@ -41,7 +41,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <AuthPanel
           eyebrow="Automated strategy access"
           title="One account for capital, strategy, and performance."
-          body="Sign in with email, passkey, Google, Apple, or an EVM wallet. Robin creates your testnet strategy account with no extension, RPC setup, or gas required."
+          body="Sign in with email, passkey, Google, Apple, or an EVM wallet. Robin creates your mainnet strategy account with no extension or RPC setup."
           action={<button className="button button-primary" onClick={auth.login}>Open Robin</button>}
         />
       </main>
@@ -66,7 +66,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           })}
         </nav>
         <div className="app-sidebar-footer">
-          <span className="network-status"><i /> Robinhood testnet</span>
+          <span className="network-status"><i /> Robinhood mainnet</span>
           <Link href="/">Public site ↗</Link>
         </div>
       </aside>
@@ -105,7 +105,7 @@ function AuthPanel({
       <p>{body}</p>
       {action}
       <div className="auth-benefits" aria-label="Account benefits">
-        <span>No-code setup</span><span>Sponsored testnet gas</span><span>Self-custodied vault</span>
+        <span>No-code setup</span><span>Sponsored mainnet gas</span><span>Self-custodied vault</span>
       </div>
     </section>
   );
