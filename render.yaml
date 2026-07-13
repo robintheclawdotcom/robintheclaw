@@ -15,6 +15,14 @@ envVarGroups:
     envVars:
       - key: LIGHTER_SIGNER_BRIDGE_HMAC_KEY
         sync: false
+  - name: robin-lighter-publisher-bridge-auth
+    envVars:
+      - key: LIGHTER_PUBLISHER_BRIDGE_HMAC_KEY
+        sync: false
+  - name: robin-lighter-market-config
+    envVars:
+      - key: LIGHTER_AAPL_MARKET_INDEX
+        sync: false
   - name: robin-robinhood-signer-auth
     envVars:
       - key: ROBINHOOD_SIGNER_HMAC_KEY
@@ -50,6 +58,22 @@ envVarGroups:
   - name: robin-coordinator-control-auth
     envVars:
       - key: COORDINATOR_CONTROL_HMAC_KEY
+        sync: false
+  - name: robin-coordinator-registration-auth
+    envVars:
+      - key: COORDINATOR_REGISTRATION_HMAC_KEY
+        sync: false
+  - name: robin-quote-authority-request-auth
+    envVars:
+      - key: ROBIN_QUOTE_AUTHORITY_HMAC_KEY
+        sync: false
+  - name: robin-strategy-runner-request-auth
+    envVars:
+      - key: ROBIN_STRATEGY_RUNNER_HMAC_KEY
+        sync: false
+  - name: robin-quote-authority-public-key
+    envVars:
+      - key: ROBIN_QUOTE_AUTHORITY_ED25519_PUBLIC_KEY
         sync: false
 
 services:
@@ -129,6 +153,7 @@ services:
       - fromGroup: robin-lighter-provisioner-auth
       - fromGroup: robin-readiness-publisher-auth
       - fromGroup: robin-coordinator-control-auth
+      - fromGroup: robin-coordinator-registration-auth
       - fromGroup: robin-robinhood-provisioner-auth
       - key: READINESS_CALLER_ID
         value: readiness-publisher
@@ -141,6 +166,15 @@ services:
         value: product-command-worker
       - key: COMMAND_WORKER_ID
         value: product-command-worker-1
+      - key: COORDINATOR_REGISTRATION_URL
+        fromService:
+          name: robin-execution-coordinator
+          type: pserv
+          property: hostport
+      - key: COORDINATOR_REGISTRATION_CALLER_ID
+        value: product-account-provisioner
+      - key: REGISTRATION_WORKER_ID
+        value: product-account-registration-1
       - key: ROBINHOOD_PROVISIONER_URL
         fromService:
           name: robin-robinhood-provisioner
@@ -280,7 +314,7 @@ services:
         value: "false"
       - key: DATABASE_URL
         fromDatabase:
-          name: robin-research
+          name: robin-execution
           property: connectionPoolString
       - fromGroup: robin-coordinator-intent-auth
       - fromGroup: robin-coordinator-exit-auth
@@ -288,18 +322,21 @@ services:
       - fromGroup: robin-coordinator-market-auth
       - fromGroup: robin-coordinator-account-auth
       - fromGroup: robin-coordinator-control-auth
+      - fromGroup: robin-coordinator-registration-auth
       - key: INTENT_CALLER_ID
-        value: shadow-processor
+        value: strategy-runner
       - key: EXIT_CALLER_ID
-        value: risk-operator
+        value: strategy-runner-exit
       - key: VENUE_EVENT_CALLER_ID
         value: runtime-collector
       - key: MARKET_QUOTE_CALLER_ID
-        value: execution-authority
+        value: quote-authority-market
       - key: ACCOUNT_SNAPSHOT_CALLER_ID
         value: account-publisher
       - key: CONTROL_CALLER_ID
         value: product-command-worker
+      - key: REGISTRATION_CALLER_ID
+        value: product-account-provisioner
       - key: COORDINATOR_WORKER_ID
         value: coordinator-1
       - key: SIGNER_CALLER_ID
@@ -327,7 +364,7 @@ services:
     plan: starter
     region: virginia
     buildCommand: cd publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/account-publisher ./cmd/account-publisher
-    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./publisher/bin/account-publisher
+    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ACCOUNT_PUBLISHER_COORDINATOR_HMAC_KEY=$COORDINATOR_ACCOUNT_HMAC_KEY ACCOUNT_PUBLISHER_APPLICATION_HMAC_KEY=$READINESS_HMAC_KEY ACCOUNT_PUBLISHER_LIGHTER_MARKET_ID=$LIGHTER_AAPL_MARKET_INDEX ./publisher/bin/account-publisher
     healthCheckPath: /healthz
     autoDeployTrigger: checksPass
     maxShutdownDelaySeconds: 30
@@ -338,12 +375,55 @@ services:
     envVars:
       - key: ACCOUNT_PUBLISHER_ENABLED
         value: "false"
+      - key: ACCOUNT_PUBLISHER_ENVIRONMENT
+        value: mainnet
       - key: GO_VERSION
         value: "1.24.5"
-      - key: ACCOUNT_PUBLISHER_CONFIG_FILE
+      - key: ACCOUNT_PUBLISHER_COORDINATOR_DATABASE_URL
+        sync: false
+      - key: ACCOUNT_PUBLISHER_ROBINHOOD_DATABASE_URL
+        sync: false
+      - key: ACCOUNT_PUBLISHER_ROBINHOOD_JOURNAL_DATABASE_URL
+        sync: false
+      - key: ACCOUNT_PUBLISHER_PRIMARY_RPC_URL
+        sync: false
+      - key: ACCOUNT_PUBLISHER_SECONDARY_RPC_URL
+        sync: false
+      - key: ACCOUNT_PUBLISHER_MINIMUM_COLLATERAL_RAW
+        sync: false
+      - key: ACCOUNT_PUBLISHER_MINIMUM_SETTLEMENT_RAW
+        sync: false
+      - key: ACCOUNT_PUBLISHER_MINIMUM_OWNER_GAS_RAW
+        sync: false
+      - key: ACCOUNT_PUBLISHER_MINIMUM_SIGNER_GAS_RAW
         sync: false
       - key: ACCOUNT_PUBLISHER_POLL_MILLISECONDS
         value: "4500"
+      - key: ACCOUNT_PUBLISHER_LIGHTER_BRIDGE_URL
+        fromService:
+          name: robin-lighter-provisioner
+          type: pserv
+          property: hostport
+      - key: LIGHTER_PUBLISHER_BRIDGE_CALLER_ID
+        value: account-publisher
+      - fromGroup: robin-lighter-publisher-bridge-auth
+      - fromGroup: robin-lighter-market-config
+      - key: ACCOUNT_PUBLISHER_COORDINATOR_URL
+        fromService:
+          name: robin-execution-coordinator
+          type: pserv
+          property: hostport
+      - key: ACCOUNT_PUBLISHER_COORDINATOR_CALLER_ID
+        value: account-publisher
+      - fromGroup: robin-coordinator-account-auth
+      - key: ACCOUNT_PUBLISHER_APPLICATION_URL
+        fromService:
+          name: robin-api
+          type: pserv
+          property: hostport
+      - key: ACCOUNT_PUBLISHER_APPLICATION_CALLER_ID
+        value: readiness-publisher
+      - fromGroup: robin-readiness-publisher-auth
 
   - type: pserv
     name: robin-quote-authority
@@ -351,7 +431,7 @@ services:
     plan: starter
     region: virginia
     buildCommand: cd liveexec && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/quote-authority ./cmd/quote-authority
-    startCommand: ROBIN_QUOTE_AUTHORITY_LISTEN=0.0.0.0:$PORT ./liveexec/bin/quote-authority
+    startCommand: ROBIN_QUOTE_AUTHORITY_LISTEN=0.0.0.0:$PORT ROBIN_COORDINATOR_URL=http://$ROBIN_COORDINATOR_HOSTPORT ROBIN_COORDINATOR_MARKET_HMAC_KEY=$COORDINATOR_MARKET_HMAC_KEY ROBIN_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ./liveexec/bin/quote-authority
     healthCheckPath: /health
     autoDeployTrigger: checksPass
     maxShutdownDelaySeconds: 30
@@ -366,11 +446,19 @@ services:
       - key: GO_VERSION
         value: "1.24.5"
       - key: ROBIN_QUOTE_AUTHORITY_CALLER
-        value: strategy-runner
-      - key: ROBIN_QUOTE_AUTHORITY_HMAC_KEY
-        sync: false
+        value: live-scheduler-quote
+      - fromGroup: robin-quote-authority-request-auth
       - key: ROBIN_QUOTE_AUTHORITY_ED25519_PRIVATE_KEY
         sync: false
+      - fromGroup: robin-lighter-market-config
+      - fromGroup: robin-coordinator-market-auth
+      - key: ROBIN_COORDINATOR_HOSTPORT
+        fromService:
+          name: robin-execution-coordinator
+          type: pserv
+          property: hostport
+      - key: ROBIN_COORDINATOR_MARKET_CALLER
+        value: quote-authority-market
 
   - type: pserv
     name: robin-strategy-runner
@@ -378,7 +466,7 @@ services:
     plan: starter
     region: virginia
     buildCommand: cd liveexec && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/strategy-runner ./cmd/strategy-runner
-    startCommand: ROBIN_STRATEGY_RUNNER_LISTEN=0.0.0.0:$PORT ./liveexec/bin/strategy-runner
+    startCommand: ROBIN_STRATEGY_RUNNER_LISTEN=0.0.0.0:$PORT ROBIN_COORDINATOR_URL=http://$ROBIN_COORDINATOR_HOSTPORT ROBIN_COORDINATOR_INTENT_HMAC_KEY=$COORDINATOR_INTENT_HMAC_KEY ROBIN_COORDINATOR_EXIT_HMAC_KEY=$COORDINATOR_EXIT_HMAC_KEY ROBIN_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ./liveexec/bin/strategy-runner
     healthCheckPath: /health
     autoDeployTrigger: checksPass
     maxShutdownDelaySeconds: 30
@@ -393,11 +481,66 @@ services:
       - key: GO_VERSION
         value: "1.24.5"
       - key: ROBIN_STRATEGY_RUNNER_CALLER
-        value: evaluation-authority
-      - key: ROBIN_STRATEGY_RUNNER_HMAC_KEY
-        sync: false
-      - key: ROBIN_QUOTE_AUTHORITY_ED25519_PUBLIC_KEY
-        sync: false
+        value: live-scheduler-runner
+      - fromGroup: robin-strategy-runner-request-auth
+      - fromGroup: robin-quote-authority-public-key
+      - fromGroup: robin-lighter-market-config
+      - fromGroup: robin-coordinator-intent-auth
+      - fromGroup: robin-coordinator-exit-auth
+      - key: ROBIN_COORDINATOR_HOSTPORT
+        fromService:
+          name: robin-execution-coordinator
+          type: pserv
+          property: hostport
+      - key: ROBIN_COORDINATOR_INTENT_CALLER
+        value: strategy-runner
+      - key: ROBIN_COORDINATOR_EXIT_CALLER
+        value: strategy-runner-exit
+
+  - type: worker
+    name: robin-live-scheduler
+    runtime: go
+    plan: starter
+    region: virginia
+    buildCommand: cd runtime/live-scheduler && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/live-scheduler ./cmd/live-scheduler
+    startCommand: ROBIN_QUOTE_AUTHORITY_URL=http://$ROBIN_QUOTE_AUTHORITY_HOSTPORT ROBIN_STRATEGY_RUNNER_URL=http://$ROBIN_STRATEGY_RUNNER_HOSTPORT ROBIN_LIVE_SCHEDULER_QUOTE_HMAC_KEY=$ROBIN_QUOTE_AUTHORITY_HMAC_KEY ROBIN_LIVE_SCHEDULER_RUNNER_HMAC_KEY=$ROBIN_STRATEGY_RUNNER_HMAC_KEY ROBIN_LIVE_SCHEDULER_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ./runtime/live-scheduler/bin/live-scheduler
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    buildFilter:
+      paths:
+        - runtime/live-scheduler/**
+        - coordinator/migrations/**
+        - config/**
+        - render.yaml
+    envVars:
+      - key: ROBIN_LIVE_SCHEDULER_ENABLED
+        value: "false"
+      - key: GO_VERSION
+        value: "1.26.5"
+      - key: ROBIN_LIVE_SCHEDULER_DATABASE_URL
+        fromDatabase:
+          name: robin-execution
+          property: connectionString
+      - key: ROBIN_LIVE_SCHEDULER_WORKER_ID
+        value: live-scheduler-1
+      - key: ROBIN_QUOTE_AUTHORITY_HOSTPORT
+        fromService:
+          name: robin-quote-authority
+          type: pserv
+          property: hostport
+      - key: ROBIN_LIVE_SCHEDULER_QUOTE_CALLER
+        value: live-scheduler-quote
+      - fromGroup: robin-quote-authority-request-auth
+      - fromGroup: robin-quote-authority-public-key
+      - fromGroup: robin-lighter-market-config
+      - key: ROBIN_STRATEGY_RUNNER_HOSTPORT
+        fromService:
+          name: robin-strategy-runner
+          type: pserv
+          property: hostport
+      - key: ROBIN_LIVE_SCHEDULER_RUNNER_CALLER
+        value: live-scheduler-runner
+      - fromGroup: robin-strategy-runner-request-auth
 
   - type: pserv
     name: robin-lighter-provisioner
@@ -405,7 +548,7 @@ services:
     plan: starter
     region: virginia
     buildCommand: cd provisioner/lighter && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/lighter-provisioner .
-    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./provisioner/lighter/bin/lighter-provisioner
+    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT LIGHTER_PUBLISHER_MARKET_ID=$LIGHTER_AAPL_MARKET_INDEX ./provisioner/lighter/bin/lighter-provisioner
     healthCheckPath: /livez
     autoDeployTrigger: checksPass
     maxShutdownDelaySeconds: 30
@@ -424,10 +567,14 @@ services:
           property: connectionString
       - fromGroup: robin-lighter-provisioner-auth
       - fromGroup: robin-lighter-signer-bridge-auth
+      - fromGroup: robin-lighter-publisher-bridge-auth
+      - fromGroup: robin-lighter-market-config
       - key: PROVISIONER_CALLER_ID
         value: robin-api
       - key: LIGHTER_SIGNER_BRIDGE_CALLER_ID
         value: lighter-signer
+      - key: LIGHTER_PUBLISHER_BRIDGE_CALLER_ID
+        value: account-publisher
       - key: LIGHTER_API_URL
         value: https://mainnet.zklighter.elliot.ai
       - key: LIGHTER_CHAIN_ID
@@ -639,6 +786,18 @@ databases:
     storageAutoscalingEnabled: true
     postgresMajorVersion: "18"
     region: virginia
+    highAvailability:
+      enabled: true
+    ipAllowList: []
+  - name: robin-execution
+    databaseName: robin_execution
+    user: robin_execution
+    plan: pro-4gb
+    diskSizeGB: 100
+    storageAutoscalingEnabled: true
+    postgresMajorVersion: "18"
+    region: virginia
+    connectionPool: pgbouncer
     highAvailability:
       enabled: true
     ipAllowList: []

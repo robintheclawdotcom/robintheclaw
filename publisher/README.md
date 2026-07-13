@@ -10,7 +10,7 @@ The Robinhood adapter requires two independent RPC provider hostnames. At the sa
 
 ## Policy activation boundary
 
-`policy_active` is derived only from coordinator state for the exact registered execution account. Global, strategy, and account controls must all be `ACTIVE`; the account and strategy manifest digests must equal the registered digest; and venue approval, oracle, sequencer, reconciliation, exit authority, alerting, and safe rotation must all be ready. Missing rows, nulls, mismatches, or one false gate publish `false`. This service cannot write any of those controls or gates.
+`policy_active` is derived only from coordinator state for the exact registered execution account. Global, strategy, and account controls must all be `ACTIVE`; the account and strategy manifest digests must equal the registered digest; exactly one current coordinator AAPL market configuration must match the publisher's pinned Lighter market ID; and venue approval, oracle, sequencer, reconciliation, exit authority, alerting, and safe rotation must all be ready. Missing rows, nulls, overlaps, mismatches, or one false gate publish `false`. This service cannot write any of those controls or gates.
 
 ## Configuration
 
@@ -32,7 +32,7 @@ The three HMAC environment secrets must be distinct 32-byte lowercase hex values
 
 The database roles require `SELECT` on:
 
-- coordinator: `execution_account_registrations`, `execution_accounts`, `execution_control`, `execution_strategy_control`, `execution_account_control`, and `execution_account_readiness`;
+- coordinator: `execution_account_registrations`, `execution_accounts`, `execution_control`, `execution_strategy_control`, `execution_account_control`, `execution_account_readiness`, and `execution_market_configs`;
 - Robinhood provisioner: `robinhood_execution_bindings` excluding any need to expose `kms_key_id`;
 - Robinhood signer: `robinhood_signer_deployments` and `robinhood_signer_transactions` excluding signed transaction bytes.
 
