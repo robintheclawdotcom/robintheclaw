@@ -49,15 +49,6 @@ type signedTransaction struct {
 	TxInfo             json.RawMessage `json:"txInfo"`
 }
 
-type authTokenResponse struct {
-	ExecutionAccountID string `json:"executionAccountId"`
-	Token              string `json:"token"`
-	ExpiresAtUnix      int64  `json:"expiresAtUnix"`
-	AccountIndex       int64  `json:"accountIndex"`
-	APIKeyIndex        uint8  `json:"apiKeyIndex"`
-	CredentialVersion  int64  `json:"credentialVersion"`
-}
-
 type transactOptions struct {
 	Nonce       int64 `json:"nonce"`
 	ExpiresAtMS int64 `json:"expiresAtMs"`
@@ -106,11 +97,6 @@ type cancelAllRequest struct {
 	TransactOptions    transactOptions `json:"transaction"`
 }
 
-type authTokenRequest struct {
-	ExecutionAccountID string `json:"executionAccountId"`
-	ExpiresAtUnix      int64  `json:"expiresAtUnix"`
-}
-
 func newSignerServer(value config) (*signerServer, error) {
 	server := &signerServer{
 		config: value,
@@ -133,7 +119,6 @@ func (s *signerServer) routes() http.Handler {
 	mux.Handle("POST /v1/sign/modify-order", s.authorize(http.HandlerFunc(s.modifyOrder)))
 	mux.Handle("POST /v1/sign/cancel-order", s.authorize(http.HandlerFunc(s.cancelOrder)))
 	mux.Handle("POST /v1/sign/cancel-all", s.authorize(http.HandlerFunc(s.cancelAll)))
-	mux.Handle("POST /v1/auth-token", s.authorize(http.HandlerFunc(s.authToken)))
 	return securityHeaders(mux)
 }
 
@@ -313,34 +298,6 @@ func (s *signerServer) forwardTransaction(w http.ResponseWriter, r *http.Request
 	}
 	if err := validateSignedTransaction(response, executionID, intentID); err != nil {
 		writeError(w, http.StatusBadGateway, "signing response identity mismatch")
-		return
-	}
-	writeJSON(w, http.StatusOK, response)
-}
-
-func (s *signerServer) authToken(w http.ResponseWriter, r *http.Request) {
-	var request authTokenRequest
-	if err := decodeBody(w, r, &request); err != nil {
-		return
-	}
-	if !validExecutionAccountID(request.ExecutionAccountID) {
-		writeError(w, http.StatusBadRequest, "execution account is invalid")
-		return
-	}
-	now := s.now().Unix()
-	if request.ExpiresAtUnix <= now || request.ExpiresAtUnix > now+8*60*60 {
-		writeError(w, http.StatusBadRequest, "expiry must be within eight hours")
-		return
-	}
-	var response authTokenResponse
-	if err := s.bridge.call(r.Context(), "/v1/signer/auth-token", request, &response); err != nil {
-		writeBridgeError(w, err)
-		return
-	}
-	if response.ExecutionAccountID != request.ExecutionAccountID || response.ExpiresAtUnix != request.ExpiresAtUnix ||
-		response.Token == "" || response.AccountIndex <= 0 || response.APIKeyIndex < 2 ||
-		response.APIKeyIndex > 254 || response.CredentialVersion <= 0 {
-		writeError(w, http.StatusBadGateway, "authentication response identity mismatch")
 		return
 	}
 	writeJSON(w, http.StatusOK, response)

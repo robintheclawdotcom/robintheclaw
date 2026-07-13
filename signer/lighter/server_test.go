@@ -62,7 +62,7 @@ func TestSignerSurfaceHasNoAssetMovementRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/v1/sign/withdraw", "/v1/sign/transfer", "/v1/sign/update-leverage"} {
+	for _, path := range []string{"/v1/sign/withdraw", "/v1/sign/transfer", "/v1/sign/update-leverage", "/v1/auth-token"} {
 		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
 		response := httptest.NewRecorder()
 		server.routes().ServeHTTP(response, request)

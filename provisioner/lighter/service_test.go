@@ -63,7 +63,7 @@ func TestConfirmBlocksRegisteredKeyMismatch(t *testing.T) {
 	}
 }
 
-func TestRotationBlocksAuthUntilNewCredentialVerifies(t *testing.T) {
+func TestRotationBlocksCredentialUseUntilNewCredentialVerifies(t *testing.T) {
 	service, store, lighter := newTestService()
 	first, err := service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
@@ -83,10 +83,7 @@ func TestRotationBlocksAuthUntilNewCredentialVerifies(t *testing.T) {
 	}); err != nil || !linked {
 		t.Fatalf("link first credential: linked=%v err=%v", linked, err)
 	}
-	if _, err := service.authToken(context.Background(), authTokenRequest{
-		ExecutionAccountID: testExecutionID,
-		ExpiresAtUnix:      service.now().Add(time.Hour).Unix(),
-	}); err != nil {
+	if _, err := service.publisherAccountState(context.Background(), publisherAccountStateRequest{ExecutionAccountID: testExecutionID}); err != nil {
 		t.Fatalf("active credential rejected: %v", err)
 	}
 
@@ -103,11 +100,8 @@ func TestRotationBlocksAuthUntilNewCredentialVerifies(t *testing.T) {
 	if second.CredentialVersion != 2 {
 		t.Fatalf("version = %d", second.CredentialVersion)
 	}
-	if _, err := service.authToken(context.Background(), authTokenRequest{
-		ExecutionAccountID: testExecutionID,
-		ExpiresAtUnix:      service.now().Add(time.Hour).Unix(),
-	}); err == nil {
-		t.Fatal("auth token issued during rotation")
+	if _, err := service.publisherAccountState(context.Background(), publisherAccountStateRequest{ExecutionAccountID: testExecutionID}); err == nil {
+		t.Fatal("credential used during rotation")
 	}
 
 	lighter.recoveredOwner = "0x2222222222222222222222222222222222222222"

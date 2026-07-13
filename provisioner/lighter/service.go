@@ -35,20 +35,6 @@ type confirmRequest struct {
 	L1Signature        string `json:"l1Signature"`
 }
 
-type authTokenRequest struct {
-	ExecutionAccountID string `json:"executionAccountId"`
-	ExpiresAtUnix      int64  `json:"expiresAtUnix"`
-}
-
-type authTokenResponse struct {
-	ExecutionAccountID string `json:"executionAccountId"`
-	Token              string `json:"token"`
-	ExpiresAtUnix      int64  `json:"expiresAtUnix"`
-	AccountIndex       int64  `json:"accountIndex"`
-	APIKeyIndex        uint8  `json:"apiKeyIndex"`
-	CredentialVersion  int64  `json:"credentialVersion"`
-}
-
 func (value *service) prepare(ctx context.Context, request prepareRequest) (publicLink, error) {
 	if err := validateExecutionAccountID(request.ExecutionAccountID); err != nil {
 		return publicLink{}, err
@@ -214,39 +200,6 @@ func (value *service) confirm(ctx context.Context, request confirmRequest) (publ
 		return publicLink{}, false, err
 	}
 	return record.public(), true, nil
-}
-
-func (value *service) authToken(ctx context.Context, request authTokenRequest) (authTokenResponse, error) {
-	if err := validateExecutionAccountID(request.ExecutionAccountID); err != nil {
-		return authTokenResponse{}, err
-	}
-	now := value.now()
-	expiresAt := time.Unix(request.ExpiresAtUnix, 0)
-	if !expiresAt.After(now) || expiresAt.After(now.Add(8*time.Hour)) {
-		return authTokenResponse{}, errors.New("expiresAtUnix must be within the next 8 hours")
-	}
-	record, secretBytes, err := value.activeSecret(ctx, request.ExecutionAccountID)
-	if err != nil {
-		return authTokenResponse{}, err
-	}
-	token, err := value.lighter.AuthToken(transientString(secretBytes), record.AccountIndex, record.APIKeyIndex, expiresAt)
-	zero(secretBytes)
-	if err != nil {
-		return authTokenResponse{}, errors.New("generate Lighter auth token")
-	}
-	if err := value.store.AuditActive(ctx, record, "auth_token_issued", map[string]any{
-		"expiresAtUnix": request.ExpiresAtUnix,
-	}); err != nil {
-		return authTokenResponse{}, err
-	}
-	return authTokenResponse{
-		ExecutionAccountID: record.ExecutionAccountID,
-		Token:              token,
-		ExpiresAtUnix:      request.ExpiresAtUnix,
-		AccountIndex:       record.AccountIndex,
-		APIKeyIndex:        record.APIKeyIndex,
-		CredentialVersion:  record.Version,
-	}, nil
 }
 
 func validL1Signature(value string) bool {

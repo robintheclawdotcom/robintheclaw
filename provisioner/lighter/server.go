@@ -60,7 +60,6 @@ func (value *server) handler() http.Handler {
 	mux.Handle("POST /v1/signer/modify-order", value.authorizeSigner(http.HandlerFunc(value.modifyOrder)))
 	mux.Handle("POST /v1/signer/cancel-order", value.authorizeSigner(http.HandlerFunc(value.cancelOrder)))
 	mux.Handle("POST /v1/signer/cancel-all", value.authorizeSigner(http.HandlerFunc(value.cancelAll)))
-	mux.Handle("POST /v1/signer/auth-token", value.authorizeSigner(http.HandlerFunc(value.authToken)))
 	mux.Handle("POST /v1/publisher/account-state", value.authorizePublisher(http.HandlerFunc(value.publisherAccountState)))
 	return securityHeaders(mux)
 }
@@ -221,19 +220,6 @@ func (value *server) confirm(w http.ResponseWriter, request *http.Request) {
 		status = http.StatusOK
 	}
 	writeJSON(w, status, result)
-}
-
-func (value *server) authToken(w http.ResponseWriter, request *http.Request) {
-	var body authTokenRequest
-	if err := decodeBody(w, request, &body); err != nil {
-		return
-	}
-	result, err := value.service.authToken(request.Context(), body)
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
 }
 
 func (value *server) publisherAccountState(w http.ResponseWriter, request *http.Request) {

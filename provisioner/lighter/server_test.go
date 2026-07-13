@@ -134,7 +134,7 @@ func TestSecretBearingPrepareFieldsAreRejected(t *testing.T) {
 
 func TestWithdrawalAndTransferRoutesDoNotExist(t *testing.T) {
 	server, _ := newTestServer()
-	for _, path := range []string{"/v1/withdraw", "/v1/transfer", "/api/v1/sendTx"} {
+	for _, path := range []string{"/v1/withdraw", "/v1/transfer", "/api/v1/sendTx", "/v1/signer/auth-token"} {
 		response := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, path, http.NoBody)
 		server.handler().ServeHTTP(response, request)
