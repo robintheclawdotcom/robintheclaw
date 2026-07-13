@@ -9,7 +9,7 @@ import { isSameOriginRequest } from "../../../lib/server-origin";
 import { takeRateLimit } from "../../../lib/server-rate-limit";
 import {
   authorizePreparedCalls,
-  injectSponsorship,
+  configureSponsorship,
   parseWalletRpc,
   WalletProxyError,
 } from "../../../lib/wallet-proxy";
@@ -18,6 +18,55 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const maxBodyBytes = 256 * 1_024;
+
+export async function GET(request: NextRequest) {
+  const requestId = request.headers.get("x-request-id") ?? randomUUID();
+  try {
+    const token = accessToken(request);
+    if (!token) throw new WalletProxyError(401, "authentication_required", "Sign in to continue.");
+    const session = await verifyPrivySession(token);
+    const limit = takeRateLimit("wallet-status", session.sessionId, 30, 60_000);
+    if (!limit.allowed) return jsonError(429, "rate_limited", "Too many wallet status requests.", requestId, limit.retryAfter);
+
+    const address = request.nextUrl.searchParams.get("address");
+    if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+      throw new WalletProxyError(400, "invalid_address", "A valid strategy account address is required.");
+    }
+    const apiKey = process.env.ALCHEMY_API_KEY;
+    if (!apiKey) throw new WalletProxyError(503, "wallet_unavailable", "Wallet operations are not configured.");
+    const sponsored = Boolean(process.env.ALCHEMY_POLICY_ID);
+    let balance: string | null = null;
+    if (!sponsored) {
+      const response = await fetch(walletRpcUrl(apiKey), {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "eth_getBalance", params: [address, "latest"] }),
+        cache: "no-store",
+        redirect: "manual",
+        signal: AbortSignal.timeout(15_000),
+      });
+      const payload = await response.json().catch(() => null) as { result?: unknown; error?: unknown } | null;
+      if (!response.ok || payload?.error || typeof payload?.result !== "string" || !/^0x[0-9a-fA-F]+$/.test(payload.result)) {
+        throw new WalletProxyError(502, "wallet_provider_error", "The wallet provider could not read the gas balance.");
+      }
+      balance = payload.result;
+    }
+    return NextResponse.json({ sponsored, balance }, {
+      headers: { "Cache-Control": "no-store", "X-Request-Id": requestId },
+    });
+  } catch (error) {
+    const failure = error instanceof WalletProxyError
+      ? error
+      : error instanceof SessionConfigurationError
+        ? new WalletProxyError(503, "authentication_unavailable", "Session verification is not configured.")
+        : error instanceof SessionValidationError
+          ? new WalletProxyError(401, "invalid_session", "Your session is invalid or expired.")
+          : error instanceof DOMException && error.name === "TimeoutError"
+            ? new WalletProxyError(504, "wallet_timeout", "The wallet provider timed out.")
+            : new WalletProxyError(502, "wallet_proxy_error", "Wallet status could not be loaded.");
+    return jsonError(failure.status, failure.code, failure.message, requestId);
+  }
+}
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") ?? randomUUID();
@@ -46,11 +95,10 @@ export async function POST(request: NextRequest) {
     }
 
     const apiKey = process.env.ALCHEMY_API_KEY;
-    const policyId = process.env.ALCHEMY_POLICY_ID;
-    if (!apiKey || !policyId) throw new WalletProxyError(503, "wallet_unavailable", "Sponsored wallet operations are not configured.");
+    if (!apiKey) throw new WalletProxyError(503, "wallet_unavailable", "Wallet operations are not configured.");
     await authorizePreparedCalls(rpc, token, requestId);
-    const upstreamRequest = injectSponsorship(rpc, policyId);
-    const response = await fetch(process.env.ALCHEMY_WALLET_RPC_URL ?? `https://api.g.alchemy.com/v2/${apiKey}`, {
+    const upstreamRequest = configureSponsorship(rpc, process.env.ALCHEMY_POLICY_ID);
+    const response = await fetch(walletRpcUrl(apiKey), {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
       body: JSON.stringify(upstreamRequest),
@@ -80,6 +128,16 @@ export async function POST(request: NextRequest) {
     console.error(JSON.stringify({ level: "error", event: "wallet_proxy_failed", requestId, code: failure.code, status: failure.status }));
     return jsonError(failure.status, failure.code, failure.message, requestId);
   }
+}
+
+function accessToken(request: NextRequest) {
+  const authorization = request.headers.get("authorization");
+  if (authorization?.startsWith("Bearer ")) return authorization.slice(7);
+  return request.cookies.get("privy-token")?.value;
+}
+
+function walletRpcUrl(apiKey: string) {
+  return process.env.ALCHEMY_WALLET_RPC_URL ?? `https://api.g.alchemy.com/v2/${apiKey}`;
 }
 
 function jsonError(status: number, code: string, message: string, requestId: string, retryAfter?: number) {

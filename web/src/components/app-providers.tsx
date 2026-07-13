@@ -51,11 +51,18 @@ type AuthContextValue = {
 
 type SmartWalletContextValue = {
   pending: boolean;
+  gasStatus: GasStatus | null;
+  refreshGasStatus: () => Promise<GasStatus>;
   executeCalls: (
     calls: TransactionCall[],
     signerAddress?: string,
     onSubmitted?: (callId: Hex) => void,
   ) => Promise<Hex>;
+};
+
+type GasStatus = {
+  sponsored: boolean;
+  balance: bigint | null;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -107,6 +114,7 @@ function LiveSession({ children }: { children: React.ReactNode }) {
   privyRef.current = privy;
   const { wallets, ready: walletsReady } = useWallets();
   const [pending, setPending] = useState(false);
+  const [gasStatus, setGasStatus] = useState<GasStatus | null>(null);
   const embeddedWallet = wallets.find((wallet) => wallet.walletClientType === "privy") ?? null;
   const getAccessToken = useCallback(() => privyRef.current.getAccessToken(), []);
   const syncedAuthentication = useRef<boolean | null>(null);
@@ -142,6 +150,37 @@ function LiveSession({ children }: { children: React.ReactNode }) {
     window.addEventListener("robin:session-expired", expire);
     return () => window.removeEventListener("robin:session-expired", expire);
   }, [privy]);
+
+  const refreshGasStatus = useCallback(async () => {
+    if (!embeddedWallet) throw new Error("The embedded wallet is not ready.");
+    const token = await getAccessToken();
+    const response = await fetch(`/api/wallet?address=${encodeURIComponent(embeddedWallet.address)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      cache: "no-store",
+    });
+    const payload = await response.json().catch(() => null) as {
+      sponsored?: boolean;
+      balance?: string | null;
+      message?: string;
+    } | null;
+    if (!response.ok || typeof payload?.sponsored !== "boolean") {
+      throw new Error(payload?.message ?? "Network fee status could not be loaded.");
+    }
+    const status = {
+      sponsored: payload.sponsored,
+      balance: payload.balance ? BigInt(payload.balance) : null,
+    };
+    setGasStatus(status);
+    return status;
+  }, [embeddedWallet, getAccessToken]);
+
+  useEffect(() => {
+    if (!privy.authenticated || !embeddedWallet) {
+      setGasStatus(null);
+      return;
+    }
+    void refreshGasStatus().catch(() => undefined);
+  }, [embeddedWallet, privy.authenticated, refreshGasStatus]);
 
   const executeCalls = useCallback(async (
     calls: TransactionCall[],
@@ -194,7 +233,7 @@ function LiveSession({ children }: { children: React.ReactNode }) {
   }), [accounts, embeddedWallet?.address, getAccessToken, hasRecovery, privy, walletsReady]);
 
   return (
-    <SessionContexts auth={auth} smartWallet={{ pending, executeCalls }}>
+    <SessionContexts auth={auth} smartWallet={{ pending, gasStatus, refreshGasStatus, executeCalls }}>
       {children}
     </SessionContexts>
   );
@@ -232,6 +271,8 @@ function MockSession({ children }: { children: React.ReactNode }) {
   }), [accounts, authenticated]);
   const smartWallet = useMemo<SmartWalletContextValue>(() => ({
     pending: false,
+    gasStatus: { sponsored: false, balance: 1n },
+    refreshGasStatus: async () => ({ sponsored: false, balance: 1n }),
     executeCalls: async (_calls, _signerAddress, onSubmitted) => {
       const callId = `0x${"ab".repeat(32)}` as Hex;
       onSubmitted?.(callId);
@@ -260,6 +301,8 @@ function UnconfiguredSession({ children }: { children: React.ReactNode }) {
   }), []);
   const smartWallet = useMemo<SmartWalletContextValue>(() => ({
     pending: false,
+    gasStatus: null,
+    refreshGasStatus: async () => { throw new Error("Application authentication is not configured."); },
     executeCalls: async () => { throw new Error("Application authentication is not configured."); },
   }), []);
   return <SessionContexts auth={auth} smartWallet={smartWallet}>{children}</SessionContexts>;

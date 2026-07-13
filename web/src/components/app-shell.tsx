@@ -105,7 +105,7 @@ function AuthPanel({
       <p>{body}</p>
       {action}
       <div className="auth-benefits" aria-label="Account benefits">
-        <span>Unified capital</span><span>Sponsored mainnet gas</span><span>Self-custodied vault</span>
+        <span>Unified capital</span><span>Embedded wallet signing</span><span>Self-custodied vault</span>
       </div>
     </section>
   );

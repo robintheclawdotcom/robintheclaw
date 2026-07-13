@@ -36,4 +36,5 @@ onchain execution, continuous event capture, research models, and a no-code stra
 The public web service, private Rust API, dedicated product database, PAYG chain access, and
 personal-vault contracts are live for production testnet work. The separate typed mainnet contract
 layer is live at the addresses in [`deployments/mainnet.json`](../deployments/mainnet.json).
-Gas-sponsored onboarding activates when the restricted Alchemy policy is attached.
+Onboarding uses account-funded ETH by default. Attaching a restricted Alchemy policy switches the
+same validated call path to sponsored gas without changing the signer or vault owner.

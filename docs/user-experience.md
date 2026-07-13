@@ -59,7 +59,8 @@ account -> recovery -> vault prepared -> wallet confirmation
 3. `POST /api/v1/vaults/prepare` checks recovery, duplicate database state, `vaultOf(owner)`, faucet
    claim state, and `predictVault(owner)`.
 4. The response returns an ordered call batch: faucet claim when needed, token approval, factory
-   creation, and deposit. Sponsorship credentials remain on the server.
+   creation, and deposit. The client checks the embedded account's ETH balance when sponsorship is
+   disabled and shows the exact funding address before signing.
 5. The Alchemy smart-wallet client submits the calls through the authenticated same-origin wallet
    proxy on Robinhood Chain testnet and waits for inclusion.
 6. The browser saves the call ID before server confirmation. `POST /api/v1/vaults/confirm` resolves
@@ -89,11 +90,11 @@ synthetic balances.
 
 ## Capital and strategy controls
 
-- `Add funds` uses the selected connected wallet to sign a sponsored approval-and-deposit batch.
+- `Add funds` uses the selected connected wallet to sign an approval-and-deposit batch.
 - `Withdraw` sends the owner-only vault call from the embedded smart account back to that account.
 - `Start strategy` and `Pause strategy` send `MandateGuard.setHalted` from the smart-account owner.
-- Sponsorship policy restricts targets to the configured faucet, asset, factory, vaults, and guards,
-  and restricts selectors to the product actions.
+- The proxy restricts targets and selectors in every gas mode. When sponsorship is enabled, the
+  Alchemy policy applies a second provider-side restriction and quota layer.
 - Every included vault, guard, and anchor event is indexed into the user's activity stream.
 
 ## Application services
@@ -101,7 +102,8 @@ synthetic balances.
 The Next.js application uses Privy, Alchemy Wallet APIs, viem, and TanStack Query. It creates an
 HTTP-only same-origin session cookie and forwards authenticated requests through `/api/app/*` to
 the private Rust service. It forwards Wallet API methods through `/api/wallet`, where the session,
-chain, account, call batch, targets, and selectors are checked before sponsorship is added. The
+chain, account, call batch, targets, and selectors are checked before an optional sponsorship
+policy is added. Without a policy, the EIP-7702 account pays gas in ETH. The
 Rust API validates every Privy JWT, resolves linked accounts from Privy, and stores product state
 in the dedicated `robin-app` PostgreSQL database.
 

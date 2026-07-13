@@ -47,13 +47,12 @@ commit, reaches `live`, and that `https://robintheclaw.com` returns the new publ
 
 The public site and authenticated application run in the `robintheclaw` Next.js service. The
 browser receives only the public Privy app ID. Authenticated application requests use the
-same-origin proxy to the private `robin-api` service. Sponsored wallet requests use a separate
-same-origin proxy that validates the session and planned calls before adding server-held Alchemy
-credentials.
+same-origin proxy to the private `robin-api` service. Wallet requests use a separate same-origin
+proxy that validates the session and planned calls before adding server-held Alchemy credentials.
 
 `robin-api` is a private Rust service in the same region. It connects to the dedicated
 `robin-app` Postgres database and receives the Privy secret, ES256 verification key, provider RPC,
-sponsorship policy, and confirmed application contract addresses through managed settings. The
+and confirmed application contract addresses through managed settings. The
 product database is separate from `robin-research`.
 
 Current testnet resources:
@@ -70,11 +69,11 @@ Before enabling onboarding:
 
 1. Confirm the chain ID, runtime bytecode, factory/faucet wiring, and addresses in
    `deployments/ux-testnet.json`.
-2. Create an Alchemy sponsorship policy limited to those contracts, child vaults and guards, the
-   `claim`, `approve`, `createVault`, `deposit`, `withdraw`, and `setHalted` selectors, with
-   per-account and global quotas. The Gas Manager Admin API requires an Alchemy access key with
-   Gas Manager Read & Write and the app ID; the ordinary Node API key cannot create or activate a
-   policy. Store only the resulting policy ID in the web and API service settings.
+2. Choose the gas mode. For self-funded operation, leave `ALCHEMY_POLICY_ID` unset and fund the
+   embedded account with ETH on Robinhood Chain before onboarding. For sponsored operation, create
+   an Alchemy policy limited to the application contracts, child vaults and guards, the `claim`,
+   `approve`, `createVault`, `deposit`, `withdraw`, and `setHalted` selectors, with per-account and
+   global quotas. Store only the resulting policy ID in the web service settings.
 3. Configure all `sync: false` application values in Render. Use a provider RPC for `APP_RPC_URL`.
    Keep `PRODUCT_INDEXER_BLOCK_RANGE` within the provider's `eth_getLogs` limit; the testnet
    Blueprint uses Alchemy's 10,000-block PAYG range and a 50,000-block initial lookback.

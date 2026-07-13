@@ -35,5 +35,6 @@ verify factory receipts, read balances and mandate state, and restore interrupte
 
 The application service layer is live on paid Render resources: the public Next.js service talks
 to a private Rust API backed by the dedicated `robin-app` PostgreSQL database. Robinhood Chain
-reads use Alchemy PAYG with bounded 10,000-block activity indexing. The final activation step for
-one-click onboarding is attaching and enabling the restricted Alchemy sponsorship policy.
+reads use Alchemy PAYG with bounded 10,000-block activity indexing. Onboarding works with ETH held
+by the embedded account. A restricted Alchemy sponsorship policy can remove that funding step but
+is not required for signing or submission.

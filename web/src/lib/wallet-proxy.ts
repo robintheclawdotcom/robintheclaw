@@ -59,20 +59,20 @@ export function parseWalletRpc(input: unknown): WalletRpcRequest {
   return request as WalletRpcRequest;
 }
 
-export function injectSponsorship(request: WalletRpcRequest, policyId: string): WalletRpcRequest {
+export function configureSponsorship(request: WalletRpcRequest, policyId?: string): WalletRpcRequest {
   if (request.method !== "wallet_prepareCalls" && request.method !== "wallet_sendPreparedCalls") return request;
   const first = request.params[0];
   if (!first || typeof first !== "object" || Array.isArray(first)) {
     throw new WalletProxyError(400, "invalid_rpc", "Wallet call parameters are invalid.");
   }
+  const capabilities = capabilitiesWithoutPaymaster((first as Record<string, unknown>).capabilities);
   return {
     ...request,
     params: [{
       ...(first as Record<string, unknown>),
-      capabilities: {
-        ...capabilitiesWithoutPaymaster((first as Record<string, unknown>).capabilities),
-        paymasterService: { policyId },
-      },
+      capabilities: policyId
+        ? { ...capabilities, paymasterService: { policyId } }
+        : capabilities,
     }, ...request.params.slice(1)],
   };
 }
@@ -130,17 +130,17 @@ function authorizeControlCalls(
     }
     return;
   }
-  throw new WalletProxyError(403, "call_not_authorized", "This sponsored operation is outside the strategy mandate.");
+  throw new WalletProxyError(403, "call_not_authorized", "This operation is outside the strategy mandate.");
 }
 
 function decode(call: RpcCall, expected: "approve" | "deposit" | "withdraw" | "setHalted") {
-  if (call.value !== 0n) throw new WalletProxyError(403, "call_not_authorized", "Native-value transfers are not sponsored.");
+  if (call.value !== 0n) throw new WalletProxyError(403, "call_not_authorized", "Native-value transfers are not allowed.");
   try {
     const decoded = decodeFunctionData({ abi: controlAbi, data: call.data });
     if (decoded.functionName !== expected) throw new Error("selector mismatch");
     return decoded;
   } catch {
-    throw new WalletProxyError(403, "call_not_authorized", "This contract call is not sponsored.");
+    throw new WalletProxyError(403, "call_not_authorized", "This contract call is not allowed.");
   }
 }
 

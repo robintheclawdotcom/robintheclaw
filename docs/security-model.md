@@ -42,7 +42,7 @@ of unobserved market data.
 - Privy server-side wallet resolution, cross-user address uniqueness, and no automatic account merge.
 - Stable smart-account vault ownership independent of the active funding wallet.
 - Idempotent receipt verification against the exact factory event and deployed contract state.
-- Sponsorship limited by managed target, selector, and per-account policy.
+- Optional sponsorship limited by managed target, selector, and per-account policy.
 - Dedicated application database with user-scoped reads and writes.
 
 ## Known limitations
