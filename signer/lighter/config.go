@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
@@ -8,29 +9,40 @@ import (
 )
 
 type config struct {
-	enabled       bool
-	listenAddress string
-	serviceToken  string
-	privateKey    string
-	chainID       uint32
-	accountIndex  int64
-	apiKeyIndex   uint8
+	enabled               bool
+	listenAddress         string
+	apiHMACKey            []byte
+	callerID              string
+	maxRequestsPerMinute  uint16
+	maxConcurrentRequests uint8
+	privateKey            string
+	chainID               uint32
+	accountIndex          int64
+	apiKeyIndex           uint8
 }
 
 func loadConfig() (config, error) {
 	value := config{
-		enabled:       strings.EqualFold(os.Getenv("LIGHTER_SIGNER_ENABLED"), "true"),
-		listenAddress: envOr("LISTEN_ADDRESS", "0.0.0.0:8080"),
+		enabled:               strings.EqualFold(os.Getenv("LIGHTER_SIGNER_ENABLED"), "true"),
+		listenAddress:         envOr("LISTEN_ADDRESS", "0.0.0.0:8080"),
+		maxRequestsPerMinute:  60,
+		maxConcurrentRequests: 4,
 	}
 	if !value.enabled {
 		return value, nil
 	}
 
-	value.serviceToken = os.Getenv("SIGNER_API_TOKEN")
-	value.privateKey = os.Getenv("LIGHTER_API_PRIVATE_KEY")
-	if len(value.serviceToken) < 32 {
-		return config{}, fmt.Errorf("SIGNER_API_TOKEN must contain at least 32 bytes")
+	encodedHMACKey := os.Getenv("LIGHTER_SIGNER_HMAC_KEY")
+	var err error
+	value.apiHMACKey, err = hex.DecodeString(encodedHMACKey)
+	if err != nil || len(value.apiHMACKey) != 32 {
+		return config{}, fmt.Errorf("LIGHTER_SIGNER_HMAC_KEY must be a 32-byte hex key")
 	}
+	value.callerID = os.Getenv("SIGNER_CALLER_ID")
+	if !validCallerID(value.callerID) {
+		return config{}, fmt.Errorf("SIGNER_CALLER_ID must be a lowercase service identifier")
+	}
+	value.privateKey = os.Getenv("LIGHTER_API_PRIVATE_KEY")
 	if value.privateKey == "" {
 		return config{}, fmt.Errorf("LIGHTER_API_PRIVATE_KEY is required")
 	}
@@ -54,7 +66,33 @@ func loadConfig() (config, error) {
 	value.chainID = uint32(chainID)
 	value.accountIndex = accountIndex
 	value.apiKeyIndex = uint8(apiKeyIndex)
+	if raw := os.Getenv("SIGNER_MAX_REQUESTS_PER_MINUTE"); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 16)
+		if err != nil || parsed == 0 || parsed > 600 {
+			return config{}, fmt.Errorf("SIGNER_MAX_REQUESTS_PER_MINUTE must be between 1 and 600")
+		}
+		value.maxRequestsPerMinute = uint16(parsed)
+	}
+	if raw := os.Getenv("SIGNER_MAX_CONCURRENT_REQUESTS"); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 8)
+		if err != nil || parsed == 0 || parsed > 16 {
+			return config{}, fmt.Errorf("SIGNER_MAX_CONCURRENT_REQUESTS must be between 1 and 16")
+		}
+		value.maxConcurrentRequests = uint8(parsed)
+	}
 	return value, nil
+}
+
+func validCallerID(value string) bool {
+	if len(value) < 3 || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func envOr(key, fallback string) string {

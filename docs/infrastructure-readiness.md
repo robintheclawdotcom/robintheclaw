@@ -79,6 +79,13 @@ Credential separation is mandatory:
 - The control API receives no signer credential.
 - The public web service receives no private runtime credential.
 
+Signer requests use a distinct 32-byte HMAC key per signer. The signature binds the method, path,
+caller, timestamp, request nonce, and exact request-body digest. Both signers reject timestamps
+outside a 30-second window and reject nonce replay. The Lighter signer's replay cache covers the
+authorization window in memory; the coordinator remains responsible for durable intent and venue
+nonce journals across restarts. Signer concurrency and per-minute request rates are bounded before
+private-key operations begin.
+
 Environment changes are treated as deployment changes. After a change, readiness remains off until
 the service has revalidated its dependency identities and persisted configuration digest.
 

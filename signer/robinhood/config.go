@@ -65,10 +65,10 @@ func loadConfig() (Config, error) {
 		return config, nil
 	}
 	var err error
-	encodedHMACKey := os.Getenv("SIGNER_API_HMAC_KEY")
+	encodedHMACKey := os.Getenv("ROBINHOOD_SIGNER_HMAC_KEY")
 	config.APIHMACKey, err = hex.DecodeString(encodedHMACKey)
 	if err != nil || len(config.APIHMACKey) != 32 {
-		return Config{}, errors.New("SIGNER_API_HMAC_KEY must be a 32-byte hex key")
+		return Config{}, errors.New("ROBINHOOD_SIGNER_HMAC_KEY must be a 32-byte hex key")
 	}
 	config.CallerID = os.Getenv("SIGNER_CALLER_ID")
 	if !validCallerID(config.CallerID) {

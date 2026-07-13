@@ -163,7 +163,7 @@ source, examples, build logs, or public documentation output.
 | Group | Variables |
 |---|---|
 | Service | `ROBINHOOD_SIGNER_ENABLED`, `LISTEN_ADDRESS`, `DATABASE_URL` |
-| Authentication | `SIGNER_API_HMAC_KEY`, `SIGNER_CALLER_ID`, admission limits |
+| Authentication | `ROBINHOOD_SIGNER_HMAC_KEY`, `SIGNER_CALLER_ID`, admission limits |
 | RPC | `ROBINHOOD_RPC_URL`, `ROBINHOOD_RECONCILIATION_RPC_URL`, `ROBINHOOD_CHAIN_ID` |
 | KMS | `AWS_KMS_KEY_ID`, `ROBINHOOD_SIGNER_ADDRESS` |
 | Governance | timelock, recovery, and guardian addresses |
