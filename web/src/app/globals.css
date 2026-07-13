@@ -96,17 +96,20 @@ main { min-height: 100vh; background: var(--bg); padding: clamp(18px, 2vw, 32px)
 .welcome p { margin: 6px 0 0; color: var(--text-secondary); font-size: 13.5px; line-height: 1.55; }
 small { color: var(--muted); font-size: 12px; line-height: 1.6; }
 .welcome small { display: block; margin-top: 8px; }
-.intro, .clone, .home-view > section:not(:first-child) { margin-top: 32px; animation: fade-up .5s ease both; }
+.intro, .app-entry, .home-view > section:not(:first-child) { margin-top: 32px; animation: fade-up .5s ease both; }
 .prompt { display: flex; flex-wrap: wrap; gap: 9px; font-size: 14px; }
 .prompt span { color: var(--muted); }
 .prompt i { color: var(--faint); font-style: normal; }
 .prompt b { font-weight: 400; }
 .intro p, .doc-article p { max-width: 68ch; margin: 14px 0 0; color: var(--text-secondary); font-size: 14px; line-height: 1.75; }
-.clone-box { display: flex; gap: 12px; align-items: center; margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border-strong); border-radius: 8px; }
-.clone-box > span { color: var(--accent); }
-.clone-box code { flex: 1; overflow-wrap: anywhere; color: var(--text); font-size: 13px; }
-.clone-box button, .docs-cta button { border: 0; border-radius: 7px; padding: 9px 14px; color: #1f1e1d; background: var(--accent); font-weight: 700; font-size: 12px; }
-.clone > small { display: block; margin-top: 9px; }
+.app-entry-card { display: flex; gap: 20px; align-items: center; justify-content: space-between; margin-top: 14px; padding: 18px; border: 1px solid var(--accent); border-radius: 10px; background: linear-gradient(115deg, var(--accent-soft), transparent 55%), var(--panel); }
+.app-entry-card > div { display: grid; grid-template-columns: auto 1fr; gap: 5px 10px; align-items: center; }
+.app-entry-card span { grid-row: 1 / span 2; color: var(--accent); font-size: 20px; }
+.app-entry-card strong { color: var(--text); font-size: 14px; font-weight: 600; }
+.app-entry-card p { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+.app-entry-card a { flex: none; padding: 10px 14px; border-radius: 8px; color: #1f1e1d; background: var(--accent); font-size: 12px; font-weight: 700; text-decoration: none; }
+.app-entry-card a:hover { color: #1f1e1d; background: #d9ff40; }
+.app-entry > small { display: block; margin-top: 9px; }
 .proof-panel { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-top: 14px; padding: 18px; border: 1px solid var(--border-strong); border-radius: 9px; background: linear-gradient(115deg, var(--accent-soft), transparent 48%), var(--panel); }
 .proof-panel > div { display: grid; gap: 5px; }
 .proof-label { color: var(--accent); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
@@ -358,7 +361,8 @@ footer a { font-size: 13px; }
 @media (max-width: 500px) {
   .welcome { align-items: flex-start; }
   .welcome img { width: 56px; height: 56px; }
-  .clone-box { align-items: flex-start; flex-wrap: wrap; }
+  .app-entry-card { align-items: flex-start; flex-direction: column; }
+  .app-entry-card a { width: 100%; text-align: center; }
   .page-header, .setup-card, .activate-panel, .notice { align-items: flex-start; flex-direction: column; }
   .page-actions, .page-actions .button, .setup-card .button, .activate-panel .button, .notice .button { width: 100%; }
   .metric-grid, .settings-grid, .position-cards { grid-template-columns: 1fr; }

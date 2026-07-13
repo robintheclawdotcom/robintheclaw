@@ -221,7 +221,6 @@ function ThemeToggle({
 export default function PublicSite({ view }: { view: "home" | "docs" }) {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [doc, setDoc] = useState<DocId>("overview");
-  const [copied, setCopied] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const closeMenuRef = useRef<HTMLButtonElement>(null);
 
@@ -251,16 +250,6 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
     const next = theme === "dark" ? "light" : "dark";
     setTheme(next);
     window.localStorage.setItem("rtc-theme", next);
-  };
-
-  const copyClone = async () => {
-    try {
-      await navigator.clipboard.writeText("git clone https://github.com/robintheclawdotcom/robintheclaw.git");
-    } catch {
-      return;
-    }
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
   };
 
   const selectDoc = (id: DocId) => {
@@ -342,14 +331,17 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
                 </p>
               </section>
 
-              <section className="clone">
-                <Prompt>git clone</Prompt>
-                <div className="clone-box">
-                  <span>$</span>
-                  <code>git clone https://github.com/robintheclawdotcom/robintheclaw.git</code>
-                  <button onClick={copyClone}>{copied ? "copied ✓" : "copy"}</button>
+              <section className="app-entry">
+                <Prompt>robin open</Prompt>
+                <div className="app-entry-card">
+                  <div>
+                    <span>✻</span>
+                    <strong>Open your strategy account</strong>
+                    <p>Sign in with email or passkey, create a personal vault, link funding wallets, and manage everything from one dashboard.</p>
+                  </div>
+                  <a href="/app">open app →</a>
                 </div>
-                <small>Open source foundations for market intelligence, research models, and execution.</small>
+                <small>No extension, seed phrase, CLI, RPC setup, network switch, or gas balance required.</small>
               </section>
 
               <section className="proof-status">
