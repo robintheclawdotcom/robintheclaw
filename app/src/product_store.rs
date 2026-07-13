@@ -1,7 +1,8 @@
 use crate::product::{
-    ActivityPage, ActivityRecord, AgentRecord, AgentSnapshot, ConfirmedVault, IdentitySnapshot,
-    MeResponse, PreferencesInput, PreferencesRecord, SmartAccountRecord, UserRecord, VaultRecord,
-    WalletRecord,
+    command_transition, ActivityPage, ActivityRecord, AgentCommandRecord, AgentReadiness,
+    AgentRecord, AgentSnapshot, ConfirmedVault, ExecutionAccountRecord, ExecutionBindingRecord,
+    IdentitySnapshot, MeResponse, PreferencesInput, PreferencesRecord, SmartAccountRecord,
+    UserRecord, VaultRecord, WalletRecord, LIVE_STRATEGY_VERSION,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -23,6 +24,14 @@ pub struct ContractActivity {
     pub block_number: u64,
     pub log_index: u64,
     pub payload: serde_json::Value,
+}
+
+pub struct ExecutionBindingConfirmation<'a> {
+    pub venue: &'a str,
+    pub request_id: Uuid,
+    pub owner_address: &'a str,
+    pub public_identifier: &'a str,
+    pub proof_transaction_hash: &'a str,
 }
 
 impl ProductStore {
@@ -390,28 +399,81 @@ impl ProductStore {
         Ok(ActivityPage { items, next_cursor })
     }
 
-    pub async fn launch_agent(&self, did: &str, strategy_version: &str) -> Result<AgentRecord> {
+    pub async fn launch_paper_agent(
+        &self,
+        did: &str,
+        strategy_version: &str,
+    ) -> Result<AgentRecord> {
         let user = self.ensure_user(did).await?;
         if self.vault_for_user(user.id).await?.is_none() {
             return Err(anyhow!("create a vault before launching an agent"));
         }
         let pool = self.pool()?;
-        sqlx::query_as::<_, AgentRecord>(
+        let record = sqlx::query_as::<_, AgentRecord>(
             r#"
             INSERT INTO agents (id, user_id, strategy_version, mode, status)
             VALUES ($1, $2, $3, 'paper', 'running')
             ON CONFLICT (user_id) DO UPDATE SET
                 status = 'running',
                 updated_at = now()
+            WHERE agents.mode = 'paper'
             RETURNING id, strategy_version, mode, status, created_at, updated_at
             "#,
         )
         .bind(Uuid::new_v4())
         .bind(user.id)
         .bind(strategy_version)
+        .fetch_optional(pool)
+        .await?;
+        record.ok_or_else(|| anyhow!("this account already has a live agent"))
+    }
+
+    pub async fn create_live_agent(
+        &self,
+        did: &str,
+        strategy_version: &str,
+    ) -> Result<AgentRecord> {
+        if strategy_version != LIVE_STRATEGY_VERSION {
+            return Err(anyhow!("unsupported live strategy"));
+        }
+        let user = self.ensure_user(did).await?;
+        let pool = self.pool()?;
+        let inserted = sqlx::query_as::<_, AgentRecord>(
+            r#"
+            INSERT INTO agents (id, user_id, strategy_version, mode, status)
+            VALUES ($1, $2, $3, 'live', 'setup')
+            ON CONFLICT (user_id) DO UPDATE SET
+                strategy_version = EXCLUDED.strategy_version,
+                mode = 'live',
+                status = 'setup',
+                blocked_reason = NULL,
+                updated_at = now()
+            WHERE agents.mode = 'paper'
+            RETURNING id, strategy_version, mode, status, created_at, updated_at
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(user.id)
+        .bind(strategy_version)
+        .fetch_optional(pool)
+        .await?;
+        if let Some(record) = inserted {
+            return Ok(record);
+        }
+        let existing = sqlx::query_as::<_, AgentRecord>(
+            r#"
+            SELECT id, strategy_version, mode, status, created_at, updated_at
+            FROM agents WHERE user_id = $1
+            "#,
+        )
+        .bind(user.id)
         .fetch_one(pool)
-        .await
-        .map_err(Into::into)
+        .await?;
+        if existing.mode == "live" && existing.strategy_version == strategy_version {
+            Ok(existing)
+        } else {
+            Err(anyhow!("this account already has a different agent"))
+        }
     }
 
     pub async fn set_agent_status(
@@ -424,7 +486,7 @@ impl ProductStore {
         sqlx::query_as::<_, AgentRecord>(
             r#"
             UPDATE agents SET status = $3, updated_at = now()
-            WHERE id = $1 AND user_id = $2
+            WHERE id = $1 AND user_id = $2 AND mode = 'paper'
             RETURNING id, strategy_version, mode, status, created_at, updated_at
             "#,
         )
@@ -434,6 +496,341 @@ impl ProductStore {
         .fetch_optional(self.pool()?)
         .await?
         .ok_or_else(|| anyhow!("agent not found"))
+    }
+
+    pub async fn create_execution_account(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+    ) -> Result<ExecutionAccountRecord> {
+        let user = self.ensure_user(did).await?;
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        let agent = sqlx::query_as::<_, AgentRecord>(
+            r#"
+            SELECT id, strategy_version, mode, status, created_at, updated_at
+            FROM agents WHERE id = $1 AND user_id = $2 FOR UPDATE
+            "#,
+        )
+        .bind(agent_id)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow!("agent not found"))?;
+        if agent.mode != "live" || agent.strategy_version != LIVE_STRATEGY_VERSION {
+            return Err(anyhow!(
+                "execution accounts are only available for the approved live strategy"
+            ));
+        }
+        let account = sqlx::query_as::<_, ExecutionAccountRecord>(
+            r#"
+            INSERT INTO execution_accounts (
+                id, user_id, agent_id, strategy_version, chain_id, status
+            ) VALUES ($1, $2, $3, $4, 4663, 'provisioning')
+            ON CONFLICT (agent_id) DO UPDATE SET updated_at = execution_accounts.updated_at
+            RETURNING id, agent_id, strategy_version, chain_id, status, created_at, updated_at
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(user.id)
+        .bind(agent_id)
+        .bind(LIVE_STRATEGY_VERSION)
+        .fetch_one(&mut *tx)
+        .await?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO agent_readiness (execution_account_id)
+            VALUES ($1) ON CONFLICT (execution_account_id) DO NOTHING
+            "#,
+        )
+        .bind(account.id)
+        .execute(&mut *tx)
+        .await?;
+        if inserted.rows_affected() == 1 {
+            sqlx::query(
+                r#"
+                INSERT INTO agent_readiness_snapshots (
+                    id, execution_account_id, lighter_linked, lighter_funded,
+                    robinhood_deployed, robinhood_funded, user_gas_ready,
+                    execution_gas_ready, policy_active, reconciled
+                ) VALUES ($1, $2, false, false, false, false, false, false, false, false)
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(account.id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            r#"
+            UPDATE agents SET status = 'provisioning', updated_at = now()
+            WHERE id = $1 AND status = 'setup'
+            "#,
+        )
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(account)
+    }
+
+    pub async fn execution_account(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+    ) -> Result<ExecutionAccountRecord> {
+        let user = self.ensure_user(did).await?;
+        sqlx::query_as::<_, ExecutionAccountRecord>(
+            r#"
+            SELECT id, agent_id, strategy_version, chain_id, status, created_at, updated_at
+            FROM execution_accounts WHERE agent_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(agent_id)
+        .bind(user.id)
+        .fetch_optional(self.pool()?)
+        .await?
+        .ok_or_else(|| anyhow!("execution account not found"))
+    }
+
+    pub async fn request_execution_binding(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+        venue: &str,
+        owner_address: &str,
+    ) -> Result<ExecutionBindingRecord> {
+        if !matches!(venue, "lighter" | "robinhood") {
+            return Err(anyhow!("unsupported execution venue"));
+        }
+        let owner = normalize_address(owner_address)?;
+        let user = self.ensure_user(did).await?;
+        let pool = self.pool()?;
+        let owner_is_linked = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM wallet_links WHERE user_id = $1 AND address = $2
+                UNION ALL
+                SELECT 1 FROM smart_accounts WHERE user_id = $1 AND address = $2
+            )
+            "#,
+        )
+        .bind(user.id)
+        .bind(&owner)
+        .fetch_one(pool)
+        .await?;
+        if !owner_is_linked {
+            return Err(anyhow!("execution owner is not linked to this account"));
+        }
+        let account = self.execution_account(did, agent_id).await?;
+        let binding = sqlx::query_as::<_, ExecutionBindingRecord>(
+            r#"
+            INSERT INTO execution_account_bindings (
+                id, execution_account_id, venue, binding_ref, request_id,
+                owner_address, status
+            ) VALUES ($1, $2, $3, $4, $5, $6, 'provisioning')
+            ON CONFLICT (execution_account_id, venue) DO UPDATE SET
+                updated_at = execution_account_bindings.updated_at
+            RETURNING binding_ref, request_id, venue, owner_address, public_identifier,
+                public_key, association_payload, proof_transaction_hash, status,
+                created_at, updated_at
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(account.id)
+        .bind(venue)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(&owner)
+        .fetch_one(pool)
+        .await?;
+        if binding.owner_address != owner {
+            return Err(anyhow!("execution binding owner cannot be changed"));
+        }
+        sqlx::query(
+            "UPDATE agents SET status = 'awaiting_signatures', updated_at = now() WHERE id = $1 AND status IN ('setup', 'provisioning')",
+        )
+        .bind(agent_id)
+        .execute(pool)
+        .await?;
+        Ok(binding)
+    }
+
+    pub async fn confirm_execution_binding(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+        confirmation: &ExecutionBindingConfirmation<'_>,
+    ) -> Result<ExecutionBindingRecord> {
+        let owner = normalize_address(confirmation.owner_address)?;
+        let account = self.execution_account(did, agent_id).await?;
+        sqlx::query_as::<_, ExecutionBindingRecord>(
+            r#"
+            UPDATE execution_account_bindings SET
+                public_identifier = $5,
+                proof_transaction_hash = $6,
+                status = 'verifying',
+                updated_at = now()
+            WHERE execution_account_id = $1 AND venue = $2 AND request_id = $3
+              AND owner_address = $4
+              AND (
+                  status IN ('provisioning', 'awaiting_signature')
+                  OR (status = 'verifying' AND public_identifier = $5 AND proof_transaction_hash = $6)
+              )
+            RETURNING binding_ref, request_id, venue, owner_address, public_identifier,
+                public_key, association_payload, proof_transaction_hash, status,
+                created_at, updated_at
+            "#,
+        )
+        .bind(account.id)
+        .bind(confirmation.venue)
+        .bind(confirmation.request_id)
+        .bind(owner)
+        .bind(confirmation.public_identifier)
+        .bind(confirmation.proof_transaction_hash)
+        .fetch_optional(self.pool()?)
+        .await?
+        .ok_or_else(|| anyhow!("binding request not found or cannot be confirmed"))
+    }
+
+    pub async fn agent_readiness(&self, did: &str, agent_id: Uuid) -> Result<AgentReadiness> {
+        let user = self.ensure_user(did).await?;
+        let readiness = sqlx::query_as::<_, AgentReadiness>(
+            r#"
+            SELECT r.execution_account_id, r.lighter_linked, r.lighter_funded,
+                r.robinhood_deployed, r.robinhood_funded, r.user_gas_ready,
+                r.execution_gas_ready, r.policy_active, r.reconciled
+            FROM agent_readiness r
+            JOIN execution_accounts e ON e.id = r.execution_account_id
+            WHERE e.agent_id = $1 AND e.user_id = $2
+            "#,
+        )
+        .bind(agent_id)
+        .bind(user.id)
+        .fetch_optional(self.pool()?)
+        .await?
+        .ok_or_else(|| anyhow!("agent readiness is not available"))?;
+        Ok(readiness.finalize())
+    }
+
+    pub async fn create_agent_command(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+        idempotency_key: &str,
+        command: &str,
+    ) -> Result<AgentCommandRecord> {
+        let user = self.ensure_user(did).await?;
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        let (agent_status, account_id) = sqlx::query_as::<_, (String, Uuid)>(
+            r#"
+            SELECT a.status, e.id
+            FROM agents a JOIN execution_accounts e ON e.agent_id = a.id
+            WHERE a.id = $1 AND a.user_id = $2 AND a.mode = 'live'
+            FOR UPDATE OF a
+            "#,
+        )
+        .bind(agent_id)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow!("live agent not found"))?;
+        if let Some(existing) = sqlx::query_as::<_, AgentCommandRecord>(
+            r#"
+            SELECT id, agent_id, execution_account_id, idempotency_key,
+                command, status, agent_status, error_reason, created_at, updated_at
+            FROM agent_commands
+            WHERE agent_id = $1 AND idempotency_key = $2
+            "#,
+        )
+        .bind(agent_id)
+        .bind(idempotency_key)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            if existing.command != command {
+                return Err(anyhow!(
+                    "idempotency key was reused for a different command"
+                ));
+            }
+            tx.commit().await?;
+            return Ok(existing);
+        }
+        let readiness = sqlx::query_as::<_, AgentReadiness>(
+            r#"
+            SELECT execution_account_id, lighter_linked, lighter_funded,
+                robinhood_deployed, robinhood_funded, user_gas_ready,
+                execution_gas_ready, policy_active, reconciled
+            FROM agent_readiness WHERE execution_account_id = $1
+            "#,
+        )
+        .bind(account_id)
+        .fetch_one(&mut *tx)
+        .await?
+        .finalize();
+        let transition = command_transition(
+            &agent_status,
+            command,
+            readiness.can_launch,
+            readiness.reconciled,
+        );
+        let (command_status, next_status, error_reason) = match transition {
+            Ok(next) => ("accepted", next, None),
+            Err(reason) => ("rejected", agent_status.as_str(), Some(reason)),
+        };
+        if command_status == "accepted" && next_status != agent_status {
+            sqlx::query("UPDATE agents SET status = $2, blocked_reason = NULL, updated_at = now() WHERE id = $1")
+                .bind(agent_id)
+                .bind(next_status)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let record = sqlx::query_as::<_, AgentCommandRecord>(
+            r#"
+            INSERT INTO agent_commands (
+                id, agent_id, execution_account_id, idempotency_key, command,
+                status, agent_status, error_reason
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING id, agent_id, execution_account_id, idempotency_key,
+                command, status, agent_status, error_reason, created_at, updated_at
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(agent_id)
+        .bind(account_id)
+        .bind(idempotency_key)
+        .bind(command)
+        .bind(command_status)
+        .bind(next_status)
+        .bind(error_reason)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(record)
+    }
+
+    pub async fn agent_command(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+        command_id: Uuid,
+    ) -> Result<AgentCommandRecord> {
+        let user = self.ensure_user(did).await?;
+        sqlx::query_as::<_, AgentCommandRecord>(
+            r#"
+            SELECT c.id, c.agent_id, c.execution_account_id, c.idempotency_key,
+                c.command, c.status, c.agent_status, c.error_reason, c.created_at, c.updated_at
+            FROM agent_commands c JOIN agents a ON a.id = c.agent_id
+            WHERE c.id = $1 AND c.agent_id = $2 AND a.user_id = $3
+            "#,
+        )
+        .bind(command_id)
+        .bind(agent_id)
+        .bind(user.id)
+        .fetch_optional(self.pool()?)
+        .await?
+        .ok_or_else(|| anyhow!("agent command not found"))
     }
 
     pub async fn agent_snapshot(&self, user_id: Uuid) -> Result<Option<AgentSnapshot>> {

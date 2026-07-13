@@ -1,7 +1,12 @@
 import type {
   ActivityPage,
+  AgentCommand,
+  AgentCommandRecord,
+  AgentReadiness,
   AgentRecord,
   DashboardSnapshot,
+  ExecutionAccountRecord,
+  ExecutionBindingRecord,
   MeResponse,
   PreferencesRecord,
   TransactionPlan,
@@ -47,14 +52,77 @@ export class AppApi {
   }
 
   launchAgent(): Promise<AgentRecord> {
+    return this.request("/v1/agents", {
+      method: "POST",
+      body: JSON.stringify({ strategyVersion: "basis-aapl-v1" }),
+    });
+  }
+
+  launchPaperAgent(): Promise<AgentRecord> {
     return this.request("/v1/agents", { method: "POST" });
   }
 
-  updateAgent(id: string, status: "running" | "paused"): Promise<AgentRecord> {
+  updatePaperAgent(id: string, status: "running" | "paused"): Promise<AgentRecord> {
     return this.request(`/v1/agents/${encodeURIComponent(id)}`, {
       method: "PUT",
       body: JSON.stringify({ status }),
     });
+  }
+
+  createExecutionAccount(agentId: string): Promise<ExecutionAccountRecord> {
+    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/execution-account`, { method: "POST" });
+  }
+
+  agentReadiness(agentId: string): Promise<AgentReadiness> {
+    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/readiness`);
+  }
+
+  requestLighterLink(agentId: string, ownerAddress: string): Promise<ExecutionBindingRecord> {
+    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/lighter/link-request`, {
+      method: "POST",
+      body: JSON.stringify({ ownerAddress }),
+    });
+  }
+
+  confirmLighterLink(agentId: string, input: {
+    requestId: string;
+    ownerAddress: string;
+    accountIndex: number;
+    apiKeyIndex: number;
+    associationTransactionHash: string;
+  }): Promise<ExecutionBindingRecord> {
+    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/lighter/confirm`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  prepareRobinhood(agentId: string): Promise<ExecutionBindingRecord> {
+    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/robinhood/prepare`, { method: "POST" });
+  }
+
+  confirmRobinhood(agentId: string, input: {
+    requestId: string;
+    ownerAddress: string;
+    vaultAddress: string;
+    transactionHash: string;
+  }): Promise<ExecutionBindingRecord> {
+    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/robinhood/confirm`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  agentCommand(agentId: string, command: AgentCommand, idempotencyKey = crypto.randomUUID()): Promise<AgentCommandRecord> {
+    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/commands`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ command }),
+    });
+  }
+
+  getAgentCommand(agentId: string, commandId: string): Promise<AgentCommandRecord> {
+    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/commands/${encodeURIComponent(commandId)}`);
   }
 
   activity(cursor?: string): Promise<ActivityPage> {

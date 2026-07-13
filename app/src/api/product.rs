@@ -2,11 +2,12 @@ use crate::api::error::ApiError;
 use crate::auth::require_user;
 use crate::evm::abi;
 use crate::product::{
-    ActivityPage, AgentStatusInput, Amount, ConfirmVaultInput, ConfirmedVault, DashboardSnapshot,
-    MetricInput, OpportunitySnapshot, PreferencesInput, TransactionCall, TransactionPlan,
-    VaultSnapshot, WalletBalanceSnapshot,
+    ActivityPage, AgentCommandInput, AgentCreateInput, AgentStatusInput, Amount, ConfirmVaultInput,
+    ConfirmedVault, DashboardSnapshot, LighterConfirmInput, LighterLinkRequestInput, MetricInput,
+    OpportunitySnapshot, PreferencesInput, RobinhoodConfirmInput, TransactionCall, TransactionPlan,
+    VaultSnapshot, WalletBalanceSnapshot, LIVE_STRATEGY_VERSION,
 };
-use crate::product_store::normalize_address;
+use crate::product_store::{normalize_address, ExecutionBindingConfirmation};
 use crate::state::AppState;
 use actix_web::{web, HttpRequest, HttpResponse};
 use num_bigint::BigUint;
@@ -311,14 +312,30 @@ pub async fn dashboard(
 pub async fn launch_agent(
     req: HttpRequest,
     state: web::Data<AppState>,
+    body: web::Bytes,
 ) -> Result<HttpResponse, ApiError> {
     let auth = require_user(&req, &state)?;
     ensure_database(&state)?;
-    let agent = state
-        .product_store
-        .launch_agent(&auth.did, &state.config.agent_strategy_version)
-        .await
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let agent = if body.is_empty() {
+        state
+            .product_store
+            .launch_paper_agent(&auth.did, &state.config.agent_strategy_version)
+            .await
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?
+    } else {
+        let input: AgentCreateInput = serde_json::from_slice(&body)
+            .map_err(|_| ApiError::BadRequest("Invalid agent request.".to_string()))?;
+        if input.strategy_version != LIVE_STRATEGY_VERSION {
+            return Err(ApiError::BadRequest(
+                "Only basis-aapl-v1 is available for live execution.".to_string(),
+            ));
+        }
+        state
+            .product_store
+            .create_live_agent(&auth.did, &input.strategy_version)
+            .await
+            .map_err(|error| ApiError::Conflict(error.to_string()))?
+    };
     Ok(HttpResponse::Created().json(agent))
 }
 
@@ -341,6 +358,218 @@ pub async fn update_agent_status(
         .await
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     Ok(HttpResponse::Ok().json(agent))
+}
+
+pub async fn create_execution_account(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    let account = state
+        .product_store
+        .create_execution_account(&auth.did, path.into_inner())
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(HttpResponse::Accepted().json(account))
+}
+
+pub async fn lighter_link_request(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+    input: web::Json<LighterLinkRequestInput>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    let binding = state
+        .product_store
+        .request_execution_binding(
+            &auth.did,
+            path.into_inner(),
+            "lighter",
+            &input.owner_address,
+        )
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(HttpResponse::Accepted().json(binding))
+}
+
+pub async fn lighter_confirm(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+    input: web::Json<LighterConfirmInput>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    if input.account_index < 0 || !(2..=254).contains(&input.api_key_index) {
+        return Err(ApiError::BadRequest(
+            "Lighter account or API key index is invalid.".to_string(),
+        ));
+    }
+    if !is_hex_identifier(&input.association_transaction_hash) {
+        return Err(ApiError::BadRequest(
+            "Lighter association transaction is invalid.".to_string(),
+        ));
+    }
+    let identifier = format!(
+        "account:{}:key:{}",
+        input.account_index, input.api_key_index
+    );
+    let binding = state
+        .product_store
+        .confirm_execution_binding(
+            &auth.did,
+            path.into_inner(),
+            &ExecutionBindingConfirmation {
+                venue: "lighter",
+                request_id: input.request_id,
+                owner_address: &input.owner_address,
+                public_identifier: &identifier,
+                proof_transaction_hash: &input.association_transaction_hash,
+            },
+        )
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(HttpResponse::Accepted().json(binding))
+}
+
+pub async fn robinhood_prepare(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    let me = state
+        .product_store
+        .me(&auth.did)
+        .await
+        .map_err(ApiError::internal)?;
+    let owner = me
+        .wallets
+        .iter()
+        .find(|wallet| wallet.is_primary)
+        .or_else(|| me.wallets.first())
+        .ok_or_else(|| ApiError::BadRequest("Link an execution wallet first.".to_string()))?;
+    let binding = state
+        .product_store
+        .request_execution_binding(&auth.did, path.into_inner(), "robinhood", &owner.address)
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(HttpResponse::Accepted().json(binding))
+}
+
+pub async fn robinhood_confirm(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+    input: web::Json<RobinhoodConfirmInput>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    let vault = normalize_address(&input.vault_address)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    if !is_hex_identifier(&input.transaction_hash) {
+        return Err(ApiError::BadRequest(
+            "Robinhood deployment transaction is invalid.".to_string(),
+        ));
+    }
+    let binding = state
+        .product_store
+        .confirm_execution_binding(
+            &auth.did,
+            path.into_inner(),
+            &ExecutionBindingConfirmation {
+                venue: "robinhood",
+                request_id: input.request_id,
+                owner_address: &input.owner_address,
+                public_identifier: &vault,
+                proof_transaction_hash: &input.transaction_hash,
+            },
+        )
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(HttpResponse::Accepted().json(binding))
+}
+
+pub async fn agent_readiness(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    let readiness = state
+        .product_store
+        .agent_readiness(&auth.did, path.into_inner())
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(HttpResponse::Ok().json(readiness))
+}
+
+pub async fn create_agent_command(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+    input: web::Json<AgentCommandInput>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    let idempotency_key = req
+        .headers()
+        .get("Idempotency-Key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+        .ok_or_else(|| {
+            ApiError::BadRequest("A valid Idempotency-Key header is required.".to_string())
+        })?;
+    if !matches!(
+        input.command.as_str(),
+        "launch" | "pause" | "resume" | "close" | "withdraw"
+    ) {
+        return Err(ApiError::BadRequest(
+            "Unsupported agent command.".to_string(),
+        ));
+    }
+    let command = state
+        .product_store
+        .create_agent_command(
+            &auth.did,
+            path.into_inner(),
+            idempotency_key,
+            &input.command,
+        )
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    if command.status == "rejected" {
+        Ok(HttpResponse::Conflict().json(command))
+    } else {
+        Ok(HttpResponse::Accepted().json(command))
+    }
+}
+
+pub async fn agent_command(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<(Uuid, Uuid)>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    let (agent_id, command_id) = path.into_inner();
+    let command = state
+        .product_store
+        .agent_command(&auth.did, agent_id, command_id)
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(HttpResponse::Ok().json(command))
 }
 
 #[derive(Deserialize)]

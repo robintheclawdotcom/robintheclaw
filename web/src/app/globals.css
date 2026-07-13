@@ -261,6 +261,15 @@ footer a { font-size: 13px; }
 .status-dot { width: 11px; height: 11px; flex: none; border-radius: 50%; }
 .status-dot.running { background: var(--accent); box-shadow: 0 0 0 4px var(--highlight); }
 .status-dot.halted { background: var(--muted); }
+.mainnet-readiness { border-color: var(--border-strong); }
+.readiness-copy { max-width: 760px; margin: 0 0 18px; color: var(--text-secondary); font-size: 12px; line-height: 1.65; }
+.readiness-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+.readiness-grid article { min-height: 104px; display: flex; align-items: flex-start; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.readiness-grid article > div { display: grid; gap: 5px; }
+.readiness-grid strong { font-size: 11px; }
+.readiness-grid small { font-size: 9px; line-height: 1.5; }
+.mainnet-readiness > .button-row, .mainnet-readiness > small { margin-top: 14px; }
+.mainnet-readiness > small { display: block; }
 .detail-list, .address-list { margin: 18px 0 0; }
 .detail-list > div, .address-list > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 0; border-top: 1px solid var(--border); }
 .detail-list dt, .address-list dt { color: var(--muted); font-size: 10px; }
@@ -374,6 +383,7 @@ footer a { font-size: 13px; }
   .docs-view { max-width: 680px; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .position-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .readiness-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 760px) {
@@ -414,7 +424,7 @@ footer a { font-size: 13px; }
   .app-entry-card a { width: 100%; text-align: center; }
   .page-header, .setup-card, .activate-panel, .notice { align-items: flex-start; flex-direction: column; }
   .page-actions, .page-actions .button, .setup-card .button, .activate-panel .button, .notice .button { width: 100%; }
-  .metric-grid, .settings-grid, .position-cards { grid-template-columns: 1fr; }
+  .metric-grid, .settings-grid, .position-cards, .readiness-grid { grid-template-columns: 1fr; }
   .metric { min-height: 104px; }
   .wallet-list article { grid-template-columns: auto minmax(0, 1fr); padding: 15px 0; }
   .wallet-actions { grid-column: 1 / -1; justify-content: flex-end; }

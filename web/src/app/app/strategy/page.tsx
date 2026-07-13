@@ -3,7 +3,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { EmptyState, ErrorNotice, LoadingPanel, PageHeader, SetupCard } from "../../../components/app-ui";
 import { useAppApi } from "../../../components/app-providers";
-import { AddFundsForm, AgentButton, MandateButton, WithdrawForm } from "../../../components/strategy-controls";
+import { AddFundsForm, AgentButton, MainnetReadinessPanel, MandateButton, WithdrawForm } from "../../../components/strategy-controls";
+import { agentStatusLabel } from "../../../lib/agent-lifecycle";
 import { formatAddress, formatAmount } from "../../../lib/format";
 
 export default function StrategyPage() {
@@ -16,12 +17,13 @@ export default function StrategyPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Strategy" title="Strategy controls" description="Manage your agent, mandate, capital, and positions." action={vault && <AgentButton dashboard={dashboard} />} />
+      <PageHeader eyebrow="Strategy" title="Strategy controls" description="Manage your agent, mandate, capital, and positions." action={<AgentButton dashboard={dashboard} />} />
+      <MainnetReadinessPanel dashboard={dashboard} />
       {!vault ? <SetupCard /> : (
         <>
           <div className="strategy-layout">
             <section className="panel">
-              <div className="panel-heading"><div><span className="eyebrow">Robin agent</span><h2>{dashboard.agent ? `Agent ${dashboard.agent.status}` : "Not launched"}</h2></div>{dashboard.agent && <span className={`status-pill ${dashboard.agent.status === "running" ? "running" : "halted"}`}>{dashboard.agent.mode === "live" ? "Live" : "Paper"}</span>}</div>
+              <div className="panel-heading"><div><span className="eyebrow">Robin agent</span><h2>{dashboard.agent ? `Agent ${agentStatusLabel(dashboard.agent.status)}` : "Not launched"}</h2></div>{dashboard.agent && <span className={`status-pill ${dashboard.agent.status === "running" ? "running" : "halted"}`}>{dashboard.agent.mode === "live" ? "Live" : "Paper"}</span>}</div>
               {dashboard.agent ? <dl className="detail-list large"><div><dt>Strategy</dt><dd>{dashboard.agent.strategyVersion}</dd></div><div><dt>Evaluations</dt><dd>{dashboard.agent.evaluations}</dd></div><div><dt>Candidates</dt><dd>{dashboard.agent.candidates}</dd></div><div><dt>Last evaluation</dt><dd>{dashboard.agent.lastEvaluatedAt ? new Date(dashboard.agent.lastEvaluatedAt).toLocaleString() : "Waiting"}</dd></div></dl> : <EmptyState title="No agent" body="Launch Robin to start the strategy runtime for this account." />}
             </section>
             <section className="panel">

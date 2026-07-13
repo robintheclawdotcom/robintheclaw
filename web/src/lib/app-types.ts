@@ -101,15 +101,81 @@ export type AgentRecord = {
   id: string;
   strategyVersion: string;
   mode: "paper" | "live";
-  status: "running" | "paused";
+  status: AgentStatus;
   createdAt: string;
   updatedAt: string;
 };
+
+export type AgentStatus =
+  | "setup"
+  | "provisioning"
+  | "awaiting_signatures"
+  | "awaiting_funding"
+  | "ready"
+  | "running"
+  | "reducing"
+  | "paused"
+  | "closing"
+  | "closed"
+  | "blocked";
 
 export type AgentSnapshot = AgentRecord & {
   evaluations: number;
   candidates: number;
   lastEvaluatedAt: string | null;
+};
+
+export type ExecutionAccountRecord = {
+  id: string;
+  agentId: string;
+  strategyVersion: "basis-aapl-v1";
+  chainId: 4663;
+  status: "provisioning" | "awaiting_signatures" | "awaiting_funding" | "ready" | "blocked" | "closed";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ExecutionBindingRecord = {
+  bindingRef: string;
+  requestId: string;
+  venue: "lighter" | "robinhood";
+  ownerAddress: string;
+  publicIdentifier: string | null;
+  publicKey: string | null;
+  associationPayload: string | null;
+  proofTransactionHash: string | null;
+  status: "provisioning" | "awaiting_signature" | "verifying" | "linked" | "rejected";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentReadiness = {
+  executionAccountId: string;
+  lighterLinked: boolean;
+  lighterFunded: boolean;
+  robinhoodDeployed: boolean;
+  robinhoodFunded: boolean;
+  userGasReady: boolean;
+  executionGasReady: boolean;
+  policyActive: boolean;
+  reconciled: boolean;
+  canLaunch: boolean;
+  blockers: string[];
+};
+
+export type AgentCommand = "launch" | "pause" | "resume" | "close" | "withdraw";
+
+export type AgentCommandRecord = {
+  id: string;
+  agentId: string;
+  executionAccountId: string;
+  idempotencyKey: string;
+  command: AgentCommand;
+  status: "accepted" | "completed" | "rejected";
+  agentStatus: AgentStatus;
+  errorReason: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type DashboardSnapshot = {

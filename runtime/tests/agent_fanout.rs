@@ -11,9 +11,16 @@ async fn running_agents_receive_each_evaluation_once() -> anyhow::Result<()> {
     let pool = PgPoolOptions::new().connect(&database_url).await?;
     let user_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
+    let live_user_id = Uuid::new_v4();
+    let live_agent_id = Uuid::new_v4();
     sqlx::query("INSERT INTO users (id, privy_did) VALUES ($1, $2)")
         .bind(user_id)
         .bind(format!("did:agent-test:{user_id}"))
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO users (id, privy_did) VALUES ($1, $2)")
+        .bind(live_user_id)
+        .bind(format!("did:agent-test:{live_user_id}"))
         .execute(&pool)
         .await?;
     sqlx::query(
@@ -22,6 +29,14 @@ async fn running_agents_receive_each_evaluation_once() -> anyhow::Result<()> {
     )
     .bind(agent_id)
     .bind(user_id)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO agents (id, user_id, strategy_version, mode, status) \
+         VALUES ($1, $2, 'basis-paper-v1', 'live', 'setup')",
+    )
+    .bind(live_agent_id)
+    .bind(live_user_id)
     .execute(&pool)
     .await?;
 
@@ -45,9 +60,19 @@ async fn running_agents_receive_each_evaluation_once() -> anyhow::Result<()> {
             .fetch_one(&pool)
             .await?;
     assert_eq!(count, 1);
+    let live_count =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM agent_paper_events WHERE agent_id = $1")
+            .bind(live_agent_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(live_count, 0);
 
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(live_user_id)
         .execute(&pool)
         .await?;
     Ok(())

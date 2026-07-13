@@ -39,7 +39,7 @@ async function proxy(request: NextRequest, context: RouteContext) {
   const target = new URL(`/api/${path.join("/")}`, origin);
   target.search = request.nextUrl.search;
   const headers = new Headers({ Accept: "application/json" });
-  for (const name of ["authorization", "content-type"]) {
+  for (const name of ["authorization", "content-type", "idempotency-key"]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }

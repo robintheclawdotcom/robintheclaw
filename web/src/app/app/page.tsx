@@ -6,6 +6,7 @@ import { useEffect, useRef } from "react";
 import { ActivityList, EmptyState, ErrorNotice, LoadingPanel, PageHeader, SetupCard } from "../../components/app-ui";
 import { useAppApi } from "../../components/app-providers";
 import { AgentButton } from "../../components/strategy-controls";
+import { agentStatusLabel } from "../../lib/agent-lifecycle";
 import { formatAddress, formatAmount, formatDate } from "../../lib/format";
 
 export default function OverviewPage() {
@@ -30,7 +31,7 @@ export default function OverviewPage() {
         eyebrow="Overview"
         title="Strategy overview"
         description={`Capital, exposure, and performance · ${formatDate(dashboard.asOf)}`}
-        action={dashboard.vault ? <AgentButton dashboard={dashboard} /> : <Link className="button button-primary" href="/app/onboarding">Create vault</Link>}
+        action={<AgentButton dashboard={dashboard} />}
       />
       {!dashboard.vault && <SetupCard />}
       {dashboard.vault && <nav className="quick-actions" aria-label="Primary account actions"><Link className="button button-secondary" href="/app/strategy#fund">Add funds</Link><Link className="button button-secondary" href="/app/strategy#withdraw">Withdraw</Link><Link className="button button-secondary" href="/app/wallets">Link wallet</Link></nav>}
@@ -45,7 +46,7 @@ export default function OverviewPage() {
           <div className="panel-heading"><div><span className="eyebrow">Strategy</span><h2>Basis strategy</h2></div><Link href="/app/strategy">Manage →</Link></div>
           {dashboard.agent ? (
             <>
-              <div className="strategy-state"><span className={`status-dot ${dashboard.agent.status === "paused" ? "halted" : "running"}`} /><div><strong>{dashboard.agent.status === "running" ? "Agent running" : "Agent paused"}</strong><small>{dashboard.agent.status === "running" ? "Evaluating qualified basis opportunities." : "No new evaluations are assigned."}</small></div></div>
+              <div className="strategy-state"><span className={`status-dot ${dashboard.agent.status === "running" ? "running" : "halted"}`} /><div><strong>Agent {agentStatusLabel(dashboard.agent.status)}</strong><small>{dashboard.agent.status === "running" ? "Evaluating qualified basis opportunities." : "Execution remains fail-closed until the next verified lifecycle state."}</small></div></div>
               <dl className="detail-list"><div><dt>Mode</dt><dd>{dashboard.agent.mode === "live" ? "Live" : "Paper"}</dd></div><div><dt>Evaluations</dt><dd>{dashboard.agent.evaluations}</dd></div><div><dt>Candidates</dt><dd>{dashboard.agent.candidates}</dd></div></dl>
             </>
           ) : dashboard.vault ? <EmptyState title="No agent" body="Launch Robin to start receiving strategy evaluations." /> : <EmptyState title="No active vault" body="Create a vault to fund and operate the strategy." />}

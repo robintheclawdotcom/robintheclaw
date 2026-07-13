@@ -25,6 +25,30 @@ export const agent = {
   evaluations: 42, candidates: 3, lastEvaluatedAt: "2026-07-13T10:04:00Z",
 };
 
+export const liveAgent = {
+  ...agent,
+  strategyVersion: "basis-aapl-v1",
+  mode: "live" as const,
+  status: "setup" as const,
+  evaluations: 0,
+  candidates: 0,
+  lastEvaluatedAt: null,
+};
+
+export const readiness = {
+  executionAccountId: "execution-account-id",
+  lighterLinked: false,
+  lighterFunded: false,
+  robinhoodDeployed: false,
+  robinhoodFunded: false,
+  userGasReady: false,
+  executionGasReady: false,
+  policyActive: false,
+  reconciled: false,
+  canLaunch: false,
+  blockers: ["lighter_not_linked", "lighter_usdc_not_funded", "robinhood_vault_not_deployed"],
+};
+
 export function me(withVault = true) {
   return {
     user: { id: "user-id", privyDid: "did:privy:test-user", onboardingState: withVault ? "complete" : "vault", hasRecovery: true, createdAt: "2026-07-13T10:00:00Z", updatedAt: "2026-07-13T10:00:00Z" },
@@ -50,19 +74,26 @@ export const dashboard = {
 
 export async function mockApplication(page: Page, options: { withVault?: boolean; withAgent?: boolean } = {}) {
   const withVault = options.withVault ?? true;
-  const state = { withAgent: options.withAgent ?? withVault };
+  const state: { agent: object | null } = { agent: (options.withAgent ?? withVault) ? agent : null };
   await page.route("**/api/app/**", async (route) => respond(route, withVault, state));
 }
 
-async function respond(route: Route, withVault: boolean, state: { withAgent: boolean }) {
+async function respond(route: Route, withVault: boolean, state: { agent: object | null }) {
   const request = route.request();
   const path = new URL(request.url()).pathname;
   if (path.endsWith("/metrics")) return route.fulfill({ status: 204 });
-  if (path.endsWith("/dashboard")) return json(route, { ...dashboard, agent: state.withAgent ? agent : null, vault: withVault ? dashboard.vault : null });
+  if (path.endsWith("/dashboard")) return json(route, { ...dashboard, agent: state.agent, vault: withVault ? dashboard.vault : null });
   if (path.endsWith("/agents") && request.method() === "POST") {
-    state.withAgent = true;
-    return json(route, agent, 201);
+    state.agent = liveAgent;
+    return json(route, liveAgent, 201);
   }
+  if (path.endsWith("/execution-account") && request.method() === "POST") {
+    state.agent = { ...liveAgent, status: "provisioning" };
+    return json(route, { id: "execution-account-id", agentId: liveAgent.id, strategyVersion: "basis-aapl-v1", chainId: 4663, status: "provisioning", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt }, 202);
+  }
+  if (path.endsWith("/readiness")) return json(route, readiness);
+  if (path.endsWith("/lighter/link-request")) return json(route, { bindingRef: "lighter-binding", requestId: "lighter-request", venue: "lighter", ownerAddress: embedded, publicIdentifier: null, publicKey: null, associationPayload: null, proofTransactionHash: null, status: "provisioning", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt }, 202);
+  if (path.endsWith("/robinhood/prepare")) return json(route, { bindingRef: "robinhood-binding", requestId: "robinhood-request", venue: "robinhood", ownerAddress: embedded, publicIdentifier: null, publicKey: null, associationPayload: null, proofTransactionHash: null, status: "provisioning", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt }, 202);
   if (path.includes("/agents/") && request.method() === "PUT") return json(route, agent);
   if (path.endsWith("/activity")) return json(route, { items: [], nextCursor: null });
   if (path.endsWith("/preferences")) return json(route, me(withVault).preferences);

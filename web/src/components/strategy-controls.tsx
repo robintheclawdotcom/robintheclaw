@@ -2,7 +2,8 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import type { DashboardSnapshot } from "../lib/app-types";
+import type { AgentStatus, DashboardSnapshot } from "../lib/app-types";
+import { agentAction, agentStatusLabel } from "../lib/agent-lifecycle";
 import { depositCalls, mandateCall, parseTokenAmount, withdrawalCall } from "../lib/strategy-calls";
 import { formatAddress } from "../lib/format";
 import { useAppApi, useRobinAuth, useSmartWallet } from "./app-providers";
@@ -12,27 +13,113 @@ export function AgentButton({ dashboard }: { dashboard: DashboardSnapshot }) {
   const api = useAppApi();
   const queryClient = useQueryClient();
   const agent = dashboard.agent;
-  const mutation = useMutation({
-    mutationFn: () => agent
-      ? api.updateAgent(agent.id, agent.status === "running" ? "paused" : "running")
-      : api.launchAgent(),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+  const action = agentAction(agent);
+  const mutation = useMutation<unknown, Error>({
+    mutationFn: () => {
+      if (!action) throw new Error("This lifecycle state has no manual transition.");
+      if (action.kind === "create") return api.launchAgent();
+      if (!agent) throw new Error("Agent is not available.");
+      if (action.kind === "provision") return api.createExecutionAccount(agent.id);
+      if (action.kind === "paper") return api.updatePaperAgent(agent.id, action.status);
+      return api.agentCommand(agent.id, action.command);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      void queryClient.invalidateQueries({ queryKey: ["agent-readiness"] });
+    },
   });
 
-  if (!dashboard.vault) return null;
-  const label = !agent
-    ? "Launch Robin agent"
-    : agent.status === "running"
-      ? "Pause agent"
-      : "Resume agent";
+  if (!action) return null;
   return (
     <div className="inline-action">
       <button className="button button-primary" disabled={mutation.isPending} onClick={() => mutation.mutate()}>
-        {mutation.isPending ? "Updating…" : label}
+        {mutation.isPending ? "Updating…" : action.label}
       </button>
       {mutation.error && <span className="field-error" role="alert">{mutation.error.message}</span>}
     </div>
   );
+}
+
+export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnapshot }) {
+  const api = useAppApi();
+  const auth = useRobinAuth();
+  const queryClient = useQueryClient();
+  const agent = dashboard.agent;
+  const hasAccount = agent?.mode === "live" && agent.status !== "setup";
+  const readiness = useQuery({
+    queryKey: ["agent-readiness", agent?.id],
+    queryFn: () => api.agentReadiness(agent!.id),
+    enabled: hasAccount,
+    retry: false,
+  });
+  const lighter = useMutation({
+    mutationFn: () => {
+      if (!agent || !auth.embeddedAddress) throw new Error("Link an execution wallet first.");
+      return api.requestLighterLink(agent.id, auth.embeddedAddress);
+    },
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+  });
+  const robinhood = useMutation({
+    mutationFn: () => {
+      if (!agent) throw new Error("Create the agent first.");
+      return api.prepareRobinhood(agent.id);
+    },
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+  });
+  const lifecycle = useMutation({
+    mutationFn: (command: "close" | "withdraw") => {
+      if (!agent) throw new Error("Create the agent first.");
+      return api.agentCommand(agent.id, command);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      void queryClient.invalidateQueries({ queryKey: ["agent-readiness"] });
+    },
+  });
+
+  if (!agent || agent.mode !== "live") return null;
+  const state = readiness.data;
+  const requirements = [
+    { label: "Robinhood USDG", ready: Boolean(state?.robinhoodDeployed && state.robinhoodFunded), detail: "Vault deployed and funded on Robinhood Chain mainnet" },
+    { label: "Lighter USDC", ready: Boolean(state?.lighterLinked && state.lighterFunded), detail: "User-owned subaccount linked and collateralized" },
+    { label: "User ETH gas", ready: Boolean(state?.userGasReady), detail: "Pays deployment and owner transactions without sponsorship" },
+    { label: "Execution ETH gas", ready: Boolean(state?.executionGasReady), detail: "Funds the isolated execution signer" },
+    { label: "Policy and reconciliation", ready: Boolean(state?.policyActive && state.reconciled), detail: "Independent services must verify both accounts" },
+  ];
+
+  return (
+    <section className="panel mainnet-readiness">
+      <div className="panel-heading">
+        <div><span className="eyebrow">Mainnet execution</span><h2>{agentStatusLabel(agent.status)}</h2></div>
+        <span className={`status-pill ${state?.canLaunch ? "running" : "halted"}`}>{state?.canLaunch ? "Ready" : "Blocked"}</span>
+      </div>
+      <p className="readiness-copy">AAPL only, capped at $25 per leg. Each venue is funded separately. Alchemy sponsorship is optional; ETH is the fallback for every owner-paid transaction.</p>
+      <div className="readiness-grid">
+        {requirements.map((requirement) => (
+          <article key={requirement.label}>
+            <span className={`status-dot ${requirement.ready ? "running" : "halted"}`} />
+            <div><strong>{requirement.label}</strong><small>{requirement.detail}</small></div>
+          </article>
+        ))}
+      </div>
+      {agent.status === "setup" ? (
+        <small>Set up the execution account before linking venues or funding capital.</small>
+      ) : (
+        <div className="button-row">
+          <button className="button button-secondary" disabled={lighter.isPending} onClick={() => lighter.mutate()}>{lighter.isPending ? "Preparing…" : "Prepare Lighter link"}</button>
+          <button className="button button-secondary" disabled={robinhood.isPending} onClick={() => robinhood.mutate()}>{robinhood.isPending ? "Preparing…" : "Prepare Robinhood vault"}</button>
+          {!matchesTerminal(agent.status) && <button className="button button-quiet danger" disabled={lifecycle.isPending} onClick={() => lifecycle.mutate("close")}>Close agent</button>}
+          {agent.status === "closed" && <button className="button button-secondary" disabled={lifecycle.isPending || !state?.reconciled} onClick={() => lifecycle.mutate("withdraw")}>Withdraw capital</button>}
+        </div>
+      )}
+      <small>The product API stores only public binding references. Wallet private keys and secret Lighter API keys are never accepted here. Submitted proofs remain blocked until independently verified.</small>
+      {(readiness.error || lighter.error || robinhood.error || lifecycle.error) && <ErrorNotice error={readiness.error ?? lighter.error ?? robinhood.error ?? lifecycle.error} />}
+    </section>
+  );
+}
+
+function matchesTerminal(status: AgentStatus) {
+  return status === "setup" || status === "closing" || status === "closed";
 }
 
 export function MandateButton({ dashboard }: { dashboard: DashboardSnapshot }) {

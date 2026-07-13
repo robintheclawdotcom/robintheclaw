@@ -85,7 +85,10 @@ test("user launches a Robin agent from the strategy page", async ({ page }) => {
   await mockApplication(page, { withAgent: false });
   await page.goto("/app/strategy");
   await expect(page.getByRole("heading", { name: "Not launched" })).toBeVisible();
-  await page.getByRole("button", { name: "Launch Robin agent" }).click();
-  await expect(page.getByRole("heading", { name: "Agent running" })).toBeVisible();
-  await expect(page.getByText("basis-paper-v1")).toBeVisible();
+  await page.getByRole("button", { name: "Create mainnet agent" }).click();
+  await expect(page.getByRole("heading", { name: "Agent setup" })).toBeVisible();
+  await expect(page.getByText("basis-aapl-v1")).toBeVisible();
+  await expect(page.getByText("Robinhood USDG")).toBeVisible();
+  await expect(page.getByText("Lighter USDC")).toBeVisible();
+  await expect(page.getByText("Alchemy sponsorship is optional", { exact: false })).toBeVisible();
 });
