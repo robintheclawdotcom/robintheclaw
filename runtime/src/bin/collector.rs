@@ -2,7 +2,7 @@ use anyhow::Context;
 use robin_runtime::storage::{MarketStatsFeature, Store};
 use robin_runtime::{chain::ChainFeed, lighter::LighterFeed, MarketEventKind};
 use serde::Deserialize;
-use std::{env, fs, time::Duration};
+use std::{collections::HashSet, env, fs, time::Duration};
 use tokio::{
     time::{interval, sleep, MissedTickBehavior},
     try_join,
@@ -50,6 +50,7 @@ struct ConfigWithUniswap {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    robin_runtime::install_tls_provider()?;
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_target(false)
@@ -59,15 +60,23 @@ async fn main() -> anyhow::Result<()> {
     let config: ConfigWithUniswap =
         serde_json::from_slice(&fs::read(&config_path).context("read runtime config")?)
             .context("parse runtime config")?;
+    let universe = select_universe(
+        &config.config.universe,
+        env::var("RUNTIME_UNIVERSE").ok().as_deref(),
+    )?;
     let store = Store::from_env().await?;
     let feed = LighterFeed::new(
         config.config.perp.websocket,
         config.config.perp.api,
-        config.config.universe,
+        universe,
     );
     let sequencer_feed = config.config.chain.mainnet.sequencer_feed;
+    let rpc_url = env::var("ROBINHOOD_RPC_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(config.config.chain.mainnet.rpc);
     let chain = ChainFeed::new(
-        config.config.chain.mainnet.rpc,
+        rpc_url,
         config.uniswap_v4.pool_manager,
         Duration::from_millis(500),
     );
@@ -221,6 +230,52 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn select_universe(canonical: &[String], requested: Option<&str>) -> anyhow::Result<Vec<String>> {
+    let Some(requested) = requested else {
+        return Ok(canonical.to_vec());
+    };
+    let allowed = canonical.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+    for symbol in requested.split(',').map(str::trim) {
+        anyhow::ensure!(
+            !symbol.is_empty(),
+            "RUNTIME_UNIVERSE contains an empty symbol"
+        );
+        anyhow::ensure!(
+            allowed.contains(symbol),
+            "RUNTIME_UNIVERSE contains unknown symbol {symbol}"
+        );
+        anyhow::ensure!(
+            seen.insert(symbol),
+            "RUNTIME_UNIVERSE contains duplicate symbol {symbol}"
+        );
+        selected.push(symbol.to_string());
+    }
+    anyhow::ensure!(!selected.is_empty(), "RUNTIME_UNIVERSE is empty");
+    Ok(selected)
+}
+
 fn number(value: &serde_json::Value, key: &str) -> Option<f64> {
     value[key].as_str().and_then(|value| value.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_universe;
+
+    fn canonical() -> Vec<String> {
+        vec!["AAPL".to_string(), "TSLA".to_string()]
+    }
+
+    #[test]
+    fn universe_override_is_a_nonempty_subset() {
+        assert_eq!(
+            select_universe(&canonical(), Some("AAPL")).unwrap(),
+            ["AAPL"]
+        );
+        assert!(select_universe(&canonical(), Some("")).is_err());
+        assert!(select_universe(&canonical(), Some("AAPL,AAPL")).is_err());
+        assert!(select_universe(&canonical(), Some("NVDA")).is_err());
+    }
 }

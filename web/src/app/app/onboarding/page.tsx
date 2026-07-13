@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { formatEther } from "viem";
 import { ErrorNotice, LoadingPanel, PageHeader } from "../../../components/app-ui";
 import { useAppApi, useRobinAuth, useSmartWallet } from "../../../components/app-providers";
-import { robinhoodMainnetChainId } from "../../../lib/chain";
+import { robinhoodAppChainId } from "../../../lib/chain";
 import { formatAddress } from "../../../lib/format";
 
 const PENDING_KEY = "robin:onboarding-call-id";
@@ -28,7 +28,6 @@ export default function OnboardingPage() {
     mutationFn: () => api.syncWallets(),
     onSuccess: (data) => queryClient.setQueryData(["me"], data),
   });
-
   useEffect(() => {
     const next = `${auth.hasRecovery}:${auth.accounts.length}`;
     if (!identityVersion.current) {
@@ -67,8 +66,8 @@ export default function OnboardingPage() {
       }
       setPhase("preparing");
       const plan = await api.prepareVault();
-      if (plan.chainId !== robinhoodMainnetChainId) {
-        throw new Error("The vault plan does not target Robinhood Chain mainnet.");
+      if (plan.chainId !== robinhoodAppChainId) {
+        throw new Error("The vault plan targets the wrong network.");
       }
       setPhase("signing");
       const callId = await smartWallet.executeCalls(plan.calls, undefined, (submittedId) => {
@@ -126,7 +125,7 @@ export default function OnboardingPage() {
       <section className="onboarding-complete">
         <span className="success-mark">✓</span><span className="eyebrow">Setup complete</span>
         <h1>Strategy vault active</h1>
-        <p>Your vault is funded and ready for strategy control on Robinhood Chain mainnet.</p>
+        <p>Your vault is funded and ready for strategy control.</p>
         <Link className="button button-primary" href="/app">Open dashboard</Link>
       </section>
     );
@@ -158,7 +157,7 @@ export default function OnboardingPage() {
           )}
         </Step>
         <Step number="5" title="Personal vault" complete={false}>
-          <p>One batch creates your mainnet vault and funds its initial balance.</p>
+          <p>One batch creates your vault and funds its initial test balance.</p>
         </Step>
       </ol>
       {phase === "delayed" ? (

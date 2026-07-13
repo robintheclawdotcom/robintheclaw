@@ -5,12 +5,12 @@ test("email or passkey user opens a real empty-position dashboard", async ({ pag
   await mockApplication(page);
   await page.addInitScript(() => localStorage.setItem("robin:e2e-auth", "logged-out"));
   await page.goto("/app");
-  await expect(page.getByRole("heading", { name: "Autonomous strategy. Direct control." })).toBeVisible();
-  await expect(page.getByText("email, passkey, or a connected wallet", { exact: false })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Run Robin from one account." })).toBeVisible();
+  await expect(page.getByText("manage linked wallets, and activate your personal vault", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: "Strategy overview" })).toBeVisible();
-  await expect(page.getByText("1,000 USDG").first()).toBeVisible();
-  await expect(page.getByText("Robinhood mainnet", { exact: true })).toBeVisible();
+  await expect(page.getByText("1,000 tUSDG").first()).toBeVisible();
+  await expect(page.getByText("Robinhood testnet", { exact: true })).toBeVisible();
   await expect(page.getByText("No positions", { exact: true })).toBeVisible();
   await expect(page.getByText("No active positions")).toBeVisible();
 });
@@ -53,7 +53,7 @@ test("wallet conflict opens the account recovery path", async ({ page }) => {
     body: JSON.stringify({ error: "conflict", message: "This wallet is linked to another account." }),
   }));
   await page.goto("/app/wallets");
-  await page.getByRole("button", { name: "Sync wallets" }).click();
+  await page.getByRole("button", { name: "Link wallet" }).click();
   await expect(page.getByText("Wallet already linked")).toBeVisible();
   await expect(page.getByRole("button", { name: "Sign in to other account" })).toBeVisible();
 });
@@ -66,7 +66,7 @@ test("expired API session returns to sign in", async ({ page }) => {
     body: JSON.stringify({ error: "unauthorized", message: "authentication required" }),
   }));
   await page.goto("/app");
-  await expect(page.getByRole("heading", { name: "Autonomous strategy. Direct control." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Run Robin from one account." })).toBeVisible();
 });
 
 test("funding and withdrawal controls complete without changing ownership", async ({ page }) => {

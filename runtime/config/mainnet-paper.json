@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "strategyVersion": "basis-paper-v1",
+  "chainId": 4663,
+  "quoter": "0x8dc178efb8111bb0973dd9d722ebeff267c98f94",
+  "quoterCodeHash": "0xd707b1da8cb165e5ea35a3b4450d971eb562ec171e23492aa117036b78a868f6",
+  "poolManager": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+  "poolManagerCodeHash": "0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626",
+  "settlementAsset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+  "settlementAssetCodeHash": "0x864cc9ad53b338b82da1f7cab85ab0b3d5c8861acb422b6fec63cf36234f36a6",
+  "settlementDecimals": 6,
+  "maxTickerAgeMs": 3000,
+  "markets": [
+    {
+      "symbol": "AAPL",
+      "stockToken": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
+      "stockTokenCodeHash": "0x6c1fdd40002dcb440c7fff6a84171404d279ccb057803b65826f7546acd65630",
+      "stockDecimals": 18,
+      "currency0": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+      "currency1": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
+      "fee": 3000,
+      "tickSpacing": 60,
+      "hooks": "0x0000000000000000000000000000000000000000",
+      "amountInRaw": "25000000",
+      "perpTakerFeePpm": 500,
+      "gasCostSettlementRaw": "50000"
+    }
+  ]
+}

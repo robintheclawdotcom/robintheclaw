@@ -8,9 +8,19 @@ use uuid::Uuid;
 pub mod archive;
 pub mod chain;
 pub mod lighter;
+pub mod paper;
 pub mod storage;
 
 pub const EVENT_SCHEMA_VERSION: &str = "1";
+
+pub fn install_tls_provider() -> anyhow::Result<()> {
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        return Ok(());
+    }
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("install rustls ring provider"))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -509,6 +519,12 @@ impl IntentDeduper {
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[test]
+    fn installs_provider_for_reqwest() {
+        install_tls_provider().unwrap();
+        reqwest::Client::builder().build().unwrap();
+    }
 
     fn quote(bid: f64, ask: f64) -> Quote {
         Quote {

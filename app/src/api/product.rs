@@ -386,7 +386,7 @@ fn ensure_contracts(state: &AppState) -> Result<(), ApiError> {
         Ok(())
     } else {
         Err(ApiError::ServiceUnavailable(
-            "Mainnet vault onboarding is not configured.".to_string(),
+            "Vault onboarding is not configured.".to_string(),
         ))
     }
 }

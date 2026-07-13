@@ -125,7 +125,7 @@ services:
   - type: worker
     name: robin-research-collector
     runtime: rust
-    plan: starter
+    plan: standard
     region: virginia
     buildCommand: cargo build --locked --release --manifest-path runtime/Cargo.toml --bin collector
     startCommand: ./runtime/target/release/collector
@@ -141,16 +141,16 @@ services:
         fromDatabase:
           name: robin-research
           property: connectionPoolString
+      - key: DATABASE_MIGRATIONS_URL
+        fromDatabase:
+          name: robin-research
+          property: connectionString
       - key: RUNTIME_CONFIG
         value: config/addresses.json
-      - fromGroup: robin-coordinator-venue-auth
-      - key: VENUE_EVENT_CALLER_ID
-        value: runtime-collector
-      - key: COORDINATOR_HOSTPORT
-        fromService:
-          name: robin-execution-coordinator
-          type: pserv
-          property: hostport
+      - key: RUNTIME_UNIVERSE
+        value: AAPL
+      - key: ROBINHOOD_RPC_URL
+        sync: false
       - key: RUST_LOG
         value: info
       - key: R2_BUCKET
@@ -161,8 +161,42 @@ services:
         sync: false
       - key: AWS_SECRET_ACCESS_KEY
         sync: false
+      - key: AWS_SESSION_TOKEN
+        sync: false
       - key: AWS_REGION
         value: auto
+
+  - type: worker
+    name: robin-paper-agent
+    runtime: rust
+    plan: standard
+    region: virginia
+    buildCommand: cargo build --locked --release --manifest-path runtime/Cargo.toml --bin paper_agent
+    startCommand: ./runtime/target/release/paper_agent
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 120
+    buildFilter:
+      paths:
+        - runtime/**
+        - config/**
+        - render.yaml
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: robin-research
+          property: connectionPoolString
+      - key: DATABASE_MIGRATIONS_URL
+        fromDatabase:
+          name: robin-research
+          property: connectionString
+      - key: PAPER_AGENT_CONFIG
+        value: runtime/config/mainnet-paper.json
+      - key: PAPER_MINIMUM_NET_EDGE_PPM
+        sync: false
+      - key: ROBINHOOD_RPC_URL
+        sync: false
+      - key: RUST_LOG
+        value: info
 
   - type: pserv
     name: robin-execution-coordinator

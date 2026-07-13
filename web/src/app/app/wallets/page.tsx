@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ErrorNotice, LoadingPanel, PageHeader } from "../../../components/app-ui";
 import { useAppApi, useRobinAuth } from "../../../components/app-providers";
+import { AppApiError } from "../../../lib/api";
 import { formatAddress, formatDate } from "../../../lib/format";
 
 export default function WalletsPage() {
@@ -16,7 +17,10 @@ export default function WalletsPage() {
   const sync = useMutation({
     mutationFn: () => api.syncWallets(),
     onSuccess: (data) => { setConflict(undefined); queryClient.setQueryData(["me"], data); void api.metric("wallet_sync", undefined, "success").catch(() => undefined); },
-    onError: (error) => { setConflict(error); void api.metric("wallet_sync", undefined, "conflict").catch(() => undefined); },
+    onError: (error) => {
+      setConflict(error instanceof AppApiError && error.status === 409 ? error : undefined);
+      void api.metric("wallet_sync", undefined, error instanceof AppApiError && error.status === 409 ? "conflict" : "failed").catch(() => undefined);
+    },
   });
   const preferences = useMutation({
     mutationFn: (address: string) => {

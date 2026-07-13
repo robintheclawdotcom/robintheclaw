@@ -216,7 +216,8 @@ pub struct AckFrame {
     #[serde(rename = "type")]
     pub frame_type: String,
     pub channel: String,
-    pub timestamp: i64,
+    #[serde(rename = "timestamp", default)]
+    pub timestamp_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,7 +254,7 @@ pub fn parse_frame(text: &str) -> Result<Frame, LighterError> {
         "update/trade" => Frame::Trade(Box::new(decode(text)?)),
         "update/market_stats" => Frame::MarketStats(Box::new(decode(text)?)),
         "update/height" => Frame::Height(decode(text)?),
-        kind if kind.starts_with("subscribed/") => Frame::Ack(validate_ack(text)?),
+        kind if kind.starts_with("subscribed/") => parse_subscription_frame(text)?,
         kind if kind == "error" || kind.starts_with("error/") || kind.ends_with("/error") => {
             Frame::Error(decode(text)?)
         }
@@ -275,6 +276,25 @@ pub fn validate_ack(text: &str) -> Result<AckFrame, LighterError> {
         ));
     }
     Ok(ack)
+}
+
+fn parse_subscription_frame(text: &str) -> Result<Frame, LighterError> {
+    let ack = validate_ack(text)?;
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|err| LighterError::Acknowledgement(err.to_string()))?;
+    let frame = match ack.frame_type.strip_prefix("subscribed/") {
+        Some("order_book") if value.get("order_book").is_some() => {
+            Frame::OrderBook(Box::new(decode(text)?))
+        }
+        Some("ticker") if value.get("ticker").is_some() => Frame::Ticker(Box::new(decode(text)?)),
+        Some("trade") if value.get("trades").is_some() => Frame::Trade(Box::new(decode(text)?)),
+        Some("market_stats") if value.get("market_stats").is_some() => {
+            Frame::MarketStats(Box::new(decode(text)?))
+        }
+        Some("height") if value.get("height").is_some() => Frame::Height(decode(text)?),
+        _ => Frame::Ack(ack),
+    };
+    Ok(frame)
 }
 
 pub fn subscription_budget(market_count: usize) -> Result<usize, LighterError> {
@@ -861,8 +881,7 @@ impl LighterFeed {
                 .sequence(frame.height)
                 .block(frame.height),
             Frame::Ack(frame) => RoutedFrame::new(MarketEventKind::SourceHealth)
-                .timestamp(frame.timestamp)
-                .sequence(frame.timestamp),
+                .optional_timestamp(frame.timestamp_ms),
             Frame::Error(_) | Frame::Other(_) => RoutedFrame::new(MarketEventKind::SourceHealth),
         };
         Ok(resolved)

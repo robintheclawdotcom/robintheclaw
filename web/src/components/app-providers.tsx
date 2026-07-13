@@ -7,7 +7,7 @@ import {
   useWallets,
   type ConnectedWallet,
 } from "@privy-io/react-auth";
-import { robinhoodMainnet } from "@alchemy/common/chains";
+import { robinhoodTestnet } from "@alchemy/common/chains";
 import {
   alchemyWalletTransport,
   createSmartWalletClient,
@@ -87,8 +87,8 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
         appId={appId}
         config={{
           loginMethods: ["email", "passkey", "google", "apple", "wallet"],
-          supportedChains: [robinhoodMainnet],
-          defaultChain: robinhoodMainnet,
+          supportedChains: [robinhoodTestnet],
+          defaultChain: robinhoodTestnet,
           embeddedWallets: { ethereum: { createOnLogin: "all-users" } },
           appearance: {
             theme: "dark",
@@ -196,7 +196,7 @@ function LiveSession({ children }: { children: React.ReactNode }) {
       const signer = await toViemAccount({ wallet });
       const client = createSmartWalletClient({
         signer,
-        chain: robinhoodMainnet,
+        chain: robinhoodTestnet,
         transport: alchemyWalletTransport({ url: "/api/wallet" }),
       });
       const result = await client.sendCalls({

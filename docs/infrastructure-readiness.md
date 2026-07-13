@@ -11,6 +11,7 @@ and remain unable to pass readiness until their separate activation requirements
 | `robintheclaw` | Web | Public custom domain | Public documentation and authenticated product interface |
 | `robin-api` | Private service | Render private network | Authenticated product data and personal-vault preparation |
 | `robin-research-collector` | Worker | Outbound only | Venue and chain reads, Postgres staging, R2 archive writes |
+| `robin-paper-agent` | Worker | Outbound only | Executable quotes, matched paper positions, P&L, and opportunity episodes |
 | `robin-execution-coordinator` | Private service | Render private network | Durable intent admission and lifecycle coordination |
 | `robin-lighter-signer` | Private service | Render private network | Restricted Lighter order and cancellation signatures |
 | `robin-robinhood-signer` | Private service | Render private network | Typed `executeSpot` transactions through one KMS key |
@@ -56,7 +57,8 @@ funding.
 Both databases have no external IP allowlist and use Pro instances, high-availability standbys, and
 storage autoscaling. The research database also uses integrated PgBouncer for runtime services.
 
-- Collector, coordinator, and Robinhood signer use the pooled internal connection string.
+- Collector, paper agent, coordinator, and Robinhood signer use the pooled internal connection string.
+- Collector and paper agent use a separate direct private connection while applying runtime migrations.
 - The product API uses the direct internal application database connection. Its migration authority
   must move to the release identity before activation.
 - Migrations are release tasks. Signers and the coordinator do not acquire schema authority at
@@ -124,9 +126,7 @@ The release sequence is:
 The Blueprint is an infrastructure boundary, not evidence that the full runtime is ready. Capital
 activation remains blocked while any of the following is true:
 
-- there is no independently operated shadow/research processor binary;
-- collector production RPC, sequencer verification, archive reconciliation, or soak evidence is
-  incomplete;
+- collector production RPC, sequencer verification, archive reconciliation, or soak evidence is incomplete;
 - runtime collectors do not yet deliver authenticated Lighter account and Robinhood chain
   observations into the coordinator's durable reconciliation stream;
 - the execution-authority publisher does not yet deliver contemporaneous Lighter marks and

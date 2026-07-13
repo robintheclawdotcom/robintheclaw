@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import type { ActivityRecord } from "../lib/app-types";
-import { mainnetTransactionUrl, robinhoodMainnetChainId } from "../lib/chain";
+import { appTransactionUrl, robinhoodAppChainId } from "../lib/chain";
 import { formatAddress, formatDate, titleFromKind } from "../lib/format";
 
 export function PageHeader({ eyebrow, title, description, action }: {
@@ -45,7 +45,7 @@ export function ActivityList({ items, compact = false }: { items: ActivityRecord
         <article key={item.id}>
           <span className="activity-icon" aria-hidden="true">↗</span>
           <div><strong>{titleFromKind(item.kind)}</strong><small>{formatDate(item.occurredAt)}</small></div>
-          {item.transactionHash && item.chainId === robinhoodMainnetChainId && <a href={mainnetTransactionUrl(item.transactionHash)} target="_blank" rel="noreferrer" aria-label={`View ${titleFromKind(item.kind)} transaction`}>{formatAddress(item.transactionHash)}</a>}
+          {item.transactionHash && item.chainId === robinhoodAppChainId && <a href={appTransactionUrl(item.transactionHash)} target="_blank" rel="noreferrer" aria-label={`View ${titleFromKind(item.kind)} transaction`}>{formatAddress(item.transactionHash)}</a>}
         </article>
       ))}
     </div>
@@ -55,7 +55,7 @@ export function ActivityList({ items, compact = false }: { items: ActivityRecord
 export function SetupCard() {
   return (
     <section className="setup-card">
-      <div><span className="eyebrow">Strategy vault</span><h2>Create your strategy vault</h2><p>Establish and fund your mainnet vault in one signed operation.</p></div>
+      <div><span className="eyebrow">Strategy vault</span><h2>Create your strategy vault</h2><p>Establish and fund your vault in one signed operation.</p></div>
       <Link className="button button-primary" href="/app/onboarding">Create vault</Link>
     </section>
   );

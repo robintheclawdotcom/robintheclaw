@@ -24,6 +24,7 @@ enabled = services.map { |service| service["name"] }
 required = %w[
   robintheclaw
   robin-research-collector
+  robin-paper-agent
   robin-api
   robin-execution-coordinator
   robin-lighter-signer
@@ -31,6 +32,33 @@ required = %w[
 ]
 required.each do |name|
   errors << "#{name}: service is missing" unless enabled.include?(name)
+end
+
+%w[robin-research-collector robin-paper-agent].each do |name|
+  service = services.find { |item| item["name"] == name }
+  errors << "#{name}: must be a background worker" unless service&.fetch("type", nil) == "worker"
+  database = service&.fetch("envVars", [])&.find { |variable| variable["key"] == "DATABASE_URL" }
+  migrations = service&.fetch("envVars", [])&.find do |variable|
+    variable["key"] == "DATABASE_MIGRATIONS_URL"
+  end
+  unless database&.dig("fromDatabase", "property") == "connectionPoolString"
+    errors << "#{name}: runtime database must use PgBouncer"
+  end
+  unless migrations&.dig("fromDatabase", "property") == "connectionString"
+    errors << "#{name}: migrations require a direct database connection"
+  end
+end
+
+collector = services.find { |service| service["name"] == "robin-research-collector" }
+collector_env = collector&.fetch("envVars", [])&.map { |variable| variable["key"] }.compact || []
+%w[ROBINHOOD_RPC_URL R2_BUCKET AWS_ENDPOINT_URL AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN].each do |key|
+  errors << "robin-research-collector: #{key} is missing" unless collector_env.include?(key)
+end
+
+paper_agent = services.find { |service| service["name"] == "robin-paper-agent" }
+paper_env = paper_agent&.fetch("envVars", [])&.map { |variable| variable["key"] }.compact || []
+%w[PAPER_AGENT_CONFIG PAPER_MINIMUM_NET_EDGE_PPM ROBINHOOD_RPC_URL].each do |key|
+  errors << "robin-paper-agent: #{key} is missing" unless paper_env.include?(key)
 end
 
 %w[robin-api robin-execution-coordinator robin-lighter-signer robin-robinhood-signer].each do |name|
