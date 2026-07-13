@@ -1,6 +1,7 @@
 use crate::api::error::ApiError;
 use crate::auth::require_user;
 use crate::evm::abi;
+use crate::lighter_provisioner::{ConfirmLink, PrepareLink};
 use crate::product::{
     ActivityPage, AgentCommandInput, AgentCreateInput, AgentStatusInput, Amount, ConfirmVaultInput,
     ConfirmedVault, DashboardSnapshot, LighterConfirmInput, LighterLinkRequestInput, MetricInput,
@@ -383,17 +384,53 @@ pub async fn lighter_link_request(
 ) -> Result<HttpResponse, ApiError> {
     let auth = require_user(&req, &state)?;
     ensure_database(&state)?;
+    if !state.lighter_provisioner.is_enabled() {
+        return Err(ApiError::ServiceUnavailable(
+            "Lighter provisioning is not enabled.".to_string(),
+        ));
+    }
+    if input.account_index <= 0 || input.nonce < 0 {
+        return Err(ApiError::BadRequest(
+            "Lighter account index or nonce is invalid.".to_string(),
+        ));
+    }
+    let agent_id = path.into_inner();
     let binding = state
         .product_store
-        .request_execution_binding(
-            &auth.did,
-            path.into_inner(),
-            "lighter",
-            &input.owner_address,
-        )
+        .request_execution_binding(&auth.did, agent_id, "lighter", &input.owner_address)
         .await
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    Ok(HttpResponse::Accepted().json(binding))
+    if binding.status != "provisioning" {
+        return Ok(HttpResponse::Ok().json(binding));
+    }
+    let account = state
+        .product_store
+        .execution_account(&auth.did, agent_id)
+        .await
+        .map_err(ApiError::internal)?;
+    let api_key_index = u8::try_from(state.config.lighter_api_key_index)
+        .ok()
+        .filter(|index| (2..=254).contains(index))
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable("Lighter API key policy is invalid.".to_string())
+        })?;
+    let link = state
+        .lighter_provisioner
+        .prepare(&PrepareLink {
+            execution_account_id: account.id,
+            owner_address: &binding.owner_address,
+            account_index: input.account_index,
+            api_key_index,
+            nonce: input.nonce,
+        })
+        .await
+        .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
+    let binding = state
+        .product_store
+        .apply_lighter_link(&auth.did, agent_id, binding.request_id, &link)
+        .await
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    Ok(HttpResponse::Created().json(binding))
 }
 
 pub async fn lighter_confirm(
@@ -404,36 +441,46 @@ pub async fn lighter_confirm(
 ) -> Result<HttpResponse, ApiError> {
     let auth = require_user(&req, &state)?;
     ensure_database(&state)?;
-    if input.account_index < 0 || !(2..=254).contains(&input.api_key_index) {
-        return Err(ApiError::BadRequest(
-            "Lighter account or API key index is invalid.".to_string(),
+    if !state.lighter_provisioner.is_enabled() {
+        return Err(ApiError::ServiceUnavailable(
+            "Lighter provisioning is not enabled.".to_string(),
         ));
     }
-    if !is_hex_identifier(&input.association_transaction_hash) {
-        return Err(ApiError::BadRequest(
-            "Lighter association transaction is invalid.".to_string(),
-        ));
-    }
-    let identifier = format!(
-        "account:{}:key:{}",
-        input.account_index, input.api_key_index
-    );
+    let agent_id = path.into_inner();
     let binding = state
         .product_store
-        .confirm_execution_binding(
-            &auth.did,
-            path.into_inner(),
-            &ExecutionBindingConfirmation {
-                venue: "lighter",
-                request_id: input.request_id,
-                owner_address: &input.owner_address,
-                public_identifier: &identifier,
-                proof_transaction_hash: &input.association_transaction_hash,
-            },
-        )
+        .execution_binding(&auth.did, agent_id, "lighter", input.request_id)
         .await
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    Ok(HttpResponse::Accepted().json(binding))
+    if binding.provider_request_id != Some(input.link_id) {
+        return Err(ApiError::Conflict(
+            "Lighter link does not match this binding request.".to_string(),
+        ));
+    }
+    let account = state
+        .product_store
+        .execution_account(&auth.did, agent_id)
+        .await
+        .map_err(ApiError::internal)?;
+    let link = state
+        .lighter_provisioner
+        .confirm(&ConfirmLink {
+            execution_account_id: account.id,
+            link_id: input.link_id,
+            l1_signature: &input.l1_signature,
+        })
+        .await
+        .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
+    let binding = state
+        .product_store
+        .apply_lighter_link(&auth.did, agent_id, input.request_id, &link)
+        .await
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    if binding.status == "linked" {
+        Ok(HttpResponse::Ok().json(binding))
+    } else {
+        Ok(HttpResponse::Accepted().json(binding))
+    }
 }
 
 pub async fn robinhood_prepare(

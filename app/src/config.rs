@@ -75,6 +75,12 @@ pub struct Config {
     pub test_claim_amount: String,
     pub alchemy_wallet_rpc_url: String,
     pub agent_strategy_version: String,
+    pub lighter_provisioner_url: String,
+    pub lighter_provisioner_caller_id: String,
+    pub lighter_provisioner_hmac_key: String,
+    pub lighter_api_key_index: u64,
+    pub readiness_caller_id: String,
+    pub readiness_hmac_key: String,
 }
 
 impl Config {
@@ -138,6 +144,12 @@ impl Config {
                 })
                 .unwrap_or_default(),
             agent_strategy_version: env_or("AGENT_STRATEGY_VERSION", "basis-paper-v1"),
+            lighter_provisioner_url: env_or("LIGHTER_PROVISIONER_URL", ""),
+            lighter_provisioner_caller_id: env_or("LIGHTER_PROVISIONER_CALLER_ID", "robin-api"),
+            lighter_provisioner_hmac_key: env_or("LIGHTER_PROVISIONER_HMAC_KEY", ""),
+            lighter_api_key_index: env_u64("LIGHTER_API_KEY_INDEX", 254),
+            readiness_caller_id: env_or("READINESS_CALLER_ID", ""),
+            readiness_hmac_key: env_or("READINESS_HMAC_KEY", ""),
         }
     }
 

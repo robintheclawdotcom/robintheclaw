@@ -36,4 +36,24 @@ describe("mainnet agent API", () => {
       body: JSON.stringify({ command: "pause" }),
     }));
   });
+
+  it("reuses the idempotency key while a command is pending", async () => {
+    const fetch = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+        id: "command-id",
+        command: "pause",
+        status: "pending",
+      }), {
+        status: 202,
+        headers: { "Content-Type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetch);
+    const api = new AppApi(async () => null);
+
+    await api.agentCommand("agent-id", "pause");
+    await api.agentCommand("agent-id", "pause");
+
+    const first = fetch.mock.calls[0][1]?.headers as Record<string, string>;
+    const second = fetch.mock.calls[1][1]?.headers as Record<string, string>;
+    expect(first["Idempotency-Key"]).toBe(second["Idempotency-Key"]);
+  });
 });

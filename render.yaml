@@ -1,4 +1,12 @@
 envVarGroups:
+  - name: robin-lighter-provisioner-auth
+    envVars:
+      - key: LIGHTER_PROVISIONER_HMAC_KEY
+        sync: false
+  - name: robin-readiness-publisher-auth
+    envVars:
+      - key: READINESS_HMAC_KEY
+        sync: false
   - name: robin-lighter-signer-auth
     envVars:
       - key: LIGHTER_SIGNER_HMAC_KEY
@@ -93,6 +101,19 @@ services:
         value: "46630"
       - key: AGENT_STRATEGY_VERSION
         value: basis-paper-v1
+      - key: LIGHTER_PROVISIONER_URL
+        fromService:
+          name: robin-lighter-provisioner
+          type: pserv
+          property: hostport
+      - key: LIGHTER_PROVISIONER_CALLER_ID
+        value: robin-api
+      - key: LIGHTER_API_KEY_INDEX
+        value: "254"
+      - fromGroup: robin-lighter-provisioner-auth
+      - fromGroup: robin-readiness-publisher-auth
+      - key: READINESS_CALLER_ID
+        value: readiness-publisher
       - key: APP_RPC_URL
         sync: false
       - key: PRODUCT_INDEXER_LOOKBACK_BLOCKS
@@ -261,6 +282,45 @@ services:
         value: info
 
   - type: pserv
+    name: robin-lighter-provisioner
+    runtime: go
+    plan: starter
+    region: virginia
+    buildCommand: cd provisioner/lighter && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/lighter-provisioner .
+    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./provisioner/lighter/bin/lighter-provisioner
+    healthCheckPath: /livez
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    buildFilter:
+      paths:
+        - provisioner/lighter/**
+        - render.yaml
+    envVars:
+      - key: LIGHTER_PROVISIONER_ENABLED
+        value: "false"
+      - key: GO_VERSION
+        value: "1.26.5"
+      - key: LIGHTER_PROVISIONER_DATABASE_URL
+        fromDatabase:
+          name: robin-lighter-credentials
+          property: connectionString
+      - fromGroup: robin-lighter-provisioner-auth
+      - key: PROVISIONER_CALLER_ID
+        value: robin-api
+      - key: LIGHTER_API_URL
+        value: https://mainnet.zklighter.elliot.ai
+      - key: LIGHTER_CHAIN_ID
+        value: "304"
+      - key: AWS_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_KMS_KEY_ID
+        sync: false
+
+  - type: pserv
     name: robin-lighter-signer
     runtime: go
     plan: starter
@@ -391,6 +451,17 @@ databases:
     postgresMajorVersion: "18"
     region: virginia
     connectionPool: pgbouncer
+    highAvailability:
+      enabled: true
+    ipAllowList: []
+  - name: robin-lighter-credentials
+    databaseName: robin_lighter_credentials
+    user: robin_lighter_provisioner
+    plan: pro-4gb
+    diskSizeGB: 100
+    storageAutoscalingEnabled: true
+    postgresMajorVersion: "18"
+    region: virginia
     highAvailability:
       enabled: true
     ipAllowList: []

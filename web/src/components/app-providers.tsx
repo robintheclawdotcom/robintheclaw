@@ -47,6 +47,7 @@ type AuthContextValue = {
   linkEmail: () => void;
   linkPasskey: () => void;
   getAccessToken: () => Promise<string | null>;
+  signMessage: (message: string, signerAddress?: string) => Promise<Hex>;
 };
 
 type SmartWalletContextValue = {
@@ -215,6 +216,15 @@ function LiveSession({ children }: { children: React.ReactNode }) {
     }
   }, [embeddedWallet, wallets]);
 
+  const signMessage = useCallback(async (message: string, signerAddress?: string) => {
+    const wallet = signerAddress
+      ? wallets.find((candidate) => candidate.address.toLowerCase() === signerAddress.toLowerCase())
+      : embeddedWallet;
+    if (!wallet) throw new Error("The selected wallet is not connected in this browser.");
+    const signer = await toViemAccount({ wallet });
+    return signer.signMessage({ message });
+  }, [embeddedWallet, wallets]);
+
   const auth = useMemo<AuthContextValue>(() => ({
     configured: true,
     ready: privy.ready && walletsReady,
@@ -230,7 +240,8 @@ function LiveSession({ children }: { children: React.ReactNode }) {
     linkEmail: () => privy.linkEmail(),
     linkPasskey: () => privy.linkPasskey({ name: "Robin recovery" }),
     getAccessToken,
-  }), [accounts, embeddedWallet?.address, getAccessToken, hasRecovery, privy, walletsReady]);
+    signMessage,
+  }), [accounts, embeddedWallet?.address, getAccessToken, hasRecovery, privy, signMessage, walletsReady]);
 
   return (
     <SessionContexts auth={auth} smartWallet={{ pending, gasStatus, refreshGasStatus, executeCalls }}>
@@ -268,6 +279,7 @@ function MockSession({ children }: { children: React.ReactNode }) {
     linkEmail: () => undefined,
     linkPasskey: () => undefined,
     getAccessToken: async () => "test-access-token",
+    signMessage: async () => `0x${"11".repeat(65)}`,
   }), [accounts, authenticated]);
   const smartWallet = useMemo<SmartWalletContextValue>(() => ({
     pending: false,
@@ -298,6 +310,7 @@ function UnconfiguredSession({ children }: { children: React.ReactNode }) {
     linkEmail: () => undefined,
     linkPasskey: () => undefined,
     getAccessToken: async () => null,
+    signMessage: async () => { throw new Error("Wallet signing is not configured."); },
   }), []);
   const smartWallet = useMemo<SmartWalletContextValue>(() => ({
     pending: false,

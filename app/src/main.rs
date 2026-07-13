@@ -11,9 +11,11 @@ use app::auth::AuthService;
 use app::config::Config;
 use app::event_bus::EventBus;
 use app::evm::{EvmIndexer, EvmRpc};
+use app::lighter_provisioner::LighterProvisioner;
 use app::orchestrator;
 use app::privy::PrivyClient;
 use app::product_store::ProductStore;
+use app::service_auth::ServiceAuth;
 use app::state::AppState;
 use app::store::Store;
 use app::ws::WsHub;
@@ -49,6 +51,18 @@ async fn main() -> std::io::Result<()> {
         config.privy_verification_key.clone(),
     );
     let privy = PrivyClient::new(config.privy_app_id.clone(), config.privy_app_secret.clone());
+    let lighter_provisioner = LighterProvisioner::new(
+        &config.lighter_provisioner_url,
+        &config.lighter_provisioner_caller_id,
+        &config.lighter_provisioner_hmac_key,
+    )
+    .map_err(|error| {
+        std::io::Error::other(format!("Lighter provisioner configuration failed: {error}"))
+    })?;
+    let readiness_auth = ServiceAuth::new(&config.readiness_caller_id, &config.readiness_hmac_key)
+        .map_err(|error| {
+            std::io::Error::other(format!("readiness publisher configuration failed: {error}"))
+        })?;
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -62,6 +76,8 @@ async fn main() -> std::io::Result<()> {
         product_store,
         auth,
         privy,
+        lighter_provisioner,
+        readiness_auth,
     });
 
     orchestrator::spawn_background_services(state.clone());

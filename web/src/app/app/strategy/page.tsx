@@ -14,12 +14,18 @@ export default function StrategyPage() {
   if (query.error || !query.data) return <ErrorNotice error={query.error} retry={() => void query.refetch()} />;
   const dashboard = query.data;
   const vault = dashboard.vault;
+  const isLive = dashboard.agent?.mode === "live";
 
   return (
     <>
       <PageHeader eyebrow="Strategy" title="Strategy controls" description="Manage your agent, mandate, capital, and positions." action={<AgentButton dashboard={dashboard} />} />
       <MainnetReadinessPanel dashboard={dashboard} />
-      {!vault ? <SetupCard /> : (
+      {isLive ? (
+        <section className="panel">
+          <div className="panel-heading"><div><span className="eyebrow">Robinhood Chain mainnet</span><h2>Isolated custody setup</h2></div></div>
+          <p>Mainnet funding controls appear only after the canonical user vault is deployed and independently verified. The testnet vault controls are intentionally hidden for live agents.</p>
+        </section>
+      ) : !vault ? <SetupCard /> : (
         <>
           <div className="strategy-layout">
             <section className="panel">

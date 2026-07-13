@@ -2,8 +2,10 @@ use crate::auth::AuthService;
 use crate::config::Config;
 use crate::event_bus::EventBus;
 use crate::evm::{EvmIndexer, EvmRpc};
+use crate::lighter_provisioner::LighterProvisioner;
 use crate::privy::PrivyClient;
 use crate::product_store::ProductStore;
+use crate::service_auth::ServiceAuth;
 use crate::store::Store;
 use crate::ws::WsHub;
 use std::sync::Arc;
@@ -21,4 +23,6 @@ pub struct AppState {
     pub product_store: ProductStore,
     pub auth: AuthService,
     pub privy: PrivyClient,
+    pub lighter_provisioner: LighterProvisioner,
+    pub readiness_auth: ServiceAuth,
 }

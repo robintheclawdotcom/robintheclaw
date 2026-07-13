@@ -179,11 +179,14 @@ pub struct AgentRecord {
 }
 
 pub const LIVE_STRATEGY_VERSION: &str = "basis-aapl-v1";
+pub const LIVE_STRATEGY_MANIFEST_SHA256: &str =
+    "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCreateInput {
     pub strategy_version: String,
+    pub strategy_manifest_sha256: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -213,8 +216,12 @@ pub struct ExecutionAccountRecord {
 pub struct ExecutionBindingRecord {
     pub binding_ref: Uuid,
     pub request_id: Uuid,
+    pub provider_request_id: Option<Uuid>,
     pub venue: String,
     pub owner_address: String,
+    pub lighter_account_index: Option<i64>,
+    pub lighter_api_key_index: Option<i16>,
+    pub robinhood_vault_address: Option<String>,
     pub public_identifier: Option<String>,
     pub public_key: Option<String>,
     pub association_payload: Option<String>,
@@ -236,6 +243,7 @@ pub struct AgentReadiness {
     pub execution_gas_ready: bool,
     pub policy_active: bool,
     pub reconciled: bool,
+    pub valid_until: Option<DateTime<Utc>>,
     #[sqlx(skip)]
     pub can_launch: bool,
     #[sqlx(skip)]
@@ -259,6 +267,13 @@ impl AgentReadiness {
             .filter(|(ready, _)| !ready)
             .map(|(_, blocker)| blocker.to_string())
             .collect();
+        if self
+            .valid_until
+            .is_none_or(|deadline| deadline <= Utc::now())
+            && self.blockers.is_empty()
+        {
+            self.blockers.push("readiness_evidence_expired".to_string());
+        }
         self.can_launch = self.blockers.is_empty();
         self
     }
@@ -268,16 +283,16 @@ impl AgentReadiness {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LighterLinkRequestInput {
     pub owner_address: String,
+    pub account_index: i64,
+    pub nonce: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LighterConfirmInput {
     pub request_id: Uuid,
-    pub owner_address: String,
-    pub account_index: i64,
-    pub api_key_index: i64,
-    pub association_transaction_hash: String,
+    pub link_id: Uuid,
+    pub l1_signature: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -305,9 +320,31 @@ pub struct AgentCommandRecord {
     pub command: String,
     pub status: String,
     pub agent_status: String,
+    pub target_agent_status: String,
     pub error_reason: Option<String>,
+    pub result_evidence_digest: Option<String>,
+    pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct AgentCommandWorkItem {
+    pub id: Uuid,
+    pub agent_id: Uuid,
+    pub execution_account_id: Uuid,
+    pub command: String,
+    pub agent_status: String,
+    pub target_agent_status: String,
+}
+
+pub struct ReadinessEvidenceInput<'a> {
+    pub check_name: &'a str,
+    pub ready: bool,
+    pub source: &'a str,
+    pub evidence_digest: &'a str,
+    pub observed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }
 
 pub fn command_transition(
@@ -318,10 +355,10 @@ pub fn command_transition(
 ) -> Result<&'static str, &'static str> {
     match (status, command) {
         ("ready", "launch") if ready => Ok("running"),
-        ("running", "pause") => Ok("reducing"),
+        ("running", "pause") => Ok("paused"),
         ("paused", "resume") if ready => Ok("running"),
         ("closed", "close") => Ok("closed"),
-        ("closing", "close") => Ok("closing"),
+        ("closing", "close") => Ok("closed"),
         (
             "setup"
             | "provisioning"
@@ -333,7 +370,7 @@ pub fn command_transition(
             | "paused"
             | "blocked",
             "close",
-        ) => Ok("closing"),
+        ) => Ok("closed"),
         ("closed", "withdraw") if reconciled => Ok("closed"),
         ("ready", "launch") | ("paused", "resume") => Err("agent_not_ready"),
         ("closed", "withdraw") => Err("accounts_not_reconciled"),
@@ -366,6 +403,7 @@ mod agent_tests {
             execution_gas_ready: false,
             policy_active: true,
             reconciled: true,
+            valid_until: Some(Utc::now()),
             can_launch: false,
             blockers: Vec::new(),
         }
@@ -382,7 +420,7 @@ mod agent_tests {
         );
         assert_eq!(
             command_transition("running", "pause", true, true),
-            Ok("reducing")
+            Ok("paused")
         );
         assert_eq!(
             command_transition("ready", "launch", false, true),
@@ -398,6 +436,8 @@ mod agent_tests {
     fn lighter_link_request_rejects_secret_fields() {
         let payload = serde_json::json!({
             "ownerAddress": "0x1111111111111111111111111111111111111111",
+            "accountIndex": 7,
+            "nonce": 0,
             "ethereumPrivateKey": "never-accepted"
         });
         assert!(serde_json::from_value::<LighterLinkRequestInput>(payload).is_err());

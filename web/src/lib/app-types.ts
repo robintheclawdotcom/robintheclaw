@@ -129,6 +129,7 @@ export type ExecutionAccountRecord = {
   id: string;
   agentId: string;
   strategyVersion: "basis-aapl-v1";
+  strategyManifestSha256: string;
   chainId: 4663;
   status: "provisioning" | "awaiting_signatures" | "awaiting_funding" | "ready" | "blocked" | "closed";
   createdAt: string;
@@ -138,8 +139,12 @@ export type ExecutionAccountRecord = {
 export type ExecutionBindingRecord = {
   bindingRef: string;
   requestId: string;
+  providerRequestId: string | null;
   venue: "lighter" | "robinhood";
   ownerAddress: string;
+  lighterAccountIndex: number | null;
+  lighterApiKeyIndex: number | null;
+  robinhoodVaultAddress: string | null;
   publicIdentifier: string | null;
   publicKey: string | null;
   associationPayload: string | null;
@@ -159,6 +164,7 @@ export type AgentReadiness = {
   executionGasReady: boolean;
   policyActive: boolean;
   reconciled: boolean;
+  validUntil: string | null;
   canLaunch: boolean;
   blockers: string[];
 };
@@ -171,9 +177,12 @@ export type AgentCommandRecord = {
   executionAccountId: string;
   idempotencyKey: string;
   command: AgentCommand;
-  status: "accepted" | "completed" | "rejected";
+  status: "pending" | "processing" | "awaiting_signature" | "completed" | "rejected" | "failed";
   agentStatus: AgentStatus;
+  targetAgentStatus: AgentStatus;
   errorReason: string | null;
+  resultEvidenceDigest: string | null;
+  completedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };

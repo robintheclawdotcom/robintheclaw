@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import type { AgentStatus, DashboardSnapshot } from "../lib/app-types";
+import type { AgentStatus, DashboardSnapshot, ExecutionBindingRecord } from "../lib/app-types";
 import { agentAction, agentStatusLabel } from "../lib/agent-lifecycle";
 import { depositCalls, mandateCall, parseTokenAmount, withdrawalCall } from "../lib/strategy-calls";
 import { formatAddress } from "../lib/format";
@@ -45,6 +45,14 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
   const auth = useRobinAuth();
   const queryClient = useQueryClient();
   const agent = dashboard.agent;
+  const [lighterBinding, setLighterBinding] = useState<ExecutionBindingRecord | null>(null);
+  const [robinhoodBinding, setRobinhoodBinding] = useState<ExecutionBindingRecord | null>(null);
+  const [lighterAccountIndex, setLighterAccountIndex] = useState("");
+  const [lighterNonce, setLighterNonce] = useState("0");
+  const [lighterOwner, setLighterOwner] = useState<string>(auth.embeddedAddress ?? auth.accounts[0]?.address ?? "");
+  useEffect(() => {
+    if (!lighterOwner && auth.accounts.length) setLighterOwner(auth.accounts[0].address);
+  }, [auth.accounts, lighterOwner]);
   const hasAccount = agent?.mode === "live" && agent.status !== "setup";
   const readiness = useQuery({
     queryKey: ["agent-readiness", agent?.id],
@@ -54,17 +62,45 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
   });
   const lighter = useMutation({
     mutationFn: () => {
-      if (!agent || !auth.embeddedAddress) throw new Error("Link an execution wallet first.");
-      return api.requestLighterLink(agent.id, auth.embeddedAddress);
+      if (!agent || !lighterOwner) throw new Error("Link an execution wallet first.");
+      const accountIndex = Number(lighterAccountIndex);
+      const nonce = Number(lighterNonce);
+      if (!Number.isSafeInteger(accountIndex) || accountIndex <= 0) throw new Error("Enter the new Lighter subaccount index.");
+      if (!Number.isSafeInteger(nonce) || nonce < 0) throw new Error("Enter the current Lighter change nonce.");
+      return api.requestLighterLink(agent.id, lighterOwner, accountIndex, nonce);
     },
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+    onSuccess: (binding) => {
+      setLighterBinding(binding);
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+  });
+  const lighterConfirm = useMutation({
+    mutationFn: async () => {
+      if (!agent || !lighterBinding?.providerRequestId || !lighterBinding.associationPayload) {
+        throw new Error("The Lighter association payload is not ready.");
+      }
+      const signature = await auth.signMessage(lighterBinding.associationPayload, lighterBinding.ownerAddress);
+      return api.confirmLighterLink(agent.id, {
+        requestId: lighterBinding.requestId,
+        linkId: lighterBinding.providerRequestId,
+        l1Signature: signature,
+      });
+    },
+    onSuccess: (binding) => {
+      setLighterBinding(binding);
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      void queryClient.invalidateQueries({ queryKey: ["agent-readiness"] });
+    },
   });
   const robinhood = useMutation({
     mutationFn: () => {
       if (!agent) throw new Error("Create the agent first.");
       return api.prepareRobinhood(agent.id);
     },
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+    onSuccess: (binding) => {
+      setRobinhoodBinding(binding);
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
   });
   const lifecycle = useMutation({
     mutationFn: (command: "close" | "withdraw") => {
@@ -105,15 +141,25 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
       {agent.status === "setup" ? (
         <small>Set up the execution account before linking venues or funding capital.</small>
       ) : (
-        <div className="button-row">
-          <button className="button button-secondary" disabled={lighter.isPending} onClick={() => lighter.mutate()}>{lighter.isPending ? "Preparing…" : "Prepare Lighter link"}</button>
-          <button className="button button-secondary" disabled={robinhood.isPending} onClick={() => robinhood.mutate()}>{robinhood.isPending ? "Preparing…" : "Prepare Robinhood vault"}</button>
-          {!matchesTerminal(agent.status) && <button className="button button-quiet danger" disabled={lifecycle.isPending} onClick={() => lifecycle.mutate("close")}>Close agent</button>}
-          {agent.status === "closed" && <button className="button button-secondary" disabled={lifecycle.isPending || !state?.reconciled} onClick={() => lifecycle.mutate("withdraw")}>Withdraw capital</button>}
-        </div>
+        <>
+          <div className="button-row">
+            <label>Lighter owner<select value={lighterOwner} onChange={(event) => setLighterOwner(event.target.value)}>{auth.accounts.map((account) => <option key={account.address} value={account.address}>{account.label}</option>)}</select></label>
+            <label>Lighter subaccount index<input inputMode="numeric" value={lighterAccountIndex} onChange={(event) => setLighterAccountIndex(event.target.value)} /></label>
+            <label>Lighter change nonce<input inputMode="numeric" value={lighterNonce} onChange={(event) => setLighterNonce(event.target.value)} /></label>
+          </div>
+          <div className="button-row">
+            <button className="button button-secondary" disabled={lighter.isPending} onClick={() => lighter.mutate()}>{lighter.isPending ? "Requesting…" : "Request Lighter provisioning"}</button>
+            {lighterBinding?.status === "awaiting_signature" && <button className="button button-primary" disabled={lighterConfirm.isPending} onClick={() => lighterConfirm.mutate()}>{lighterConfirm.isPending ? "Verifying…" : "Sign Lighter association"}</button>}
+            <button className="button button-secondary" disabled={robinhood.isPending} onClick={() => robinhood.mutate()}>{robinhood.isPending ? "Preparing…" : "Prepare Robinhood deployment"}</button>
+            {!matchesTerminal(agent.status) && <button className="button button-quiet danger" disabled={lifecycle.isPending} onClick={() => lifecycle.mutate("close")}>Request close</button>}
+            {agent.status === "closed" && <button className="button button-secondary" disabled={lifecycle.isPending || !state?.reconciled} onClick={() => lifecycle.mutate("withdraw")}>Prepare owner withdrawal</button>}
+          </div>
+        </>
       )}
-      <small>The product API stores only public binding references. Wallet private keys and secret Lighter API keys are never accepted here. Submitted proofs remain blocked until independently verified.</small>
-      {(readiness.error || lighter.error || robinhood.error || lifecycle.error) && <ErrorNotice error={readiness.error ?? lighter.error ?? robinhood.error ?? lifecycle.error} />}
+      {lighterBinding && <small>Lighter request {lighterBinding.requestId}: {lighterBinding.status}. The user-owned L1 wallet must sign the association payload before verification can complete.</small>}
+      {robinhoodBinding && <small>Robinhood request {robinhoodBinding.requestId}: {robinhoodBinding.status}. Deployment and deposit remain owner-controlled transactions.</small>}
+      <small>The product API stores only public binding references. Wallet private keys and secret Lighter API keys are never accepted here. Commands stay pending until execution and reconciliation services return evidence. Withdrawals require an owner signature.</small>
+      {(readiness.error || lighter.error || lighterConfirm.error || robinhood.error || lifecycle.error) && <ErrorNotice error={readiness.error ?? lighter.error ?? lighterConfirm.error ?? robinhood.error ?? lifecycle.error} />}
     </section>
   );
 }

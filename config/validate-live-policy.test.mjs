@@ -7,7 +7,12 @@ import { validateLivePolicy } from "./validate-live-policy.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const strategyDir = join(root, "config", "strategies");
-const executionFlags = ["COORDINATOR_ENABLED", "LIGHTER_SIGNER_ENABLED", "ROBINHOOD_SIGNER_ENABLED"];
+const executionFlags = [
+  "COORDINATOR_ENABLED",
+  "LIGHTER_PROVISIONER_ENABLED",
+  "LIGHTER_SIGNER_ENABLED",
+  "ROBINHOOD_SIGNER_ENABLED",
+];
 
 function fixture() {
   return {
@@ -15,6 +20,7 @@ function fixture() {
     paper: JSON.parse(readFileSync(join(root, "runtime", "config", "mainnet-paper.json"), "utf8")),
     render: readFileSync(join(root, "render.yaml"), "utf8"),
     personalVault: readFileSync(join(root, "contracts", "src", "PersonalStrategyVault.sol"), "utf8"),
+    appProduct: readFileSync(join(root, "app", "src", "product.rs"), "utf8"),
     strategyManifest: JSON.parse(readFileSync(join(strategyDir, "basis-aapl-v1.manifest.json"), "utf8")),
     strategyArtifacts: {
       sourceConfig: readFileSync(join(root, "runtime", "config", "mainnet-paper.json")),
@@ -147,6 +153,15 @@ test("rejects policy and manifest checksum mismatch", () => {
   const input = fixture();
   input.policy.strategyManifestSha256 = "0".repeat(64);
   assert.throws(() => validateLivePolicy(input), /manifest checksum does not match/);
+});
+
+test("rejects an application account manifest mismatch", () => {
+  const input = fixture();
+  input.appProduct = input.appProduct.replace(
+    input.strategyManifest.sha256,
+    "0".repeat(64),
+  );
+  assert.throws(() => validateLivePolicy(input), /application execution accounts/);
 });
 
 test("rejects a tampered manifest even if the policy checksum is also changed", () => {

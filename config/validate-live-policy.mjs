@@ -110,6 +110,7 @@ export function validateLivePolicy({
   paper,
   render,
   personalVault,
+  appProduct,
   strategyManifest,
   strategyArtifacts,
 }) {
@@ -128,6 +129,12 @@ export function validateLivePolicy({
   }
   if (policy.strategyManifestSha256 !== strategyManifest.sha256) {
     fail("strategy manifest checksum does not match the activation policy");
+  }
+  const appManifest = appProduct.match(
+    /LIVE_STRATEGY_MANIFEST_SHA256:\s*&str\s*=\s*\n?\s*"([0-9a-f]{64})"/,
+  );
+  if (!appManifest || appManifest[1] !== strategyManifest.sha256) {
+    fail("application execution accounts are not bound to the strategy manifest");
   }
   if (typeof policy.executionEnabled !== "boolean" || typeof policy.capitalActivationAllowed !== "boolean") {
     fail("activation flags must be boolean");
@@ -175,7 +182,12 @@ export function validateLivePolicy({
     fail("generic personal vault is no longer locked to testnet");
   }
 
-  for (const flag of ["COORDINATOR_ENABLED", "LIGHTER_SIGNER_ENABLED", "ROBINHOOD_SIGNER_ENABLED"]) {
+  for (const flag of [
+    "COORDINATOR_ENABLED",
+    "LIGHTER_PROVISIONER_ENABLED",
+    "LIGHTER_SIGNER_ENABLED",
+    "ROBINHOOD_SIGNER_ENABLED",
+  ]) {
     const pattern = new RegExp(`key:\\s*${flag}\\s*\\n\\s*value:\\s*["']?(true|false)["']?`, "g");
     const matches = [...render.matchAll(pattern)];
     if (matches.length !== 1) fail(`${flag} must be declared exactly once`);
@@ -261,6 +273,7 @@ function readInputs() {
     paper: JSON.parse(readFileSync(join(root, "runtime", "config", "mainnet-paper.json"), "utf8")),
     render: readFileSync(join(root, "render.yaml"), "utf8"),
     personalVault: readFileSync(join(root, "contracts", "src", "PersonalStrategyVault.sol"), "utf8"),
+    appProduct: readFileSync(join(root, "app", "src", "product.rs"), "utf8"),
     strategyManifest: JSON.parse(readFileSync(join(strategyDir, "basis-aapl-v1.manifest.json"), "utf8")),
     strategyArtifacts: {
       sourceConfig: readFileSync(join(root, "runtime", "config", "mainnet-paper.json")),

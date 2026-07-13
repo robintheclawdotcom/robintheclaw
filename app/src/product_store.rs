@@ -1,11 +1,13 @@
+use crate::lighter_provisioner::PublicLink;
 use crate::product::{
-    command_transition, ActivityPage, ActivityRecord, AgentCommandRecord, AgentReadiness,
-    AgentRecord, AgentSnapshot, ConfirmedVault, ExecutionAccountRecord, ExecutionBindingRecord,
-    IdentitySnapshot, MeResponse, PreferencesInput, PreferencesRecord, SmartAccountRecord,
-    UserRecord, VaultRecord, WalletRecord, LIVE_STRATEGY_VERSION,
+    command_transition, ActivityPage, ActivityRecord, AgentCommandRecord, AgentCommandWorkItem,
+    AgentReadiness, AgentRecord, AgentSnapshot, ConfirmedVault, ExecutionAccountRecord,
+    ExecutionBindingRecord, IdentitySnapshot, MeResponse, PreferencesInput, PreferencesRecord,
+    ReadinessEvidenceInput, SmartAccountRecord, UserRecord, VaultRecord, WalletRecord,
+    LIVE_STRATEGY_MANIFEST_SHA256, LIVE_STRATEGY_VERSION,
 };
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sha3::{Digest, Keccak256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -525,16 +527,19 @@ impl ProductStore {
         let account = sqlx::query_as::<_, ExecutionAccountRecord>(
             r#"
             INSERT INTO execution_accounts (
-                id, user_id, agent_id, strategy_version, chain_id, status
-            ) VALUES ($1, $2, $3, $4, 4663, 'provisioning')
+                id, user_id, agent_id, strategy_version, strategy_manifest_sha256,
+                chain_id, status
+            ) VALUES ($1, $2, $3, $4, $5, 4663, 'provisioning')
             ON CONFLICT (agent_id) DO UPDATE SET updated_at = execution_accounts.updated_at
-            RETURNING id, agent_id, strategy_version, chain_id, status, created_at, updated_at
+            RETURNING id, agent_id, strategy_version, strategy_manifest_sha256,
+                chain_id, status, created_at, updated_at
             "#,
         )
         .bind(Uuid::new_v4())
         .bind(user.id)
         .bind(agent_id)
         .bind(LIVE_STRATEGY_VERSION)
+        .bind(LIVE_STRATEGY_MANIFEST_SHA256)
         .fetch_one(&mut *tx)
         .await?;
         let inserted = sqlx::query(
@@ -547,19 +552,34 @@ impl ProductStore {
         .execute(&mut *tx)
         .await?;
         if inserted.rows_affected() == 1 {
-            sqlx::query(
-                r#"
-                INSERT INTO agent_readiness_snapshots (
-                    id, execution_account_id, lighter_linked, lighter_funded,
-                    robinhood_deployed, robinhood_funded, user_gas_ready,
-                    execution_gas_ready, policy_active, reconciled
-                ) VALUES ($1, $2, false, false, false, false, false, false, false, false)
-                "#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(account.id)
-            .execute(&mut *tx)
-            .await?;
+            let readiness_snapshot_id = Uuid::new_v4();
+            for check_name in [
+                "lighter_linked",
+                "lighter_funded",
+                "robinhood_deployed",
+                "robinhood_funded",
+                "user_gas_ready",
+                "execution_gas_ready",
+                "policy_active",
+                "reconciled",
+            ] {
+                sqlx::query(
+                    r#"
+                    INSERT INTO agent_readiness_evidence (
+                        id, execution_account_id, snapshot_id, check_name, ready, source,
+                        evidence_digest, observed_at, expires_at
+                    ) VALUES ($1, $2, $3, $4, false, 'account-bootstrap', $5, now(), now() + interval '1 second')
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(account.id)
+                .bind(readiness_snapshot_id)
+                .bind(check_name)
+                .bind("0".repeat(64))
+                .execute(&mut *tx)
+                .await?;
+            }
+            insert_readiness_snapshot(&mut tx, account.id).await?;
         }
         sqlx::query(
             r#"
@@ -582,7 +602,8 @@ impl ProductStore {
         let user = self.ensure_user(did).await?;
         sqlx::query_as::<_, ExecutionAccountRecord>(
             r#"
-            SELECT id, agent_id, strategy_version, chain_id, status, created_at, updated_at
+            SELECT id, agent_id, strategy_version, strategy_manifest_sha256,
+                chain_id, status, created_at, updated_at
             FROM execution_accounts WHERE agent_id = $1 AND user_id = $2
             "#,
         )
@@ -631,8 +652,9 @@ impl ProductStore {
             ) VALUES ($1, $2, $3, $4, $5, $6, 'provisioning')
             ON CONFLICT (execution_account_id, venue) DO UPDATE SET
                 updated_at = execution_account_bindings.updated_at
-            RETURNING binding_ref, request_id, venue, owner_address, public_identifier,
-                public_key, association_payload, proof_transaction_hash, status,
+            RETURNING binding_ref, request_id, provider_request_id, venue, owner_address,
+                lighter_account_index, lighter_api_key_index, robinhood_vault_address,
+                public_identifier, public_key, association_payload, proof_transaction_hash, status,
                 created_at, updated_at
             "#,
         )
@@ -668,6 +690,7 @@ impl ProductStore {
             r#"
             UPDATE execution_account_bindings SET
                 public_identifier = $5,
+                robinhood_vault_address = CASE WHEN $2 = 'robinhood' THEN $5 ELSE robinhood_vault_address END,
                 proof_transaction_hash = $6,
                 status = 'verifying',
                 updated_at = now()
@@ -677,8 +700,9 @@ impl ProductStore {
                   status IN ('provisioning', 'awaiting_signature')
                   OR (status = 'verifying' AND public_identifier = $5 AND proof_transaction_hash = $6)
               )
-            RETURNING binding_ref, request_id, venue, owner_address, public_identifier,
-                public_key, association_payload, proof_transaction_hash, status,
+            RETURNING binding_ref, request_id, provider_request_id, venue, owner_address,
+                lighter_account_index, lighter_api_key_index, robinhood_vault_address,
+                public_identifier, public_key, association_payload, proof_transaction_hash, status,
                 created_at, updated_at
             "#,
         )
@@ -693,14 +717,113 @@ impl ProductStore {
         .ok_or_else(|| anyhow!("binding request not found or cannot be confirmed"))
     }
 
+    pub async fn apply_lighter_link(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+        request_id: Uuid,
+        link: &PublicLink,
+    ) -> Result<ExecutionBindingRecord> {
+        let account = self.execution_account(did, agent_id).await?;
+        if account.id != link.execution_account_id {
+            return Err(anyhow!(
+                "Lighter provisioner returned a different execution account"
+            ));
+        }
+        let owner = normalize_address(&link.owner_address)?;
+        if link.account_index <= 0 || !(2..=254).contains(&link.api_key_index) {
+            return Err(anyhow!(
+                "Lighter provisioner returned an invalid account binding"
+            ));
+        }
+        let status = match link.status.as_str() {
+            "generating" | "pending" => "awaiting_signature",
+            "verifying" => "verifying",
+            "linked" => "linked",
+            "superseded" | "blocked" => "rejected",
+            _ => return Err(anyhow!("Lighter provisioner returned an unknown status")),
+        };
+        if matches!(status, "awaiting_signature" | "verifying" | "linked")
+            && link.public_key.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(anyhow!("Lighter provisioner omitted the public key"));
+        }
+        let public_identifier =
+            format!("account:{}:key:{}", link.account_index, link.api_key_index);
+        sqlx::query_as::<_, ExecutionBindingRecord>(
+            r#"
+            UPDATE execution_account_bindings SET
+                provider_request_id = $4,
+                lighter_account_index = $5,
+                lighter_api_key_index = $6,
+                public_identifier = $7,
+                public_key = $8,
+                association_payload = coalesce($9, association_payload),
+                proof_transaction_hash = coalesce($10, proof_transaction_hash),
+                status = $11,
+                updated_at = now()
+            WHERE execution_account_id = $1 AND venue = 'lighter' AND request_id = $2
+              AND owner_address = $3
+              AND (provider_request_id IS NULL OR provider_request_id = $4)
+              AND (lighter_account_index IS NULL OR lighter_account_index = $5)
+              AND (lighter_api_key_index IS NULL OR lighter_api_key_index = $6)
+              AND (public_key IS NULL OR lower(public_key) = lower($8))
+            RETURNING binding_ref, request_id, provider_request_id, venue, owner_address,
+                lighter_account_index, lighter_api_key_index, robinhood_vault_address,
+                public_identifier, public_key, association_payload, proof_transaction_hash, status,
+                created_at, updated_at
+            "#,
+        )
+        .bind(account.id)
+        .bind(request_id)
+        .bind(owner)
+        .bind(link.link_id)
+        .bind(link.account_index)
+        .bind(i16::from(link.api_key_index))
+        .bind(public_identifier)
+        .bind(link.public_key.as_deref())
+        .bind(link.message_to_sign.as_deref())
+        .bind(link.transaction_hash.as_deref())
+        .bind(status)
+        .fetch_optional(self.pool()?)
+        .await?
+        .ok_or_else(|| anyhow!("Lighter binding does not match its provisioned account"))
+    }
+
+    pub async fn execution_binding(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+        venue: &str,
+        request_id: Uuid,
+    ) -> Result<ExecutionBindingRecord> {
+        let account = self.execution_account(did, agent_id).await?;
+        sqlx::query_as::<_, ExecutionBindingRecord>(
+            r#"
+            SELECT binding_ref, request_id, provider_request_id, venue, owner_address,
+                lighter_account_index, lighter_api_key_index, robinhood_vault_address,
+                public_identifier, public_key, association_payload, proof_transaction_hash, status,
+                created_at, updated_at
+            FROM execution_account_bindings
+            WHERE execution_account_id = $1 AND venue = $2 AND request_id = $3
+            "#,
+        )
+        .bind(account.id)
+        .bind(venue)
+        .bind(request_id)
+        .fetch_optional(self.pool()?)
+        .await?
+        .ok_or_else(|| anyhow!("execution binding not found"))
+    }
+
     pub async fn agent_readiness(&self, did: &str, agent_id: Uuid) -> Result<AgentReadiness> {
         let user = self.ensure_user(did).await?;
         let readiness = sqlx::query_as::<_, AgentReadiness>(
             r#"
             SELECT r.execution_account_id, r.lighter_linked, r.lighter_funded,
                 r.robinhood_deployed, r.robinhood_funded, r.user_gas_ready,
-                r.execution_gas_ready, r.policy_active, r.reconciled
-            FROM agent_readiness r
+                r.execution_gas_ready, r.policy_active, r.reconciled, r.valid_until
+            FROM current_agent_readiness r
             JOIN execution_accounts e ON e.id = r.execution_account_id
             WHERE e.agent_id = $1 AND e.user_id = $2
             "#,
@@ -739,7 +862,8 @@ impl ProductStore {
         if let Some(existing) = sqlx::query_as::<_, AgentCommandRecord>(
             r#"
             SELECT id, agent_id, execution_account_id, idempotency_key,
-                command, status, agent_status, error_reason, created_at, updated_at
+                command, status, agent_status, target_agent_status, error_reason,
+                result_evidence_digest, completed_at, created_at, updated_at
             FROM agent_commands
             WHERE agent_id = $1 AND idempotency_key = $2
             "#,
@@ -761,8 +885,8 @@ impl ProductStore {
             r#"
             SELECT execution_account_id, lighter_linked, lighter_funded,
                 robinhood_deployed, robinhood_funded, user_gas_ready,
-                execution_gas_ready, policy_active, reconciled
-            FROM agent_readiness WHERE execution_account_id = $1
+                execution_gas_ready, policy_active, reconciled, valid_until
+            FROM current_agent_readiness WHERE execution_account_id = $1
             "#,
         )
         .bind(account_id)
@@ -776,36 +900,38 @@ impl ProductStore {
             readiness.reconciled,
         );
         let (command_status, next_status, error_reason) = match transition {
-            Ok(next) => ("accepted", next, None),
+            Ok(next) => ("pending", next, None),
             Err(reason) => ("rejected", agent_status.as_str(), Some(reason)),
         };
-        if command_status == "accepted" && next_status != agent_status {
-            sqlx::query("UPDATE agents SET status = $2, blocked_reason = NULL, updated_at = now() WHERE id = $1")
-                .bind(agent_id)
-                .bind(next_status)
-                .execute(&mut *tx)
-                .await?;
-        }
+        let command_id = Uuid::new_v4();
         let record = sqlx::query_as::<_, AgentCommandRecord>(
             r#"
             INSERT INTO agent_commands (
                 id, agent_id, execution_account_id, idempotency_key, command,
-                status, agent_status, error_reason
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                status, agent_status, target_agent_status, error_reason
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id, agent_id, execution_account_id, idempotency_key,
-                command, status, agent_status, error_reason, created_at, updated_at
+                command, status, agent_status, target_agent_status, error_reason,
+                result_evidence_digest, completed_at, created_at, updated_at
             "#,
         )
-        .bind(Uuid::new_v4())
+        .bind(command_id)
         .bind(agent_id)
         .bind(account_id)
         .bind(idempotency_key)
         .bind(command)
         .bind(command_status)
+        .bind(&agent_status)
         .bind(next_status)
         .bind(error_reason)
         .fetch_one(&mut *tx)
         .await?;
+        if command_status == "pending" {
+            sqlx::query("INSERT INTO agent_command_outbox (command_id) VALUES ($1)")
+                .bind(command_id)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(record)
     }
@@ -820,7 +946,9 @@ impl ProductStore {
         sqlx::query_as::<_, AgentCommandRecord>(
             r#"
             SELECT c.id, c.agent_id, c.execution_account_id, c.idempotency_key,
-                c.command, c.status, c.agent_status, c.error_reason, c.created_at, c.updated_at
+                c.command, c.status, c.agent_status, c.target_agent_status,
+                c.error_reason, c.result_evidence_digest, c.completed_at,
+                c.created_at, c.updated_at
             FROM agent_commands c JOIN agents a ON a.id = c.agent_id
             WHERE c.id = $1 AND c.agent_id = $2 AND a.user_id = $3
             "#,
@@ -831,6 +959,310 @@ impl ProductStore {
         .fetch_optional(self.pool()?)
         .await?
         .ok_or_else(|| anyhow!("agent command not found"))
+    }
+
+    pub async fn record_readiness_snapshot(
+        &self,
+        execution_account_id: Uuid,
+        evidence: &[ReadinessEvidenceInput<'_>],
+    ) -> Result<AgentReadiness> {
+        const CHECKS: [&str; 8] = [
+            "execution_gas_ready",
+            "lighter_funded",
+            "lighter_linked",
+            "policy_active",
+            "reconciled",
+            "robinhood_deployed",
+            "robinhood_funded",
+            "user_gas_ready",
+        ];
+
+        let mut provided: Vec<&str> = evidence.iter().map(|item| item.check_name).collect();
+        provided.sort_unstable();
+        if provided != CHECKS {
+            return Err(anyhow!(
+                "readiness snapshot must contain every check exactly once"
+            ));
+        }
+        for item in evidence {
+            if item.source.trim().is_empty() || item.source.len() > 128 {
+                return Err(anyhow!("invalid readiness evidence source"));
+            }
+            if item.evidence_digest.len() != 64
+                || !item
+                    .evidence_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(anyhow!("invalid readiness evidence digest"));
+            }
+            let max_age = if matches!(item.check_name, "lighter_linked" | "robinhood_deployed") {
+                Duration::hours(24)
+            } else {
+                Duration::seconds(60)
+            };
+            if item.expires_at <= item.observed_at || item.expires_at - item.observed_at > max_age {
+                return Err(anyhow!("invalid readiness evidence lifetime"));
+            }
+        }
+
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM execution_accounts WHERE id = $1)",
+        )
+        .bind(execution_account_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !exists {
+            return Err(anyhow!("execution account not found"));
+        }
+
+        let snapshot_id = Uuid::new_v4();
+        for item in evidence {
+            sqlx::query(
+                r#"
+                INSERT INTO agent_readiness_evidence (
+                    id, execution_account_id, snapshot_id, check_name, ready, source,
+                    evidence_digest, observed_at, expires_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(execution_account_id)
+            .bind(snapshot_id)
+            .bind(item.check_name)
+            .bind(item.ready)
+            .bind(item.source)
+            .bind(item.evidence_digest)
+            .bind(item.observed_at)
+            .bind(item.expires_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        insert_readiness_snapshot(&mut tx, execution_account_id).await?;
+        let readiness = sqlx::query_as::<_, AgentReadiness>(
+            r#"
+            SELECT execution_account_id, lighter_linked, lighter_funded,
+                robinhood_deployed, robinhood_funded, user_gas_ready,
+                execution_gas_ready, policy_active, reconciled, valid_until
+            FROM current_agent_readiness WHERE execution_account_id = $1
+            "#,
+        )
+        .bind(execution_account_id)
+        .fetch_one(&mut *tx)
+        .await?
+        .finalize();
+        let lifecycle_status = if readiness.can_launch {
+            "ready"
+        } else if !readiness.lighter_linked || !readiness.robinhood_deployed {
+            "awaiting_signatures"
+        } else {
+            "awaiting_funding"
+        };
+        sqlx::query(
+            r#"
+            UPDATE execution_accounts SET status = $2, updated_at = now()
+            WHERE id = $1 AND status IN (
+                'provisioning', 'awaiting_signatures', 'awaiting_funding', 'ready'
+            )
+            "#,
+        )
+        .bind(execution_account_id)
+        .bind(lifecycle_status)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE agents agent SET status = $2, blocked_reason = NULL, updated_at = now()
+            FROM execution_accounts account
+            WHERE account.id = $1 AND agent.id = account.agent_id
+              AND agent.status IN (
+                  'provisioning', 'awaiting_signatures', 'awaiting_funding', 'ready'
+              )
+            "#,
+        )
+        .bind(execution_account_id)
+        .bind(lifecycle_status)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(readiness)
+    }
+
+    pub async fn claim_internal_nonce(
+        &self,
+        scope: &str,
+        caller: &str,
+        nonce: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        sqlx::query("DELETE FROM app_internal_nonces WHERE expires_at < now()")
+            .execute(&mut *tx)
+            .await?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO app_internal_nonces (scope, caller, nonce, expires_at)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(scope)
+        .bind(caller)
+        .bind(nonce)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(inserted.rows_affected() == 1)
+    }
+
+    pub async fn claim_agent_commands(
+        &self,
+        worker_id: &str,
+        limit: u32,
+    ) -> Result<Vec<AgentCommandWorkItem>> {
+        if worker_id.trim().is_empty() || worker_id.len() > 128 || limit == 0 || limit > 100 {
+            return Err(anyhow!("invalid command worker claim"));
+        }
+        sqlx::query_as::<_, AgentCommandWorkItem>(
+            r#"
+            WITH selected AS (
+                SELECT outbox.command_id
+                FROM agent_command_outbox outbox
+                JOIN agent_commands command ON command.id = outbox.command_id
+                WHERE outbox.delivered_at IS NULL
+                  AND outbox.claimed_at IS NULL
+                  AND outbox.available_at <= now()
+                  AND command.status = 'pending'
+                ORDER BY outbox.available_at, outbox.command_id
+                LIMIT $2
+                FOR UPDATE OF outbox SKIP LOCKED
+            ), claimed AS (
+                UPDATE agent_command_outbox outbox SET
+                    claimed_at = now(), claimed_by = $1, attempts = attempts + 1
+                FROM selected
+                WHERE outbox.command_id = selected.command_id
+                RETURNING outbox.command_id
+            )
+            UPDATE agent_commands command SET status = 'processing', updated_at = now()
+            FROM claimed
+            WHERE command.id = claimed.command_id
+            RETURNING command.id, command.agent_id, command.execution_account_id,
+                command.command, command.agent_status, command.target_agent_status
+            "#,
+        )
+        .bind(worker_id)
+        .bind(i64::from(limit))
+        .fetch_all(self.pool()?)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn complete_reconciled_agent_command(
+        &self,
+        command_id: Uuid,
+        evidence_digest: &str,
+        error_reason: Option<&str>,
+    ) -> Result<AgentCommandRecord> {
+        if evidence_digest.len() != 64
+            || !evidence_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(anyhow!("invalid command evidence digest"));
+        }
+        if error_reason.is_some_and(|reason| reason.trim().is_empty()) {
+            return Err(anyhow!("invalid command failure reason"));
+        }
+
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        let (status, agent_id, initial_status, target_status, current_status) =
+            sqlx::query_as::<_, (String, Uuid, String, String, String)>(
+                r#"
+                SELECT command.status, command.agent_id, command.agent_status,
+                    command.target_agent_status, agent.status
+                FROM agent_commands command
+                JOIN agents agent ON agent.id = command.agent_id
+                JOIN agent_command_outbox outbox ON outbox.command_id = command.id
+                WHERE command.id = $1
+                FOR UPDATE OF command, agent, outbox
+                "#,
+            )
+            .bind(command_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| anyhow!("agent command not found"))?;
+        if !matches!(status.as_str(), "processing" | "awaiting_signature") {
+            return Err(anyhow!("agent command is not awaiting completion"));
+        }
+
+        let final_status = if let Some(reason) = error_reason {
+            sqlx::query(
+                r#"
+                UPDATE agent_commands SET status = 'failed', error_reason = $2,
+                    result_evidence_digest = $3, completed_at = now(), updated_at = now()
+                WHERE id = $1
+                "#,
+            )
+            .bind(command_id)
+            .bind(reason)
+            .bind(evidence_digest)
+            .execute(&mut *tx)
+            .await?;
+            "failed"
+        } else {
+            if current_status != initial_status {
+                return Err(anyhow!("agent state changed while command was in flight"));
+            }
+            sqlx::query(
+                "UPDATE agents SET status = $2, blocked_reason = NULL, updated_at = now() WHERE id = $1",
+            )
+            .bind(agent_id)
+            .bind(&target_status)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE agent_commands SET status = 'completed', agent_status = $2,
+                    result_evidence_digest = $3, completed_at = now(), updated_at = now()
+                WHERE id = $1
+                "#,
+            )
+            .bind(command_id)
+            .bind(&target_status)
+            .bind(evidence_digest)
+            .execute(&mut *tx)
+            .await?;
+            "completed"
+        };
+        sqlx::query(
+            r#"
+            UPDATE agent_command_outbox SET delivered_at = now(),
+                last_error = $2 WHERE command_id = $1
+            "#,
+        )
+        .bind(command_id)
+        .bind(error_reason)
+        .execute(&mut *tx)
+        .await?;
+        let record = sqlx::query_as::<_, AgentCommandRecord>(
+            r#"
+            SELECT id, agent_id, execution_account_id, idempotency_key,
+                command, status, agent_status, target_agent_status, error_reason,
+                result_evidence_digest, completed_at, created_at, updated_at
+            FROM agent_commands WHERE id = $1 AND status = $2
+            "#,
+        )
+        .bind(command_id)
+        .bind(final_status)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(record)
     }
 
     pub async fn agent_snapshot(&self, user_id: Uuid) -> Result<Option<AgentSnapshot>> {
@@ -1005,6 +1437,30 @@ impl ProductStore {
             .as_ref()
             .ok_or_else(|| anyhow!("application database is not configured"))
     }
+}
+
+async fn insert_readiness_snapshot(
+    tx: &mut Transaction<'_, Postgres>,
+    execution_account_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO agent_readiness_snapshots (
+            id, execution_account_id, lighter_linked, lighter_funded,
+            robinhood_deployed, robinhood_funded, user_gas_ready,
+            execution_gas_ready, policy_active, reconciled, observed_at
+        )
+        SELECT $1, execution_account_id, lighter_linked, lighter_funded,
+            robinhood_deployed, robinhood_funded, user_gas_ready,
+            execution_gas_ready, policy_active, reconciled, now()
+        FROM current_agent_readiness WHERE execution_account_id = $2
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(execution_account_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 async fn upsert_identity_user(

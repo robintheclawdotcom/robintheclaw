@@ -18,11 +18,11 @@ export function agentAction(agent: AgentRecord | null): AgentAction {
     case "setup":
       return { kind: "provision", label: "Set up execution" };
     case "ready":
-      return { kind: "command", label: "Launch agent", command: "launch" };
+      return { kind: "command", label: "Request launch", command: "launch" };
     case "running":
-      return { kind: "command", label: "Pause and unwind", command: "pause" };
+      return { kind: "command", label: "Request pause and unwind", command: "pause" };
     case "paused":
-      return { kind: "command", label: "Resume agent", command: "resume" };
+      return { kind: "command", label: "Request resume", command: "resume" };
     default:
       return null;
   }

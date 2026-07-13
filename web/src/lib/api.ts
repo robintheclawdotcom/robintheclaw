@@ -24,8 +24,11 @@ export class AppApiError extends Error {
 }
 
 type TokenGetter = () => Promise<string | null>;
+type PendingCommand = { key: string; commandId?: string };
 
 export class AppApi {
+  private readonly pendingCommands = new Map<string, PendingCommand>();
+
   constructor(private readonly getAccessToken: TokenGetter) {}
 
   me(): Promise<MeResponse> {
@@ -77,19 +80,17 @@ export class AppApi {
     return this.request(`/v1/agents/${encodeURIComponent(agentId)}/readiness`);
   }
 
-  requestLighterLink(agentId: string, ownerAddress: string): Promise<ExecutionBindingRecord> {
+  requestLighterLink(agentId: string, ownerAddress: string, accountIndex: number, nonce: number): Promise<ExecutionBindingRecord> {
     return this.request(`/v1/agents/${encodeURIComponent(agentId)}/lighter/link-request`, {
       method: "POST",
-      body: JSON.stringify({ ownerAddress }),
+      body: JSON.stringify({ ownerAddress, accountIndex, nonce }),
     });
   }
 
   confirmLighterLink(agentId: string, input: {
     requestId: string;
-    ownerAddress: string;
-    accountIndex: number;
-    apiKeyIndex: number;
-    associationTransactionHash: string;
+    linkId: string;
+    l1Signature: string;
   }): Promise<ExecutionBindingRecord> {
     return this.request(`/v1/agents/${encodeURIComponent(agentId)}/lighter/confirm`, {
       method: "POST",
@@ -113,16 +114,27 @@ export class AppApi {
     });
   }
 
-  agentCommand(agentId: string, command: AgentCommand, idempotencyKey = crypto.randomUUID()): Promise<AgentCommandRecord> {
-    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/commands`, {
+  async agentCommand(agentId: string, command: AgentCommand, idempotencyKey?: string): Promise<AgentCommandRecord> {
+    const storageKey = this.commandStorageKey(agentId, command);
+    const pending = this.readPendingCommand(storageKey);
+    const key = idempotencyKey ?? pending?.key ?? crypto.randomUUID();
+    this.writePendingCommand(storageKey, { key, commandId: pending?.commandId });
+    const result = await this.request<AgentCommandRecord>(`/v1/agents/${encodeURIComponent(agentId)}/commands`, {
       method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey },
+      headers: { "Idempotency-Key": key },
       body: JSON.stringify({ command }),
     });
+    if (this.isTerminalCommand(result)) this.clearPendingCommand(storageKey);
+    else this.writePendingCommand(storageKey, { key, commandId: result.id });
+    return result;
   }
 
-  getAgentCommand(agentId: string, commandId: string): Promise<AgentCommandRecord> {
-    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/commands/${encodeURIComponent(commandId)}`);
+  async getAgentCommand(agentId: string, commandId: string): Promise<AgentCommandRecord> {
+    const result = await this.request<AgentCommandRecord>(`/v1/agents/${encodeURIComponent(agentId)}/commands/${encodeURIComponent(commandId)}`);
+    if (this.isTerminalCommand(result)) {
+      this.clearPendingCommand(this.commandStorageKey(agentId, result.command));
+    }
+    return result;
   }
 
   activity(cursor?: string): Promise<ActivityPage> {
@@ -146,6 +158,50 @@ export class AppApi {
       method: "POST",
       body: JSON.stringify({ name, durationMs, status }),
     });
+  }
+
+  private commandStorageKey(agentId: string, command: AgentCommand) {
+    return `robin:agent-command:${agentId}:${command}`;
+  }
+
+  private readPendingCommand(key: string): PendingCommand | undefined {
+    if (typeof window === "undefined") return this.pendingCommands.get(key);
+    try {
+      const value = window.localStorage.getItem(key);
+      if (!value) return undefined;
+      const parsed = JSON.parse(value) as Partial<PendingCommand>;
+      if (typeof parsed.key !== "string" || !parsed.key) return undefined;
+      return {
+        key: parsed.key,
+        commandId: typeof parsed.commandId === "string" ? parsed.commandId : undefined,
+      };
+    } catch {
+      return this.pendingCommands.get(key);
+    }
+  }
+
+  private writePendingCommand(key: string, command: PendingCommand) {
+    this.pendingCommands.set(key, command);
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(key, JSON.stringify(command));
+    } catch {
+      // The in-memory copy still prevents duplicate submissions in this session.
+    }
+  }
+
+  private clearPendingCommand(key: string) {
+    this.pendingCommands.delete(key);
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // Nothing else can be done when browser storage is unavailable.
+    }
+  }
+
+  private isTerminalCommand(command: AgentCommandRecord) {
+    return command.status === "completed" || command.status === "rejected" || command.status === "failed";
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
