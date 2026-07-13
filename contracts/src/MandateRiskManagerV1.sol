@@ -43,7 +43,9 @@ contract MandateRiskManagerV1 {
     uint256 private constant BPS = 10_000;
 
     IERC20Metadata public immutable settlementAsset;
+    bytes32 public immutable settlementAssetCodeHash;
     IChainlinkFeed public immutable sequencerFeed;
+    bytes32 public immutable sequencerFeedCodeHash;
     address public immutable configAdmin;
     address public guardian;
     address public immutable treasury;
@@ -64,6 +66,8 @@ contract MandateRiskManagerV1 {
 
     PendingExecution private pending;
     mapping(address => MarketConfig) public markets;
+    mapping(address => bytes32) public marketTokenCodeHash;
+    mapping(address => bytes32) public marketFeedCodeHash;
     mapping(address => uint256) public inventory;
     mapping(address => uint256) public inventoryCost;
     mapping(bytes32 => bool) public usedIntent;
@@ -110,6 +114,7 @@ contract MandateRiskManagerV1 {
     );
 
     error NotConfigAdmin();
+    error NotTreasury();
     error NotRestrictor();
     error NotExecutor();
     error NotBootstrapper();
@@ -143,6 +148,8 @@ contract MandateRiskManagerV1 {
     error ActiveMarketLimitExceeded(uint256 attempted, uint256 limit);
     error InsufficientInventory(uint256 attempted, uint256 available);
     error SettlementMismatch();
+    error LimitsCanOnlyDecrease();
+    error ExternalCodeChanged(address target, bytes32 expected, bytes32 actual);
 
     modifier onlyConfigAdmin() {
         if (msg.sender != configAdmin) revert NotConfigAdmin();
@@ -151,6 +158,11 @@ contract MandateRiskManagerV1 {
 
     modifier onlyExecutor() {
         if (msg.sender != executor) revert NotExecutor();
+        _;
+    }
+
+    modifier onlyTreasury() {
+        if (msg.sender != treasury) revert NotTreasury();
         _;
     }
 
@@ -171,7 +183,7 @@ contract MandateRiskManagerV1 {
         if (
             address(settlementAsset_).code.length == 0 || address(sequencerFeed_).code.length == 0
                 || configAdmin_.code.length == 0 || guardian_ == address(0)
-                || treasury_.code.length == 0 || bootstrapper_ == address(0)
+                || treasury_ == address(0) || bootstrapper_ == address(0)
         ) revert InvalidAddress();
         if (
             configAdmin_ == guardian_ || configAdmin_ == treasury_ || guardian_ == treasury_
@@ -183,7 +195,9 @@ contract MandateRiskManagerV1 {
         if (decimals_ > 18) revert InvalidConfiguration();
 
         settlementAsset = settlementAsset_;
+        settlementAssetCodeHash = address(settlementAsset_).codehash;
         sequencerFeed = sequencerFeed_;
+        sequencerFeedCodeHash = address(sequencerFeed_).codehash;
         configAdmin = configAdmin_;
         guardian = guardian_;
         treasury = treasury_;
@@ -247,6 +261,24 @@ contract MandateRiskManagerV1 {
         );
     }
 
+    function lowerLimits(uint256 grossNotionalLimit_, uint256 turnoverLimit_)
+        external
+        onlyTreasury
+    {
+        if (
+            grossNotionalLimit_ > grossNotionalLimit || turnoverLimit_ > turnoverLimit
+                || grossNotionalLimit_ == 0 || turnoverLimit_ == 0
+        ) revert LimitsCanOnlyDecrease();
+        _setLimits(
+            grossNotionalLimit_,
+            turnoverLimit_,
+            turnoverWindow,
+            maxDeadlineDelay,
+            sequencerGracePeriod,
+            maxActiveMarkets
+        );
+    }
+
     function setMarket(
         address stockToken,
         IChainlinkFeed feed,
@@ -298,6 +330,7 @@ contract MandateRiskManagerV1 {
         onlyExecutor
         returns (uint256 notional, uint256 price, uint256 multiplier)
     {
+        _checkCode(address(settlementAsset), settlementAssetCodeHash);
         if (mode == Mode.Halted) revert Halted();
         if (intent.side == ISpotExecution.Side.BuySpot && mode != Mode.Active) revert ReduceOnly();
         if (
@@ -516,6 +549,8 @@ contract MandateRiskManagerV1 {
             entryEnabled: entryEnabled,
             exitEnabled: exitEnabled
         });
+        marketTokenCodeHash[stockToken] = stockToken.codehash;
+        marketFeedCodeHash[stockToken] = address(feed).codehash;
         emit MarketSet(
             stockToken,
             address(feed),
@@ -542,6 +577,7 @@ contract MandateRiskManagerV1 {
     }
 
     function _checkSequencer() private view {
+        _checkCode(address(sequencerFeed), sequencerFeedCodeHash);
         (, int256 answer, uint256 startedAt,,) = sequencerFeed.latestRoundData();
         if (answer != 0) revert SequencerDown();
         if (startedAt == 0 || startedAt > block.timestamp) revert SequencerGracePeriod();
@@ -554,7 +590,10 @@ contract MandateRiskManagerV1 {
         returns (uint256 price, uint256 multiplier, uint80 roundId)
     {
         IRobinhoodStockToken token = IRobinhoodStockToken(stockToken);
+        _checkCode(stockToken, marketTokenCodeHash[stockToken]);
         if (token.oraclePaused()) revert OraclePaused(stockToken);
+
+        _checkCode(address(market.feed), marketFeedCodeHash[stockToken]);
 
         multiplier = token.uiMultiplier();
         uint256 nextMultiplier = token.newUIMultiplier();
@@ -575,6 +614,11 @@ contract MandateRiskManagerV1 {
             revert OracleStale(address(market.feed), updatedAt);
         }
         price = SafeCast.toUint256(answer);
+    }
+
+    function _checkCode(address target, bytes32 expected) private view {
+        bytes32 actual = target.codehash;
+        if (actual != expected) revert ExternalCodeChanged(target, expected, actual);
     }
 
     function _checkMinimumOutput(
