@@ -12,8 +12,9 @@
 ## Trust boundaries
 
 Market data, RPC responses, exchange APIs, local JSONL observations, and published records are
-untrusted inputs. The engine is deterministic but does not validate an economic edge. The vault
-enforces call boundaries, not profitability. The verifier confirms a commitment, not truthfulness
+untrusted inputs. The engine is deterministic but does not establish an economic edge on its own.
+The vault enforces call boundaries, while the runtime and validation gates determine whether the
+strategy can pursue profitable execution. The verifier confirms a commitment, not the truthfulness
 of unobserved market data.
 
 ## Controls in place

@@ -12,14 +12,15 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
     body: (
       <>
         <p>
-          Robin the Claw is a bounded, delta-neutral RWA trading system for Robinhood Chain. It
-          measures the spread between stock-token spot liquidity and matching RWA perpetuals,
-          then builds a hedge plan only when the opportunity clears its risk gates.
+          Robin the Claw is a delta-neutral RWA trading agent for Robinhood Chain, built to find
+          durable, risk-adjusted net profitability in stock-token spot and perpetual basis. It
+          builds a hedge plan only when an opportunity clears its cost, liquidity, and risk gates.
         </p>
-        <h2>The public contract</h2>
+        <h2>Evidence, not marketing</h2>
         <p>
-          The system does not ask anyone to trust a screenshot. Trade batches are committed as
-          Merkle roots so independently published records can be recomputed against the chain.
+          Trade batches are committed as Merkle roots so independently published results can be
+          recomputed against the chain. That makes observed performance evidence for the strategy,
+          not a substitute for the return objective.
         </p>
         <div className="note">
           Market-neutral is not risk-free. Basis can widen, funding can invert, and a non-atomic
@@ -78,8 +79,8 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
         </p>
         <h2>What it proves</h2>
         <p>
-          It proves that a disclosed batch is the batch that was committed. It does not excuse
-          withholding records or turn an unproven strategy into an investment product.
+          It proves that a disclosed batch is the batch that was committed. It supports honest
+          performance analysis; it does not excuse withholding records or validate an unproven edge.
         </p>
         <div className="code-block"><span>$</span> cd verifier && npm test</div>
       </>
@@ -301,18 +302,18 @@ export default function Home() {
                 <img src="/brand/logo.jpg" alt="Robin the Claw pixel logo" />
                 <div>
                   <h1><span>✻</span> Robin the Claw</h1>
-                  <p>Bounded, verifiable delta-neutral RWA trading on Robinhood Chain.</p>
-                  <small>status: research → testnet foundation · market-neutral · quarter-Kelly</small>
+                  <p>Delta-neutral RWA trading built for durable net profitability.</p>
+                  <small>status: edge research → testnet foundation · market-neutral · quarter-Kelly</small>
                 </div>
               </section>
 
               <section className="intro">
                 <Prompt>robin init</Prompt>
                 <p>
-                  Robin the Claw measures the basis between tokenized-equity spot liquidity and
-                  matching perpetuals, then evaluates a delta-neutral plan through liquidity,
-                  sizing, and risk gates. The aim is not a returns promise. It is a system whose
-                  record can be checked rather than trusted.
+                  Robin the Claw is built to create a profitable trading agent. It measures the
+                  basis between tokenized-equity spot liquidity and matching perpetuals, then
+                  advances only net-positive, delta-neutral opportunities through liquidity,
+                  sizing, and risk gates. Verifiable records show whether the edge survives reality.
                 </p>
               </section>
 
@@ -323,7 +324,7 @@ export default function Home() {
                   <code>git clone https://github.com/robintheclawdotcom/robintheclaw.git</code>
                   <button onClick={copyClone}>{copied ? "copied ✓" : "copy"}</button>
                 </div>
-                <small>Open source trust surface · execution remains testnet-first.</small>
+                <small>Open source research and verification surface · execution remains testnet-first.</small>
               </section>
 
               <section className="proof-status">
@@ -343,10 +344,10 @@ export default function Home() {
               <section>
                 <Prompt>robin --components</Prompt>
                 <div className="cards">
-                  <article><span>[ signal ]</span><h2>Basis scanner</h2><p>Discovers v4 pools, compares spot with live perps, and records the spread before execution exists.</p></article>
-                  <article><span>[ engine ]</span><h2>Decision gates</h2><p>Deterministic basis, sizing, risk, and neutrality checks turn an observation into a plan or reject it.</p></article>
+                  <article><span>[ signal ]</span><h2>Basis scanner</h2><p>Discovers v4 pools, compares spot with live perps, and records whether a spread can survive real costs.</p></article>
+                  <article><span>[ engine ]</span><h2>Decision gates</h2><p>Deterministic basis, sizing, risk, and neutrality checks advance only opportunities with modeled net edge.</p></article>
                   <article><span>[ contracts ]</span><h2>Bounded custody</h2><p>An allowlisted, capped, haltable execution boundary limits what an agent may attempt.</p></article>
-                  <article><span>[ verifier ]</span><h2>Recompute the record</h2><p>A live testnet proof confirms published records resolve to an on-chain commitment.</p></article>
+                  <article><span>[ verifier ]</span><h2>Recompute the record</h2><p>Independent records make measured performance auditable as the agent moves toward live execution.</p></article>
                 </div>
               </section>
 
@@ -354,10 +355,10 @@ export default function Home() {
                 <Prompt>robin explain --pipeline</Prompt>
                 <div className="pipeline">
                   {[
-                    ["01 · scan", "Measure a liquid, fresh basis"],
+                    ["01 · scan", "Find a liquid, fresh net edge"],
                     ["02 · size", "Fractional-Kelly, capped"],
-                    ["03 · gate", "Risk limits and neutrality"],
-                    ["04 · verify", "Commit and recompute records"],
+                    ["03 · shadow", "Model fills, costs, and regime risk"],
+                    ["04 · validate", "Promote only reproducible profitability"],
                   ].map(([label, detail], index) => (
                     <div className="pipeline-item" key={label}>
                       <span>{label}</span><p>{detail}</p>{index < 3 && <b className="arrow">→</b>}
@@ -367,7 +368,7 @@ export default function Home() {
               </section>
 
               <section className="docs-cta">
-                <div><h2>Read the project notes</h2><p>Signal measurement, guardrails, decision engine, contracts, and verifier design.</p></div>
+                <div><h2>Read the project notes</h2><p>Edge research, risk controls, decision engine, execution boundaries, and verification design.</p></div>
                 <button onClick={openDocs}>robin docs →</button>
               </section>
             </div>

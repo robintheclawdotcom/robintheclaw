@@ -1,7 +1,8 @@
 # signal
 
-Read-only measurement. Confirms the basis exists and tracks how it moves before any execution
-code is written. No keys, no on-chain writes, no orders.
+Read-only measurement for the agent's profitability research. It tests whether a measured basis is
+real, liquid, and persistent enough to survive execution costs before any execution code is
+written. No keys, no on-chain writes, no orders.
 
 ## Two steps
 

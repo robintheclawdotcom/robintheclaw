@@ -1,9 +1,9 @@
 # Contracts
 
-`MandateGuard` bounds each execution to an approved target and selector, a rolling notional cap,
-and a kill switch. `StrategyVault` provides single-owner custody and only allows its agent to
-execute against that mandate. `AttestationAnchor` stores append-only Merkle roots; the vault is
-its only publisher, so the agent anchors through the same custody boundary.
+`MandateGuard` and `StrategyVault` are the capital-control layer for a profitable trading agent.
+They bound each execution to an approved target and selector, a rolling notional cap, and a kill
+switch. `AttestationAnchor` stores append-only Merkle roots; the vault is its only publisher, so
+the agent anchors realized results through the same custody boundary.
 
 This is not a public deposit vault. It has no share or NAV accounting and must not receive funds
 from anyone other than its configured owner.

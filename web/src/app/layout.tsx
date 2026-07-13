@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   metadataBase: new URL("https://robintheclaw.com"),
   title: "Robin the Claw",
-  description: "A bounded, verifiable delta-neutral RWA trading system on Robinhood Chain.",
+  description: "A delta-neutral RWA trading agent built to find durable, risk-adjusted net profitability.",
   alternates: {
     canonical: "/",
   },
@@ -21,7 +21,7 @@ export const metadata: Metadata = {
   },
   openGraph: {
     title: "Robin the Claw",
-    description: "A bounded, verifiable delta-neutral RWA trading system on Robinhood Chain.",
+    description: "A delta-neutral RWA trading agent built to find durable, risk-adjusted net profitability.",
     url: "/",
     siteName: "Robin the Claw",
     locale: "en_US",
@@ -38,7 +38,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title: "Robin the Claw",
-    description: "A bounded, verifiable delta-neutral RWA trading system on Robinhood Chain.",
+    description: "A delta-neutral RWA trading agent built to find durable, risk-adjusted net profitability.",
     images: ["/brand/og-image.jpg?v=green"],
   },
 };

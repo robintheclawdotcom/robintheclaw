@@ -1,24 +1,26 @@
 # Robin the Claw
 
-A market-neutral trading agent on Robinhood Chain. It captures the spread between a tokenized
-stock's spot price and its perpetual (basis and funding), taking no directional view on the
-stock, sized with quarter-Kelly discipline and bounded by on-chain limits it cannot exceed.
-Every trade is committed to an on-chain, recomputable record, so the agent's track record is
-verifiable rather than a screenshot you have to trust.
+A market-neutral trading agent on Robinhood Chain, built to find durable, risk-adjusted net
+profitability in tokenized-stock basis and funding. It matches spot and perpetual exposures,
+takes no directional view on the underlying, sizes with quarter-Kelly discipline, and operates
+within on-chain limits it cannot exceed. Every trade is committed to an on-chain, recomputable
+record so measured performance can be independently inspected.
 
 ## Why
 
-Agentic trading reached a wide audience through connect-your-AI products, but the record stays
-custodial and opaque: you trust the agent's word for what it did. Robin the Claw inverts that.
-The strategy is market-neutral and disciplined; the proof is public.
+Most agentic trading products automate execution without establishing that the strategy has a
+durable net edge. Robin the Claw is built to do both: find profitable basis opportunities after
+fees, funding, impact, and risk, then preserve enough evidence to measure whether that edge holds.
 
+- **Edge-driven:** the agent pursues positive, risk-adjusted net returns from matched spot/perp
+  basis and funding, selected only after out-of-sample and shadow evidence.
 - **Bounded:** the agent trades only through a mandate enforced on-chain (`MandateGuard`):
   allowlisted venues and selectors, a per-window notional cap, and a kill switch. A call outside
   the mandate reverts.
-- **Provable:** every batch of trades is Merkle-rooted and anchored on-chain (`AttestationAnchor`),
-  append-only. Anyone recomputes the record from chain state.
-- **Disciplined:** market-neutral, quarter-Kelly sizing, strategy selected on out-of-sample
-  performance. Reasoning stays out of the execution hot path.
+- **Measured:** every batch of trades is Merkle-rooted and anchored on-chain (`AttestationAnchor`),
+  append-only. The record makes realized performance auditable rather than anecdotal.
+- **Disciplined:** market-neutral, quarter-Kelly sizing, concentration limits, and drawdown
+  controls keep the pursuit of returns bounded by capital preservation.
 
 ## Layout
 
@@ -76,8 +78,9 @@ system boundaries.
 
 ## Honest scope
 
-- This is not a returns product. The edge in a market-neutral basis trade is thin and temporary,
-  and it decays as capital arrives. The durable part is the verifiable record and the discipline.
+- The objective is positive, risk-adjusted net returns. That is a research and execution target,
+  not a guarantee: basis edges can decay as capital arrives and every candidate must earn promotion
+  with out-of-sample and shadow evidence.
 - Market-neutral is not risk-free: basis can widen before it converges, legs can fill unevenly,
   and funding can invert. Position sizing and the mandate cap exist to bound those, not remove them.
 - Tokenized stocks on Robinhood Chain are geo-restricted and are not available to U.S. persons.

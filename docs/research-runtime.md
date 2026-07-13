@@ -2,9 +2,10 @@
 
 ## Purpose
 
-`runtime/` is the private, continuous data-capture and shadow-execution runtime. It collects
-point-in-time market evidence and evaluates registered hypotheses. It cannot sign orders, hold
-funds, call a venue write API, or connect to a wallet.
+`runtime/` is the private, continuous data-capture and shadow-execution runtime. Its purpose is
+to determine whether registered hypotheses can produce durable, net-of-cost profitability across
+market regimes. It collects point-in-time market evidence and evaluates those hypotheses. It
+cannot sign orders, hold funds, call a venue write API, or connect to a wallet.
 
 The public website is not part of this runtime. It receives no research database connection,
 object-storage credential, venue credential, or strategy configuration.
@@ -67,6 +68,6 @@ registration records its hypothesis, parameters, and dataset snapshot before eva
 requires frozen data, embargoed walk-forward tests, realistic net costs, bounded capacity, and
 reproducible results.
 
-Six months of capture and sixty continuous shadow days are minimum evidence requirements, not
-proof of a durable edge. Mainnet deployment remains blocked until the complete execution, audit,
-and operational-review gates pass.
+Six months of capture and sixty continuous shadow days are the minimum evidence required to argue
+for a durable edge. Mainnet deployment remains blocked until the complete execution, audit, and
+operational-review gates pass.

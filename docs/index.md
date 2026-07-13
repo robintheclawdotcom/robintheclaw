@@ -1,8 +1,9 @@
 # Developer documentation
 
-Robin the Claw is a testnet-first, delta-neutral RWA basis research system. It is not a public
-vault, investment product, or live trading service. The repository deliberately separates
-measurement, deterministic decisioning, custody boundaries, and public verification.
+Robin the Claw is a testnet-first, delta-neutral RWA trading agent built to find durable,
+risk-adjusted net profitability in spot/perpetual basis and funding. It is not a public vault or
+investment product. The repository separates edge research, deterministic decisioning, execution
+boundaries, and performance verification so the strategy can be promoted only on evidence.
 
 ## Documents
 
@@ -20,7 +21,7 @@ measurement, deterministic decisioning, custody boundaries, and public verificat
 2. Testnet uses a clearly named `tUSDG` fixture, never an assumed USDG address.
 3. The deployed proof vault has no allowlisted venue. It can anchor a synthetic record but cannot
    execute a trade.
-4. A verifier result proves that disclosed records match a commitment. It does not prove a return,
-   fill quality, or strategy edge.
+4. A verifier result proves that disclosed records match a commitment. Profitability still has to
+   be demonstrated with complete fills, net costs, frozen datasets, and walk-forward results.
 5. Secrets belong in ignored local files or managed secret storage. They are never committed.
 6. The research runtime has no signing capability and no configuration switch for live trading.

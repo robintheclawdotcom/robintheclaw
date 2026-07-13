@@ -4,7 +4,7 @@ export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "Robin the Claw",
     short_name: "Robin",
-    description: "A bounded, verifiable delta-neutral RWA trading system on Robinhood Chain.",
+    description: "A delta-neutral RWA trading agent built to find durable, risk-adjusted net profitability.",
     start_url: "/",
     display: "standalone",
     background_color: "#1f1e1c",

@@ -1,9 +1,9 @@
 # verifier
 
-The recompute-the-record tool. This is what makes the agent's track record verifiable instead of
-a screenshot: anyone takes the agent's published trade log, rebuilds the Merkle root, and confirms
-it matches the root the agent anchored on Robinhood Chain. A single altered field in any trade
-changes its leaf, changes the root, and fails the check.
+The recompute-the-record tool. The agent's objective is profitable trading; this tool makes its
+measured performance inspectable instead of a screenshot. Anyone can take a published trade log,
+rebuild the Merkle root, and confirm it matches the root anchored on Robinhood Chain. A single
+altered field in any trade changes its leaf, changes the root, and fails the check.
 
 No keys, no trust in the operator. Just the published records, a public RPC, and this code.
 
