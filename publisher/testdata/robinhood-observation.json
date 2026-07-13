@@ -1,0 +1,31 @@
+{
+  "Finalized": {"number": 100, "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "Safe": {"number": 101, "hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+  "Owner": "0x1111111111111111111111111111111111111111",
+  "Factory": "0x2222222222222222222222222222222222222222",
+  "RiskManager": "0x3333333333333333333333333333333333333333",
+  "SpotAdapter": "0x4444444444444444444444444444444444444444",
+  "VaultOwner": "0x1111111111111111111111111111111111111111",
+  "VaultAgent": "0x5555555555555555555555555555555555555555",
+  "VaultRegistry": "0x6666666666666666666666666666666666666666",
+  "VaultRiskManager": "0x3333333333333333333333333333333333333333",
+  "VaultSpotAdapter": "0x4444444444444444444444444444444444444444",
+  "VaultCodeHash": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "AgentEnabled": true,
+  "Flat": true,
+  "GlobalMode": 0,
+  "RiskMode": 0,
+  "SettlementBalanceRaw": "50000000",
+  "StockBalanceRaw": "0",
+  "OwnerGasRaw": "10000000000000000",
+  "SignerGasRaw": "10000000000000000",
+  "Receipts": [{
+    "transactionHash": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "blockHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "blockNumber": "0x64",
+    "status": "0x1",
+    "to": "0x2222222222222222222222222222222222222222",
+    "contractAddress": "",
+    "logs": []
+  }]
+}
