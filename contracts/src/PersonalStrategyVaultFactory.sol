@@ -7,6 +7,7 @@ import { PersonalStrategyVault } from "./PersonalStrategyVault.sol";
 /// @notice Deploys one deterministic personal strategy vault per owner for this factory version.
 contract PersonalStrategyVaultFactory {
     uint64 public constant VERSION = 1;
+    uint256 private constant SUPPORTED_CHAIN_ID = 46630;
 
     IERC20 public immutable asset;
     address public immutable defaultAgent;
@@ -25,10 +26,12 @@ contract PersonalStrategyVaultFactory {
     );
 
     error InvalidConfiguration();
+    error UnsupportedChain(uint256 chainId);
     error VaultExists(address vault);
     error UnexpectedAddress(address expected, address actual);
 
     constructor(IERC20 asset_, address defaultAgent_, uint256 defaultCap_, uint64 defaultWindow_) {
+        if (block.chainid != SUPPORTED_CHAIN_ID) revert UnsupportedChain(block.chainid);
         if (address(asset_) == address(0) || defaultAgent_ == address(0)) {
             revert InvalidConfiguration();
         }

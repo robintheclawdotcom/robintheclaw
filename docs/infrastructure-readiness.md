@@ -8,17 +8,19 @@ and remain unable to pass readiness until their separate activation requirements
 
 | Service | Render type | Network exposure | Authority |
 | --- | --- | --- | --- |
-| `robintheclaw` | Web | Public custom domain | Delayed documentation and public records only |
+| `robintheclaw` | Web | Public custom domain | Public documentation and authenticated product interface |
+| `robin-api` | Private service | Render private network | Authenticated product data and personal-vault preparation |
 | `robin-research-collector` | Worker | Outbound only | Venue and chain reads, Postgres staging, R2 archive writes |
-| `robin-control-api` | Private service | Render private network | Authenticated read-only operational queries |
 | `robin-execution-coordinator` | Private service | Render private network | Durable intent admission and lifecycle coordination |
 | `robin-lighter-signer` | Private service | Render private network | Restricted Lighter order and cancellation signatures |
 | `robin-robinhood-signer` | Private service | Render private network | Typed `executeSpot` transactions through one KMS key |
 | `robin-research` | Render Postgres | Private network only | Runtime, evidence, saga, nonce, and audit state |
 
-No execution endpoint is public. Render service references provide the coordinator with private
-signer host and port values. The coordinator constructs private HTTP endpoints only from validated
-single-label service names and numeric ports; arbitrary public plaintext signer URLs are rejected.
+No execution endpoint is public. The product API is not the operator control plane and receives no
+signer credential. A separate authenticated, read-only operator service remains a technical
+readiness blocker. Render service references provide the coordinator with private signer host and
+port values. The coordinator constructs private HTTP endpoints only from validated single-label
+service names and numeric ports; arbitrary public plaintext signer URLs are rejected.
 
 ## Deployment state and readiness
 
@@ -51,12 +53,12 @@ funding.
 
 ## Database connections
 
-The database has no external IP allowlist, uses a Pro instance, a high-availability standby, storage
-autoscaling, and integrated PgBouncer.
+Both databases have no external IP allowlist and use Pro instances, high-availability standbys, and
+storage autoscaling. The research database also uses integrated PgBouncer for runtime services.
 
 - Collector, coordinator, and Robinhood signer use the pooled internal connection string.
-- The read-only control API uses the direct internal connection because it establishes a read-only
-  database session. Render's transaction-level PgBouncer cannot preserve session state.
+- The product API uses the direct internal application database connection. Its migration authority
+  must move to the release identity before activation.
 - Migrations are release tasks. Signers and the coordinator do not acquire schema authority at
   startup.
 - The collector may run runtime migrations only until migration ownership is moved into the release
@@ -78,7 +80,7 @@ Credential separation is mandatory:
 - The Lighter signer receives only its dedicated capped-subaccount API key.
 - The Robinhood signer receives one non-exportable KMS key and no Lighter credential.
 - The coordinator receives no private key.
-- The control API receives no signer credential.
+- The product API receives no signer credential.
 - The public web service receives no private runtime credential.
 
 Signer requests use a distinct 32-byte HMAC key per signer. The signature binds the method, path,

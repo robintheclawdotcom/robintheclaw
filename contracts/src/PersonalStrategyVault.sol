@@ -11,6 +11,8 @@ import { MandateGuard } from "./MandateGuard.sol";
 contract PersonalStrategyVault {
     using SafeERC20 for IERC20;
 
+    uint256 private constant SUPPORTED_CHAIN_ID = 46630;
+
     IERC20 public immutable asset;
     MandateGuard public immutable guard;
     address public immutable owner;
@@ -29,6 +31,7 @@ contract PersonalStrategyVault {
     error InvalidAmount();
     error InvalidCalldata();
     error InvalidTarget();
+    error UnsupportedChain(uint256 chainId);
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -36,6 +39,7 @@ contract PersonalStrategyVault {
     }
 
     constructor(IERC20 asset_, address owner_, address agent_, uint256 cap_, uint64 window_) {
+        if (block.chainid != SUPPORTED_CHAIN_ID) revert UnsupportedChain(block.chainid);
         if (address(asset_) == address(0) || owner_ == address(0) || agent_ == address(0)) {
             revert InvalidTarget();
         }

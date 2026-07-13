@@ -1,106 +1,65 @@
-# Production Audit: full system
+# Production audit: full system
 
-## Executive summary
+## Status
 
-The repository is not ready to trade or custody mainnet capital. This hardening increment makes
-the infrastructure honest about that fact: the operator API is read-only and durable, unimplemented
-signer and shadow services are absent from deployment, production configuration fails closed, and
-CI now covers every top-level package plus supply-chain and contract-security checks. The remaining
-P0 work is substantive engineering and independent review, not deployment configuration.
+This audit is subordinate to [production-audit-mainnet-readiness.md](production-audit-mainnet-readiness.md),
+which contains the current release decision and gate inventory.
 
-## Critical issues (P0 - block capital activation)
+The repository is not ready to trade or custody mainnet capital. It now contains typed strategy
+contracts, durable execution-state machinery, restricted signer services, a production-oriented
+research collector, and an authenticated product application. These components do not yet form a
+closed, independently verified trading system.
 
-- [ ] Typed, audited on-chain custody and spot execution are not yet released. The generic v0 path
-  must never be funded.
-- [ ] The durable shadow lifecycle and promotion evidence windows are incomplete. Mainnet capital
-  cannot be activated before the documented 180-day capture and 60-day continuous-shadow gates.
-- [ ] Lighter and Robinhood signer services, durable execution saga, nonce recovery, dead-man
-  cancellation, and emergency unwind are not implemented. They remain absent from the Blueprint.
-- [ ] Independent contract, executor, custody, key-management, and legal reviews are outstanding.
-- [ ] Production Robinhood archive/WebSocket RPC, bucket-scoped R2 credentials, retention locks,
-  and end-to-end archive reconciliation require account-level provisioning.
-- [ ] Safe administration, timelock, guardian, and KMS ownership ceremonies have not occurred.
+## Trust-boundary assessment
 
-## High priority (P1 - block technical readiness)
+The deployed topology separates the public interface, private product API, research collector,
+execution coordinator, Lighter signer, Robinhood signer, and research database. Coordinator and
+signer services enter deployment disabled. Signing keys are not shared across venue boundaries, and
+the coordinator holds no private key.
 
-- [ ] Provision the Render Blueprint and verify its private networking, Pro database, HA standby,
-  PgBouncer, storage autoscaling, PITR, and rollback behavior.
-- [ ] Restore Render billing and bind the existing site and domain to this Blueprint. Account-aware
-  validation is currently blocked by billing suspension and the unbound existing domain.
-- [ ] Create a dedicated read-only Postgres role for the control API. Session-level read-only mode
-  is a second control, not a substitute for database permissions.
-- [ ] Connect authenticated access, OpenTelemetry export, paging, and audit-log retention.
-- [ ] Add compatibility tests that run the control API against each runtime migration sequence.
-- [ ] Execute the one-hour throughput, 24-hour chaos, 72-hour soak, restore, and R2 reconciliation
-  gates and retain immutable evidence.
-- [ ] Enable protected `main` with required CI, CodeQL, and identity-firewall checks.
-- [ ] Upgrade the runtime dependency chain until RustSec reports no `quick-xml` or optional
-  SQLx/MySQL advisory. The dependency job intentionally blocks while either remains in its lock.
+The product API and future operator control plane are distinct surfaces. The product API handles
+authenticated user workflows and personal-vault preparation. The operator control plane does not
+yet exist; when implemented, it must be private, read-only, identity-aware, and incapable of
+transaction or order submission.
 
-## Medium priority (P2 - complete before operator scale-up)
+## Blocking gaps
 
-- [ ] Add a read replica only after query telemetry demonstrates primary contention.
-- [ ] Replace the static control token with short-lived gateway identity once the operator access
-  model is chosen; retain service-to-service authentication.
-- [ ] Define versioned API compatibility and deprecation policy before external consumers exist.
-- [ ] Add cardinality budgets and retention policy for metrics, traces, and logs.
-
-## Low priority (P3 - technical debt)
-
-- [ ] Move independent crate locks into a root workspace only when release cadence and dependency
-  ownership are intentionally unified.
-- [ ] Add generated OpenAPI output after endpoint contracts stabilize.
+- Authenticated Lighter account, order, fill, collateral, and position events are not yet wired into
+  the durable reconciliation ledger.
+- Canonical Robinhood Chain observations, dual-RPC reconciliation, and Ethereum-final evidence are
+  not yet production-proven.
+- The block-pinned Uniswap v4 execution-authority publisher and live account-risk gate do not yet
+  exist as deployable services.
+- The shadow/research processor, deterministic production replay, promotion artefacts, and required
+  elapsed evidence windows are incomplete.
+- Render, PostgreSQL, R2, production RPC, KMS, telemetry, paging, backup, and restore controls require
+  account-level provisioning and retained verification evidence.
+- Independent contract, execution, key, custody, legal, venue, and operational reviews remain open.
 
 ## Security assessment
 
-The former backend combined a public HTTP surface, a mutable in-memory market view, a chain
-indexer, event bus, and raw-transaction broadcast method. That boundary was unsuitable for an
-operator control plane. This increment removes those modules and the engine dependency. All
-operator queries now come from Postgres, protected routes use constant-time bearer comparison,
-database sessions are read-only with statement timeouts, and response errors do not expose
-dependency details.
+The execution path is designed to fail closed around replay, authorization scope, control version,
+market configuration, authoritative quotes, unknown transaction outcomes, and recovery. That design
+has not yet been validated against production dependencies or an independent audit. In particular,
+a compromised authenticated collector, quote publisher, RPC pair, KMS policy, or venue subaccount
+could still corrupt the decision boundary if identity, freshness, and reconciliation controls are
+misconfigured.
 
-This is still defense in depth rather than a complete access system. A bearer token does not
-provide operator identity, phishing resistance, device posture, or granular authorization. The
-service must remain private until an authenticated gateway is reviewed and configured.
+Separate HMAC keys are required for intent admission, exit and recovery, venue events, market
+authority, and each signer. Startup rejects missing, malformed, or duplicate keys. The Blueprint's
+secret groups express intended distribution but do not replace startup enforcement or account-level
+access review.
 
-## Performance assessment
+## Reliability and performance assessment
 
-The API bounds list queries and capture windows, caps its direct pool, and applies a database
-statement timeout. No material load claim is justified until runtime tables are
-partitioned, representative data is loaded, and query plans are captured. The control plane must
-not compete with ingestion for primary database resources.
+The runtime has durable staging and archival boundaries; the coordinator uses leases, append-only
+evidence, native event identities, and durable recovery actions. No production capacity claim is
+justified until the one-hour 2x-peak benchmark, 24-hour chaos test, 72-hour soak, crash-boundary
+tests, database failover, archive reconciliation, and deterministic replay gates produce retained
+evidence.
 
-## Observability assessment
+## Release decision
 
-Liveness, database/schema readiness, request counts, rejected authentication, and database
-failures now exist. Export, dashboards, SLOs, and paging remain external work. Logging deliberately
-excludes tokens, database URLs, query results, and request headers.
-
-## Recommended architecture changes
-
-- Keep runtime as the only market and chain evidence writer.
-- Keep the control API read-only and private.
-- Give collector, shadow, control, execution, and signer services separate database roles and
-  credentials with minimum authority.
-- Do not add execution or signer declarations until each service has a fail-closed startup gate,
-  health model, threat model, and tested recovery procedure.
-- Treat R2 manifests and Postgres as a reconciled evidence pair rather than interchangeable stores.
-
-## Test coverage gaps
-
-- Database integration tests require an ephemeral Postgres instance and all runtime migrations.
-- Authentication middleware needs HTTP-level tests in addition to constant-time comparison tests.
-- Render deployment, database failover, token rotation, gateway denial, and restore behavior need
-  environment-level tests.
-- Security scanners require baselines and reviewed suppressions; a green scan is not an audit.
-
-## Action plan
-
-1. Merge and enforce the repository policy, Blueprint validation, package discovery, dependency
-   audits, Slither/Aderyn, SBOM, provenance, leak, and identity checks.
-2. Complete the typed contracts, durable runtime, shadow engine, and replay evidence in parallel.
-3. Provision the non-signing data plane and run database/R2 recovery and soak gates.
-4. Complete signer and custody reviews before adding those private services to the Blueprint.
-5. Deploy audited contracts halted and unfunded only after technical readiness evidence is signed.
-6. Keep capital activation blocked until every empirical, legal, audit, and operating gate passes.
+Do not deploy or fund capital-bearing components in this release. Audited typed contracts may be
+deployed halted and unfunded after the technical, audit, and key-review gates pass. Funding and a
+canary remain separately blocked by the complete empirical, legal, venue, and operational gate set.

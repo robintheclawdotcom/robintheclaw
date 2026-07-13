@@ -330,8 +330,13 @@ databases:
   - name: robin-app
     databaseName: robin_app
     user: robin_app
-    plan: basic-1gb
+    plan: pro-4gb
+    diskSizeGB: 100
+    storageAutoscalingEnabled: true
+    postgresMajorVersion: "18"
     region: virginia
+    highAvailability:
+      enabled: true
     ipAllowList: []
   - name: robin-research
     databaseName: robin_research

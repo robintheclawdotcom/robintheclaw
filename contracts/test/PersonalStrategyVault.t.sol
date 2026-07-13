@@ -17,6 +17,7 @@ contract PersonalStrategyVaultTest is Test {
     TestAssetFaucet faucet;
 
     function setUp() public {
+        vm.chainId(46630);
         asset = new TestUSDG(address(this), 1_000_000e6);
         factory = new PersonalStrategyVaultFactory(asset, agent, 1_000e6, 1 days);
         faucet = new TestAssetFaucet(asset, 1_000e6);
@@ -99,5 +100,21 @@ contract PersonalStrategyVaultTest is Test {
         vm.expectRevert(TestAssetFaucet.AlreadyClaimed.selector);
         faucet.claim();
         vm.stopPrank();
+    }
+
+    function testRejectsFactoryDeploymentOutsideRobinhoodTestnet() public {
+        vm.chainId(4663);
+        vm.expectRevert(
+            abi.encodeWithSelector(PersonalStrategyVaultFactory.UnsupportedChain.selector, 4663)
+        );
+        new PersonalStrategyVaultFactory(asset, agent, 1_000e6, 1 days);
+    }
+
+    function testRejectsDirectVaultDeploymentOutsideRobinhoodTestnet() public {
+        vm.chainId(4663);
+        vm.expectRevert(
+            abi.encodeWithSelector(PersonalStrategyVault.UnsupportedChain.selector, 4663)
+        );
+        new PersonalStrategyVault(asset, owner, agent, 1_000e6, 1 days);
     }
 }

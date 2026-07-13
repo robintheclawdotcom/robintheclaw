@@ -24,7 +24,7 @@ enabled = services.map { |service| service["name"] }
 required = %w[
   robintheclaw
   robin-research-collector
-  robin-control-api
+  robin-api
   robin-execution-coordinator
   robin-lighter-signer
   robin-robinhood-signer
@@ -33,7 +33,7 @@ required.each do |name|
   errors << "#{name}: service is missing" unless enabled.include?(name)
 end
 
-%w[robin-control-api robin-execution-coordinator robin-lighter-signer robin-robinhood-signer].each do |name|
+%w[robin-api robin-execution-coordinator robin-lighter-signer robin-robinhood-signer].each do |name|
   service = services.find { |item| item["name"] == name }
   errors << "#{name}: must be a private service" unless service&.fetch("type", nil) == "pserv"
 end
@@ -49,10 +49,10 @@ end
   errors << "#{name}: disabled liveness check must use /livez" unless service&.fetch("healthCheckPath", nil) == "/livez"
 end
 
-control = services.find { |service| service["name"] == "robin-control-api" }
-control_database = control&.fetch("envVars", [])&.find { |variable| variable["key"] == "DATABASE_URL" }
-unless control_database&.dig("fromDatabase", "property") == "connectionString"
-  errors << "robin-control-api: direct database connection required for read-only session policy"
+product_api = services.find { |service| service["name"] == "robin-api" }
+product_database = product_api&.fetch("envVars", [])&.find { |variable| variable["key"] == "DATABASE_URL" }
+unless product_database&.dig("fromDatabase", "property") == "connectionString"
+  errors << "robin-api: direct database connection required for migrations"
 end
 
 database = blueprint.fetch("databases", []).find { |item| item["name"] == "robin-research" }
@@ -64,6 +64,18 @@ else
   errors << "robin-research: PgBouncer required" unless database["connectionPool"] == "pgbouncer"
   errors << "robin-research: HA required" unless database.dig("highAvailability", "enabled") == true
   errors << "robin-research: storage autoscaling required" unless database["storageAutoscalingEnabled"] == true
+end
+
+app_database = blueprint.fetch("databases", []).find { |item| item["name"] == "robin-app" }
+if app_database.nil?
+  errors << "robin-app database is missing"
+else
+  errors << "robin-app: Pro database required" unless app_database["plan"].to_s.start_with?("pro-")
+  errors << "robin-app: external access must be disabled" unless app_database["ipAllowList"] == []
+  errors << "robin-app: HA required" unless app_database.dig("highAvailability", "enabled") == true
+  unless app_database["storageAutoscalingEnabled"] == true
+    errors << "robin-app: storage autoscaling required"
+  end
 end
 
 abort(errors.join("\n")) unless errors.empty?

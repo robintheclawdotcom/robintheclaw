@@ -57,6 +57,11 @@ non-exportable KMS key. Separate HMAC scopes isolate intent admission, exit and 
 events, market authority, and signer calls. The services enter Render disabled and the database mode
 enters `HALTED`.
 
+The personal-vault generic call path used by the no-code test environment is constructor-locked to
+Robinhood testnet chain ID 46630 and is absent from the mainnet deployment script. Mainnet custody
+uses only the typed v1 vault, risk manager, and internally constructed spot adapter. The testnet
+path must not be promoted, bridged, or redeployed as a mainnet substitute.
+
 The remaining risk is at the dependency boundary. A compromised authenticated collector, quote
 publisher, RPC pair, KMS policy, or Lighter subaccount could still feed or execute unsafe state if its
 production identity and monitoring are not independently verified. No enable flag, successful build,
@@ -84,7 +89,9 @@ exposure, margin deterioration, code-hash drift, storage pressure, and missing h
    hook, block, and runtime-code evidence.
 3. Add authenticated Lighter account-state and collateral snapshots to the coordinator pre-send gate.
 4. Move migrations and recovery drills into a dedicated release workflow with immutable evidence.
-5. Keep the public application documentation-only and the operator surface private and read-only.
+5. Keep unauthenticated public output documentation-only and delayed. Isolate the authenticated
+   product API from the separate private, read-only operator surface; neither receives signing
+   authority.
 
 ## Test coverage gaps
 

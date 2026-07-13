@@ -14,7 +14,7 @@
   "dependencies": {
     "@alchemy/common": "5.0.6",
     "@alchemy/wallet-apis": "5.0.6",
-    "@privy-io/react-auth": "3.34.0",
+    "@privy-io/react-auth": "3.35.0",
     "@solana-program/memo": "0.11.2",
     "@solana-program/system": "0.12.2",
     "@solana-program/token": "0.14.0",
@@ -23,7 +23,7 @@
     "next": "16.2.10",
     "react": "19.2.7",
     "react-dom": "19.2.7",
-    "viem": "2.52.0"
+    "viem": "2.55.1"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",
@@ -36,6 +36,10 @@
     "vitest": "4.1.10"
   },
   "overrides": {
-    "postcss": "8.5.10"
+    "@noble/hashes": "1.8.0",
+    "postcss": "8.5.10",
+    "uuid": "11.1.1",
+    "viem": "$viem",
+    "ws": "8.21.0"
   }
 }
