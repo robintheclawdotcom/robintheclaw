@@ -1,0 +1,180 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Required mainnet execution signals. Empty panels mean instrumentation or service state is absent, not that the system is healthy.",
+  "editable": false,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "targets": [
+        {"expr": "max by (execution_account_id, exposed_venue) (robin_unhedged_duration_seconds{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "{{execution_account_id}} {{exposed_venue}}", "refId": "A"}
+      ],
+      "title": "Unhedged duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "targets": [
+        {"expr": "max by (execution_account_id, venue, source) (robin_source_age_seconds{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "age {{execution_account_id}} {{venue}}/{{source}}", "refId": "A"},
+        {"expr": "max by (execution_account_id, venue, stream) (robin_source_gap_open{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "gap {{execution_account_id}} {{venue}}/{{stream}}", "refId": "B"}
+      ],
+      "title": "Authoritative source age and gaps",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+      "id": 3,
+      "targets": [
+        {"expr": "min by (execution_account_id, venue) (robin_margin_coverage_ratio{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "{{execution_account_id}} {{venue}}", "refId": "A"}
+      ],
+      "title": "Maintenance-margin coverage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+      "id": 4,
+      "targets": [
+        {"expr": "max by (execution_account_id, venue) (robin_unknown_positions{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "positions {{execution_account_id}} {{venue}}", "refId": "A"},
+        {"expr": "max by (execution_account_id, venue) (robin_unknown_orders{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "orders {{execution_account_id}} {{venue}}", "refId": "B"}
+      ],
+      "title": "Unknown venue state",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+      "id": 5,
+      "targets": [
+        {"expr": "max by (execution_account_id, venue, nonce_kind) (abs(robin_nonce_drift{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"}))", "legendFormat": "{{execution_account_id}} {{venue}}/{{nonce_kind}}", "refId": "A"}
+      ],
+      "title": "EVM and Lighter nonce drift",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "id": 6,
+      "targets": [
+        {"expr": "sum by (execution_account_id, venue, reason) (increase(robin_signer_failures_total{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"}[5m]))", "legendFormat": "signer {{execution_account_id}} {{venue}}/{{reason}}", "refId": "A"},
+        {"expr": "sum by (execution_account_id, operation, reason) (increase(robin_kms_failures_total{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"}[5m]))", "legendFormat": "KMS {{execution_account_id}} {{operation}}/{{reason}}", "refId": "B"}
+      ],
+      "title": "Signer and KMS failures (5m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 7,
+      "targets": [
+        {"expr": "max by (execution_account_id, chain_id, receipt) (robin_rpc_finality_disagreement{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "RPC disagreement {{execution_account_id}} {{receipt}}", "refId": "A"},
+        {"expr": "sum by (chain_id, depth) (increase(robin_reorgs_total{environment=~\"$environment\",strategy_version=~\"$strategy_version\"}[5m]))", "legendFormat": "reorg chain={{chain_id}} depth={{depth}}", "refId": "B"}
+      ],
+      "title": "Dual-RPC finality and reorgs",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 8,
+      "targets": [
+        {"expr": "max by (command, state) (robin_command_oldest_pending_seconds{environment=~\"$environment\",strategy_version=~\"$strategy_version\"})", "legendFormat": "command {{command}}/{{state}}", "refId": "A"},
+        {"expr": "max by (outbox, state) (robin_outbox_oldest_pending_seconds{environment=~\"$environment\",strategy_version=~\"$strategy_version\"})", "legendFormat": "outbox {{outbox}}/{{state}}", "refId": "B"}
+      ],
+      "title": "Command and outbox lag",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 9,
+      "targets": [
+        {"expr": "min by (execution_account_id, wallet_role, chain_id) (robin_gas_balance_wei{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "wei {{execution_account_id}}/{{wallet_role}}", "refId": "A"},
+        {"expr": "min by (execution_account_id, wallet_role, chain_id) (robin_gas_runway_seconds{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "runway {{execution_account_id}}/{{wallet_role}}", "refId": "B"},
+        {"expr": "min by (execution_account_id, wallet_role, chain_id) (robin_gas_ready{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "ready {{execution_account_id}}/{{wallet_role}}", "refId": "C"}
+      ],
+      "title": "User and execution-signer gas",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 32},
+      "id": 10,
+      "targets": [
+        {"expr": "robin_control_mode{environment=~\"$environment\",strategy_version=~\"$strategy_version\",mode=~\"ACTIVE|REDUCE_ONLY|HALTED\"} == 1", "legendFormat": "{{scope}}/{{scope_id}} {{mode}}", "refId": "A"}
+      ],
+      "title": "Effective control modes",
+      "type": "state-timeline"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 32},
+      "id": 11,
+      "targets": [
+        {"expr": "max by (execution_account_id, venue, saga_phase) (robin_unresolved_ambiguity{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "ambiguity {{execution_account_id}} {{venue}}/{{saga_phase}}", "refId": "A"},
+        {"expr": "min by (execution_account_id, venue) (robin_reconciliation_flat{environment=~\"$environment\",strategy_version=~\"$strategy_version\",execution_account_id=~\"$execution_account_id\"})", "legendFormat": "flat {{execution_account_id}}/{{venue}}", "refId": "B"}
+      ],
+      "title": "Ambiguity and flat reconciliation",
+      "type": "state-timeline"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 32},
+      "id": 12,
+      "targets": [
+        {"expr": "sum by (boundary, reason) (increase(robin_cross_account_incidents_total{environment=~\"$environment\",strategy_version=~\"$strategy_version\"}[5m]))", "legendFormat": "{{boundary}}/{{reason}}", "refId": "A"},
+        {"expr": "max by (incident_id, severity, stage, scope) (robin_incident_open{environment=~\"$environment\",strategy_version=~\"$strategy_version\"})", "legendFormat": "{{severity}} {{stage}}/{{scope}}", "refId": "B"}
+      ],
+      "title": "Cross-account and open incidents",
+      "type": "state-timeline"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "robin-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "dateTimeAsIso"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 40},
+      "id": 13,
+      "targets": [
+        {"expr": "max by (kill_path, release_digest) (robin_kill_path_last_success_timestamp_seconds{environment=~\"$environment\"}) * 1000", "format": "table", "instant": true, "legendFormat": "{{kill_path}}", "refId": "A"}
+      ],
+      "title": "Last evidence-complete kill-path drills",
+      "type": "table"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["mainnet", "execution", "disabled-by-default"],
+  "templating": {
+    "list": [
+      {"current": {"selected": false, "text": ".*", "value": ".*"}, "datasource": {"type": "prometheus", "uid": "robin-prometheus"}, "definition": "label_values(robin_control_mode, environment)", "hide": 0, "includeAll": false, "label": "Environment", "name": "environment", "options": [], "query": {"query": "label_values(robin_control_mode, environment)", "refId": "environment"}, "refresh": 1, "regex": "", "skipUrlSync": false, "type": "query"},
+      {"current": {"selected": false, "text": ".*", "value": ".*"}, "datasource": {"type": "prometheus", "uid": "robin-prometheus"}, "definition": "label_values(robin_control_mode{environment=~\"$environment\"}, strategy_version)", "hide": 0, "includeAll": false, "label": "Strategy", "name": "strategy_version", "options": [], "query": {"query": "label_values(robin_control_mode{environment=~\"$environment\"}, strategy_version)", "refId": "strategy_version"}, "refresh": 1, "regex": "", "skipUrlSync": false, "type": "query"},
+      {"current": {"selected": false, "text": ".*", "value": ".*"}, "datasource": {"type": "prometheus", "uid": "robin-prometheus"}, "definition": "label_values(robin_unhedged_duration_seconds{environment=~\"$environment\",strategy_version=~\"$strategy_version\"}, execution_account_id)", "hide": 0, "includeAll": false, "label": "Execution account", "name": "execution_account_id", "options": [], "query": {"query": "label_values(robin_unhedged_duration_seconds{environment=~\"$environment\",strategy_version=~\"$strategy_version\"}, execution_account_id)", "refId": "execution_account_id"}, "refresh": 1, "regex": "", "skipUrlSync": false, "type": "query"}
+    ]
+  },
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Robin mainnet live execution",
+  "uid": "robin-mainnet-live-v1",
+  "version": 1
+}

@@ -1,0 +1,194 @@
+groups:
+  - name: robin-mainnet-execution-v1
+    interval: 5s
+    rules:
+      - alert: RobinUnhedgedExposureHigh
+        expr: max by (execution_account_id, strategy_version) (robin_unhedged_duration_seconds) > 15
+        for: 0s
+        labels:
+          severity: high
+          scope: account
+          stage_reset: "true"
+        annotations:
+          summary: Execution account has remained unhedged beyond the repair budget
+          runbook: docs/mainnet-operations-runbook.md#unhedged-exposure
+      - alert: RobinSourceStateStale
+        expr: max by (execution_account_id, venue, source) (robin_source_age_seconds) > 5
+        for: 0s
+        labels:
+          severity: high
+          scope: account
+          stage_reset: "true"
+        annotations:
+          summary: Authoritative venue state is too old for admission or repair
+          runbook: docs/mainnet-operations-runbook.md#source-age-or-stream-gap
+      - alert: RobinSourceStreamGap
+        expr: max by (execution_account_id, venue, stream) (robin_source_gap_open) > 0
+        for: 0s
+        labels:
+          severity: high
+          scope: account
+          stage_reset: "true"
+        annotations:
+          summary: Venue stream has an unresolved sequence gap
+          runbook: docs/mainnet-operations-runbook.md#source-age-or-stream-gap
+      - alert: RobinMarginCoverageLow
+        expr: min by (execution_account_id, venue) (robin_margin_coverage_ratio) < 2
+        for: 0s
+        labels:
+          severity: high
+          scope: account
+          stage_reset: "true"
+        annotations:
+          summary: Verified collateral is below two times maintenance margin
+          runbook: docs/mainnet-operations-runbook.md#margin-coverage
+      - alert: RobinUnknownVenueState
+        expr: max by (execution_account_id, venue) (robin_unknown_positions) > 0 or max by (execution_account_id, venue) (robin_unknown_orders) > 0
+        for: 0s
+        labels:
+          severity: critical
+          scope: account
+          stage_reset: "true"
+        annotations:
+          summary: Venue state contains an order or position with no admitted saga
+          runbook: docs/mainnet-operations-runbook.md#unknown-orders-or-positions
+      - alert: RobinNonceDrift
+        expr: max by (execution_account_id, venue, nonce_kind) (abs(robin_nonce_drift)) > 0
+        for: 0s
+        labels:
+          severity: high
+          scope: account
+          stage_reset: "true"
+        annotations:
+          summary: Reserved or signed nonce differs from authoritative venue state
+          runbook: docs/mainnet-operations-runbook.md#nonce-drift
+      - alert: RobinSignerFailure
+        expr: sum by (execution_account_id, venue, reason) (increase(robin_signer_failures_total[5m])) > 0
+        for: 0s
+        labels:
+          severity: high
+          scope: account
+          stage_reset: "true"
+        annotations:
+          summary: A signer request failed or violated its account binding
+          runbook: docs/mainnet-operations-runbook.md#signer-or-kms-failure
+      - alert: RobinKmsFailure
+        expr: sum by (execution_account_id, operation, reason) (increase(robin_kms_failures_total[5m])) > 0
+        for: 0s
+        labels:
+          severity: critical
+          scope: account
+          stage_reset: "true"
+        annotations:
+          summary: KMS operation failed or returned an invalid account binding
+          runbook: docs/mainnet-operations-runbook.md#signer-or-kms-failure
+      - alert: RobinFinalityRpcDisagreement
+        expr: max by (execution_account_id, chain_id, receipt) (robin_rpc_finality_disagreement) > 0
+        for: 0s
+        labels:
+          severity: critical
+          scope: shared
+          stage_reset: "true"
+        annotations:
+          summary: Independent RPC sources disagree about transaction finality
+          runbook: docs/mainnet-operations-runbook.md#finality-disagreement-or-reorg
+      - alert: RobinReorgDetected
+        expr: sum by (chain_id, depth) (increase(robin_reorgs_total[5m])) > 0
+        for: 0s
+        labels:
+          severity: critical
+          scope: shared
+          stage_reset: "true"
+        annotations:
+          summary: A previously canonical block or receipt was removed
+          runbook: docs/mainnet-operations-runbook.md#finality-disagreement-or-reorg
+      - alert: RobinCommandLagHigh
+        expr: max by (command, state) (robin_command_oldest_pending_seconds) > 30
+        for: 15s
+        labels:
+          severity: high
+          scope: system
+          stage_reset: "true"
+        annotations:
+          summary: A user command has remained non-terminal beyond the dispatch budget
+          runbook: docs/mainnet-operations-runbook.md#command-or-outbox-lag
+      - alert: RobinOutboxLagHigh
+        expr: max by (outbox, state) (robin_outbox_oldest_pending_seconds) > 30
+        for: 15s
+        labels:
+          severity: high
+          scope: system
+          stage_reset: "true"
+        annotations:
+          summary: Durable outbox delivery has not reconciled within the dispatch budget
+          runbook: docs/mainnet-operations-runbook.md#command-or-outbox-lag
+      - alert: RobinExecutionGasRunwayLow
+        expr: min by (execution_account_id, wallet_role, chain_id) (robin_gas_runway_seconds{wallet_role="execution_signer"}) < 3600
+        for: 60s
+        labels:
+          severity: high
+          scope: account
+          stage_reset: "true"
+        annotations:
+          summary: Execution signer has less than one hour of conservative gas runway
+          runbook: docs/mainnet-operations-runbook.md#gas-readiness
+      - alert: RobinAccountGasNotReady
+        expr: min by (execution_account_id, wallet_role, chain_id) (robin_gas_ready{wallet_role="user"}) == 0
+        for: 0s
+        labels:
+          severity: warning
+          scope: account
+          stage_reset: "false"
+        annotations:
+          summary: User deployment payer does not satisfy the versioned gas policy
+          runbook: docs/mainnet-operations-runbook.md#gas-readiness
+      - alert: RobinRestrictiveControlActive
+        expr: max by (scope, scope_id, mode) (robin_control_mode{mode=~"REDUCE_ONLY|HALTED"}) == 1
+        for: 60s
+        labels:
+          severity: warning
+          scope: control
+          stage_reset: "false"
+        annotations:
+          summary: A control scope remains in a restrictive mode
+          runbook: docs/mainnet-operations-runbook.md#control-mode
+      - alert: RobinUnresolvedAmbiguity
+        expr: max by (execution_account_id, venue, saga_phase) (robin_unresolved_ambiguity) > 0
+        for: 0s
+        labels:
+          severity: critical
+          scope: account
+          stage_reset: "true"
+        annotations:
+          summary: A transaction or order send has an unresolved acceptance or outcome
+          runbook: docs/mainnet-operations-runbook.md#unresolved-ambiguity
+      - alert: RobinCrossAccountIncident
+        expr: sum by (boundary, reason) (increase(robin_cross_account_incidents_total[5m])) > 0
+        for: 0s
+        labels:
+          severity: critical
+          scope: shared
+          stage_reset: "true"
+        annotations:
+          summary: An account-isolation boundary was violated or attacked
+          runbook: docs/mainnet-operations-runbook.md#cross-account-incident
+      - alert: RobinStageObservationReset
+        expr: max by (stage, severity, scope) (robin_incident_open{severity=~"high|critical"}) > 0
+        for: 0s
+        labels:
+          severity: high
+          scope: promotion
+          stage_reset: "true"
+        annotations:
+          summary: An open high or critical incident resets the clean-observation period
+          runbook: docs/mainnet-operations-runbook.md#stage-reset
+      - alert: RobinMainnetTelemetryAbsent
+        expr: absent(robin_control_mode{scope="global"}) == 1
+        for: 60s
+        labels:
+          severity: critical
+          scope: system
+          stage_reset: "true"
+        annotations:
+          summary: The mainnet control-plane telemetry contract is not being emitted
+          runbook: docs/mainnet-operations-runbook.md#telemetry-absence

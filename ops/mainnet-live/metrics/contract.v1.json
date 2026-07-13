@@ -1,0 +1,192 @@
+{
+  "schemaVersion": "robin.mainnet.metrics.v1",
+  "status": "instrumentation-required",
+  "assumptions": {
+    "capitalEnabled": false,
+    "servicesEnabled": false,
+    "telemetryClaim": "This contract defines required emissions. It is not evidence that any producer is deployed or emitting live data.",
+    "accountIdentity": "execution_account_id is an opaque identifier and must never contain a wallet, user name, email, or venue credential"
+  },
+  "commonLabels": [
+    "environment",
+    "strategy_version"
+  ],
+  "metrics": [
+    {
+      "name": "robin_unhedged_duration_seconds",
+      "type": "gauge",
+      "unit": "seconds",
+      "producer": "coordinator",
+      "labels": ["execution_account_id", "episode_id", "exposed_venue"],
+      "semantics": "Wall-clock seconds since an episode first became directionally unhedged; zero only after both venues reconcile flat or hedged."
+    },
+    {
+      "name": "robin_source_age_seconds",
+      "type": "gauge",
+      "unit": "seconds",
+      "producer": "venue publishers",
+      "labels": ["execution_account_id", "venue", "source"],
+      "semantics": "Current time minus the authoritative observed-at time, never the scrape or publish time."
+    },
+    {
+      "name": "robin_source_gap_open",
+      "type": "gauge",
+      "unit": "boolean",
+      "producer": "venue publishers",
+      "labels": ["execution_account_id", "venue", "stream"],
+      "semantics": "One from first detected sequence discontinuity until REST reconstruction and sequence reconciliation complete; otherwise zero."
+    },
+    {
+      "name": "robin_margin_coverage_ratio",
+      "type": "gauge",
+      "unit": "ratio",
+      "producer": "Lighter account publisher",
+      "labels": ["execution_account_id", "venue"],
+      "semantics": "Verified collateral divided by maintenance margin using the authoritative account snapshot."
+    },
+    {
+      "name": "robin_unknown_positions",
+      "type": "gauge",
+      "unit": "count",
+      "producer": "venue publishers",
+      "labels": ["execution_account_id", "venue"],
+      "semantics": "Positions present at a venue that do not reconcile to an admitted episode."
+    },
+    {
+      "name": "robin_unknown_orders",
+      "type": "gauge",
+      "unit": "count",
+      "producer": "venue publishers",
+      "labels": ["execution_account_id", "venue"],
+      "semantics": "Open or recently terminal orders that do not reconcile to a recorded intent and saga."
+    },
+    {
+      "name": "robin_nonce_drift",
+      "type": "gauge",
+      "unit": "count",
+      "producer": "coordinator",
+      "labels": ["execution_account_id", "venue", "nonce_kind"],
+      "semantics": "Signed or reserved nonce minus the authoritative venue nonce; zero is the only admission-safe value."
+    },
+    {
+      "name": "robin_signer_failures_total",
+      "type": "counter",
+      "unit": "failures",
+      "producer": "signer services",
+      "labels": ["execution_account_id", "venue", "reason"],
+      "semantics": "Count of rejected, mismatched, timed-out, or failed signing attempts."
+    },
+    {
+      "name": "robin_kms_failures_total",
+      "type": "counter",
+      "unit": "failures",
+      "producer": "KMS-backed provisioners and signers",
+      "labels": ["execution_account_id", "operation", "reason"],
+      "semantics": "Count of KMS authorization, key-binding, decryption, public-key, or signing failures."
+    },
+    {
+      "name": "robin_rpc_finality_disagreement",
+      "type": "gauge",
+      "unit": "boolean",
+      "producer": "Robinhood finality publisher",
+      "labels": ["execution_account_id", "chain_id", "receipt"],
+      "semantics": "One when the two configured RPC sources disagree about receipt inclusion, status, block hash, or finalized ancestry."
+    },
+    {
+      "name": "robin_reorgs_total",
+      "type": "counter",
+      "unit": "events",
+      "producer": "Robinhood finality publisher",
+      "labels": ["chain_id", "depth"],
+      "semantics": "Count of previously observed canonical blocks or receipts removed by a chain reorganization."
+    },
+    {
+      "name": "robin_command_oldest_pending_seconds",
+      "type": "gauge",
+      "unit": "seconds",
+      "producer": "product command dispatcher",
+      "labels": ["command", "state"],
+      "semantics": "Age of the oldest non-terminal user command, measured from its durable creation time."
+    },
+    {
+      "name": "robin_outbox_oldest_pending_seconds",
+      "type": "gauge",
+      "unit": "seconds",
+      "producer": "product command dispatcher",
+      "labels": ["outbox", "state"],
+      "semantics": "Age of the oldest durable outbox record that has not been reconciled with its downstream consumer."
+    },
+    {
+      "name": "robin_gas_balance_wei",
+      "type": "gauge",
+      "unit": "wei",
+      "producer": "Robinhood finality publisher",
+      "labels": ["execution_account_id", "wallet_role", "chain_id"],
+      "semantics": "Latest finalized native-token balance for the user deployment payer or non-exportable execution signer."
+    },
+    {
+      "name": "robin_gas_runway_seconds",
+      "type": "gauge",
+      "unit": "seconds",
+      "producer": "Robinhood finality publisher",
+      "labels": ["execution_account_id", "wallet_role", "chain_id"],
+      "semantics": "Conservative time to gas exhaustion using finalized balance and the configured upper-bound transaction burn rate."
+    },
+    {
+      "name": "robin_gas_ready",
+      "type": "gauge",
+      "unit": "boolean",
+      "producer": "readiness service",
+      "labels": ["execution_account_id", "wallet_role", "chain_id"],
+      "semantics": "One only when finalized gas balance satisfies the versioned readiness policy; zero otherwise."
+    },
+    {
+      "name": "robin_control_mode",
+      "type": "gauge",
+      "unit": "boolean",
+      "producer": "coordinator",
+      "labels": ["scope", "scope_id", "mode"],
+      "semantics": "Exactly one series is one for each scope and scope_id across ACTIVE, REDUCE_ONLY, and HALTED; all other mode series are zero."
+    },
+    {
+      "name": "robin_unresolved_ambiguity",
+      "type": "gauge",
+      "unit": "boolean",
+      "producer": "coordinator",
+      "labels": ["execution_account_id", "venue", "saga_phase"],
+      "semantics": "One after any send with unknown acceptance or outcome until authoritative reconciliation resolves it."
+    },
+    {
+      "name": "robin_cross_account_incidents_total",
+      "type": "counter",
+      "unit": "incidents",
+      "producer": "coordinator and signers",
+      "labels": ["boundary", "reason"],
+      "semantics": "Count of attempted or detected credential, key, nonce, vault, signer, response, or event substitution across accounts."
+    },
+    {
+      "name": "robin_incident_open",
+      "type": "gauge",
+      "unit": "boolean",
+      "producer": "incident controller",
+      "labels": ["incident_id", "severity", "stage", "scope"],
+      "semantics": "One while an independently recorded incident is open. High and critical incidents reset that stage's clean-observation clock."
+    },
+    {
+      "name": "robin_kill_path_last_success_timestamp_seconds",
+      "type": "gauge",
+      "unit": "unix_seconds",
+      "producer": "drill recorder",
+      "labels": ["kill_path", "environment", "release_digest"],
+      "semantics": "Completion time of the last evidence-complete drill for global, strategy, account, guardian, or user restriction authority."
+    },
+    {
+      "name": "robin_reconciliation_flat",
+      "type": "gauge",
+      "unit": "boolean",
+      "producer": "coordinator",
+      "labels": ["execution_account_id", "venue"],
+      "semantics": "One only when authoritative positions and orders are known and flat for the execution account at the named venue."
+    }
+  ]
+}
