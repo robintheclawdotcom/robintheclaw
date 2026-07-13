@@ -1,0 +1,21 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Backend for the delta-neutral basis agent: HTTP API, EVM indexer, event bus, live feed."
+
+[dependencies]
+actix = "0.13"
+actix-web = "4"
+actix-web-actors = "4"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+env_logger = "0.11"
+engine = { path = "../engine" }

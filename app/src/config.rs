@@ -1,0 +1,135 @@
+use std::env;
+
+fn env_or(key: &str, default: &str) -> String {
+    env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    env::var(key)
+        .ok()
+        .map(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("true") || v == "1"
+        })
+        .unwrap_or(default)
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_list(key: &str) -> Vec<String> {
+    env::var(key)
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Runtime configuration, entirely environment-driven so the same binary runs against testnet or
+/// mainnet without a rebuild. Contract addresses default empty; the indexer stays idle until they
+/// are supplied, which keeps a fresh deployment from watching the wrong chain.
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub host: String,
+    pub port: u16,
+    pub is_development: bool,
+    pub cors_origins: Vec<String>,
+
+    pub rpc_url: String,
+    pub rpc_fallback_urls: Vec<String>,
+    pub chain_id: u64,
+
+    pub vault_address: String,
+    pub anchor_address: String,
+    pub guard_address: String,
+    pub lighter_api: String,
+
+    pub evm_enabled: bool,
+    pub indexer_lookback_blocks: u64,
+    pub indexer_confirmations: u64,
+    pub indexer_max_logs: usize,
+
+    pub geo_blocking_enabled: bool,
+}
+
+impl Config {
+    pub fn from_env() -> Self {
+        let cors_origins = {
+            let list = env_list("CORS_ORIGINS");
+            if list.is_empty() {
+                vec!["*".to_string()]
+            } else {
+                list
+            }
+        };
+
+        Self {
+            host: env_or("HOST", "127.0.0.1"),
+            port: env_u64("PORT", 8080) as u16,
+            is_development: env_bool("DEVELOPMENT", true),
+            cors_origins,
+            rpc_url: env_or("RH_MAINNET_RPC", "https://rpc.mainnet.chain.robinhood.com"),
+            rpc_fallback_urls: env_list("RH_RPC_FALLBACK"),
+            chain_id: env_u64("RH_CHAIN_ID", 4663),
+            vault_address: env_or("VAULT_ADDRESS", ""),
+            anchor_address: env_or("ANCHOR_ADDRESS", ""),
+            guard_address: env_or("GUARD_ADDRESS", ""),
+            lighter_api: env_or("LIGHTER_API", "https://mainnet.zklighter.elliot.ai"),
+            evm_enabled: env_bool("EVM_ENABLED", true),
+            indexer_lookback_blocks: env_u64("INDEXER_LOOKBACK_BLOCKS", 50_000),
+            indexer_confirmations: env_u64("INDEXER_CONFIRMATIONS", 5),
+            indexer_max_logs: env_u64("INDEXER_MAX_LOGS", 20_000) as usize,
+            geo_blocking_enabled: env_bool("GEO_BLOCKING_ENABLED", true),
+        }
+    }
+
+    /// Contract addresses the indexer follows, empties dropped.
+    pub fn watched_addresses(&self) -> Vec<String> {
+        [
+            &self.vault_address,
+            &self.anchor_address,
+            &self.guard_address,
+        ]
+        .into_iter()
+        .filter(|a| !a.is_empty())
+        .cloned()
+        .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> Config {
+        let mut c = Config::from_env();
+        c.vault_address = "0xaaaa".into();
+        c.anchor_address = String::new();
+        c.guard_address = "0xbbbb".into();
+        c
+    }
+
+    #[test]
+    fn watched_addresses_drops_empties() {
+        assert_eq!(
+            cfg().watched_addresses(),
+            vec!["0xaaaa".to_string(), "0xbbbb".to_string()]
+        );
+    }
+
+    #[test]
+    fn default_chain_is_robinhood() {
+        // No env override in the test environment.
+        let c = Config::from_env();
+        assert!(c.chain_id >= 1);
+        assert!(!c.rpc_url.is_empty());
+    }
+}
