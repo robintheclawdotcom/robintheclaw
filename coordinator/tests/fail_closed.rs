@@ -20,6 +20,8 @@ fn disabled_config() -> Config {
         market_caller_id: None,
         control_hmac_key: None,
         control_caller_id: None,
+        registration_hmac_key: None,
+        registration_caller_id: None,
         lighter_signer_url: None,
         robinhood_signer_url: None,
         signer_caller_id: None,
@@ -76,6 +78,25 @@ async fn disabled_coordinator_rejects_intents() {
         .await
         .unwrap();
     assert_ne!(response.status(), 201);
+}
+
+#[tokio::test]
+async fn disabled_coordinator_rejects_account_registration() {
+    let app = api::routes(Arc::new(
+        AppState::initialize(disabled_config()).await.unwrap(),
+    ));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/account-registrations")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 503);
 }
 
 #[tokio::test]

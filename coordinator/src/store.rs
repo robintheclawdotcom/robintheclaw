@@ -1,6 +1,6 @@
 use execution::{
     ExecutionEvent, ExecutionSaga, ExecutionState, PairIntent, SagaError,
-    CANARY_DAILY_TURNOVER_CAP_MICROS,
+    BASIS_AAPL_V1_MANIFEST_SHA256, CANARY_DAILY_TURNOVER_CAP_MICROS, CANARY_RISK_VERSION,
 };
 use research::PromotionEvidence;
 use serde::{Deserialize, Serialize};
@@ -315,6 +315,128 @@ pub struct AccountCommandResponse {
     pub owner_actions: Vec<OwnerAction>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AccountRegistrationRequest {
+    pub execution_account_id: String,
+    pub agent_id: String,
+    pub strategy_version: String,
+    pub risk_version: String,
+    pub strategy_manifest_sha256: String,
+    pub lighter_account_index: i64,
+    pub lighter_api_key_index: i16,
+    pub robinhood_owner: String,
+    pub robinhood_vault: String,
+    pub robinhood_signer: String,
+    pub binding_sha256: String,
+}
+
+impl AccountRegistrationRequest {
+    pub fn calculate_binding_sha256(&self) -> String {
+        hex::encode(Sha256::digest(format!(
+            "robin.execution-account-binding.v1\0{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            self.execution_account_id,
+            self.agent_id,
+            self.strategy_version,
+            self.risk_version,
+            self.strategy_manifest_sha256,
+            self.lighter_account_index,
+            self.lighter_api_key_index,
+            self.robinhood_owner,
+            self.robinhood_vault,
+            self.robinhood_signer,
+        )))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountRegistrationReadiness {
+    pub venue_approved: bool,
+    pub oracle_healthy: bool,
+    pub sequencer_healthy: bool,
+    pub reconciliation_ready: bool,
+    pub exit_authority_ready: bool,
+    pub alerting_ready: bool,
+    pub safe_rotation_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountRegistrationResponse {
+    pub execution_account_id: String,
+    pub agent_id: String,
+    pub strategy_version: String,
+    pub risk_version: String,
+    pub strategy_manifest_sha256: String,
+    pub lighter_account_index: i64,
+    pub lighter_api_key_index: i16,
+    pub robinhood_owner: String,
+    pub robinhood_vault: String,
+    pub robinhood_signer: String,
+    pub binding_sha256: String,
+    pub account_status: String,
+    pub control_mode: String,
+    pub readiness: AccountRegistrationReadiness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRegistrationOutcome {
+    pub created: bool,
+    pub response: AccountRegistrationResponse,
+}
+
+#[derive(sqlx::FromRow)]
+struct AccountRegistrationRow {
+    execution_account_id: String,
+    agent_id: String,
+    strategy_version: String,
+    risk_version: String,
+    strategy_manifest_sha256: String,
+    lighter_account_index: i64,
+    lighter_api_key_index: i16,
+    robinhood_owner: String,
+    robinhood_vault: String,
+    robinhood_signer: String,
+    binding_sha256: String,
+    account_status: String,
+    control_mode: String,
+    venue_approved: bool,
+    oracle_healthy: bool,
+    sequencer_healthy: bool,
+    reconciliation_ready: bool,
+    exit_authority_ready: bool,
+    alerting_ready: bool,
+    safe_rotation_ready: bool,
+}
+
+impl From<AccountRegistrationRow> for AccountRegistrationResponse {
+    fn from(row: AccountRegistrationRow) -> Self {
+        Self {
+            execution_account_id: row.execution_account_id,
+            agent_id: row.agent_id,
+            strategy_version: row.strategy_version,
+            risk_version: row.risk_version,
+            strategy_manifest_sha256: row.strategy_manifest_sha256,
+            lighter_account_index: row.lighter_account_index,
+            lighter_api_key_index: row.lighter_api_key_index,
+            robinhood_owner: row.robinhood_owner,
+            robinhood_vault: row.robinhood_vault,
+            robinhood_signer: row.robinhood_signer,
+            binding_sha256: row.binding_sha256,
+            account_status: row.account_status,
+            control_mode: row.control_mode,
+            readiness: AccountRegistrationReadiness {
+                venue_approved: row.venue_approved,
+                oracle_healthy: row.oracle_healthy,
+                sequencer_healthy: row.sequencer_healthy,
+                reconciliation_ready: row.reconciliation_ready,
+                exit_authority_ready: row.exit_authority_ready,
+                alerting_ready: row.alerting_ready,
+                safe_rotation_ready: row.safe_rotation_ready,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExitAuthority {
@@ -463,6 +585,10 @@ pub enum StoreError {
     AccountCommandConflict,
     #[error("account command is blocked by execution controls or reconciliation")]
     AccountCommandBlocked,
+    #[error("execution account registration conflicts with authoritative binding")]
+    AccountRegistrationConflict,
+    #[error("execution account registration does not exist")]
+    AccountRegistrationMissing,
 }
 
 impl Store {
@@ -509,6 +635,8 @@ impl Store {
             "public.execution_strategy_control",
             "public.execution_account_commands",
             "public.execution_account_command_events",
+            "public.execution_account_registrations",
+            "public.execution_account_registration_addresses",
         ] {
             let exists = sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
                 .bind(table)
@@ -547,6 +675,7 @@ impl Store {
                 | "market_quote"
                 | "account_snapshot"
                 | "account_command"
+                | "account_registration"
         ) || nonce.len() < 32
             || nonce.len() > 128
             || expires_at_unix <= 0
@@ -574,6 +703,202 @@ impl Store {
         }
         transaction.commit().await?;
         Ok(())
+    }
+
+    pub async fn register_execution_account(
+        &self,
+        request: &AccountRegistrationRequest,
+    ) -> Result<AccountRegistrationOutcome, StoreError> {
+        if !valid_account_registration(request)
+            || request.binding_sha256 != request.calculate_binding_sha256()
+        {
+            return Err(StoreError::InvalidAction);
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('execution_account_registration'))")
+            .execute(&mut *transaction)
+            .await?;
+        let conflicts = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT execution_account_id
+            FROM execution_accounts
+            WHERE execution_account_id = $1
+               OR agent_id = $2
+               OR (lighter_account_index = $3 AND lighter_api_key_index = $4)
+               OR binding_sha256 = $5
+               OR robinhood_vault IN ($6, $7, $8)
+               OR robinhood_signer IN ($6, $7, $8)
+               OR owner_address IN ($6, $7, $8)
+            ORDER BY execution_account_id
+            FOR UPDATE
+            "#,
+        )
+        .bind(&request.execution_account_id)
+        .bind(&request.agent_id)
+        .bind(request.lighter_account_index)
+        .bind(request.lighter_api_key_index)
+        .bind(&request.binding_sha256)
+        .bind(&request.robinhood_owner)
+        .bind(&request.robinhood_vault)
+        .bind(&request.robinhood_signer)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if conflicts.len() == 1 && conflicts[0] == request.execution_account_id {
+            match load_account_registration(&mut transaction, &request.execution_account_id).await {
+                Ok(response) if registration_matches_request(&response, request) => {
+                    transaction.commit().await?;
+                    return Ok(AccountRegistrationOutcome {
+                        created: false,
+                        response,
+                    });
+                }
+                Ok(_) | Err(StoreError::AccountRegistrationMissing) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if !conflicts.is_empty() {
+            for execution_account_id in &conflicts {
+                halt_account(
+                    &mut transaction,
+                    execution_account_id,
+                    "account_registration_identity_conflict",
+                )
+                .await?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO execution_incidents
+                        (execution_account_id, severity, kind, details)
+                    VALUES ($1, 'critical', 'account_registration_identity_conflict', $2)
+                    "#,
+                )
+                .bind(execution_account_id)
+                .bind(Json(serde_json::json!({
+                    "requested_execution_account_id": request.execution_account_id,
+                    "requested_binding_sha256": request.binding_sha256,
+                })))
+                .execute(&mut *transaction)
+                .await?;
+            }
+            halt_execution(&mut transaction, "account_registration_identity_conflict").await?;
+            transaction.commit().await?;
+            return Err(StoreError::AccountRegistrationConflict);
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO execution_accounts
+                (execution_account_id, agent_id, strategy_version, risk_version, status,
+                 lighter_account_index, lighter_api_key_index, robinhood_vault,
+                 robinhood_signer, owner_address, strategy_manifest_sha256, binding_sha256)
+            VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11)
+            "#,
+        )
+        .bind(&request.execution_account_id)
+        .bind(&request.agent_id)
+        .bind(&request.strategy_version)
+        .bind(&request.risk_version)
+        .bind(request.lighter_account_index)
+        .bind(request.lighter_api_key_index)
+        .bind(&request.robinhood_vault)
+        .bind(&request.robinhood_signer)
+        .bind(&request.robinhood_owner)
+        .bind(&request.strategy_manifest_sha256)
+        .bind(&request.binding_sha256)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO execution_account_registrations
+                (execution_account_id, agent_id, strategy_version, risk_version,
+                 strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+                 robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            "#,
+        )
+        .bind(&request.execution_account_id)
+        .bind(&request.agent_id)
+        .bind(&request.strategy_version)
+        .bind(&request.risk_version)
+        .bind(&request.strategy_manifest_sha256)
+        .bind(request.lighter_account_index)
+        .bind(request.lighter_api_key_index)
+        .bind(&request.robinhood_owner)
+        .bind(&request.robinhood_vault)
+        .bind(&request.robinhood_signer)
+        .bind(&request.binding_sha256)
+        .execute(&mut *transaction)
+        .await?;
+        for (address, role) in [
+            (&request.robinhood_owner, "owner"),
+            (&request.robinhood_vault, "vault"),
+            (&request.robinhood_signer, "signer"),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO execution_account_registration_addresses
+                    (address, execution_account_id, role)
+                VALUES ($1, $2, $3)
+                "#,
+            )
+            .bind(address)
+            .bind(&request.execution_account_id)
+            .bind(role)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO execution_account_control (execution_account_id, mode, reason)
+            VALUES ($1, 'HALTED', 'registration requires verified readiness and activation')
+            "#,
+        )
+        .bind(&request.execution_account_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("INSERT INTO execution_account_readiness (execution_account_id) VALUES ($1)")
+            .bind(&request.execution_account_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO execution_strategy_control
+                (strategy_version, strategy_manifest_sha256, mode, reason)
+            VALUES ($1, $2, 'HALTED', 'strategy activation requires explicit approval')
+            ON CONFLICT (strategy_version) DO NOTHING
+            "#,
+        )
+        .bind(&request.strategy_version)
+        .bind(&request.strategy_manifest_sha256)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO execution_control (singleton, mode, reason)
+            VALUES (TRUE, 'HALTED', 'initial deployment')
+            ON CONFLICT (singleton) DO NOTHING
+            "#,
+        )
+        .execute(&mut *transaction)
+        .await?;
+        let response =
+            load_account_registration(&mut transaction, &request.execution_account_id).await?;
+        transaction.commit().await?;
+        Ok(AccountRegistrationOutcome {
+            created: true,
+            response,
+        })
+    }
+
+    pub async fn execution_account_registration(
+        &self,
+        execution_account_id: &str,
+    ) -> Result<AccountRegistrationResponse, StoreError> {
+        if !valid_control_id(execution_account_id) {
+            return Err(StoreError::InvalidAction);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let response = load_account_registration(&mut transaction, execution_account_id).await?;
+        transaction.commit().await?;
+        Ok(response)
     }
 
     pub async fn submit_account_command(
@@ -4388,6 +4713,75 @@ fn account_command_digest(request: &AccountCommandRequest) -> String {
     )))
 }
 
+async fn load_account_registration(
+    transaction: &mut Transaction<'_, Postgres>,
+    execution_account_id: &str,
+) -> Result<AccountRegistrationResponse, StoreError> {
+    let row = sqlx::query_as::<_, AccountRegistrationRow>(
+        r#"
+        SELECT registration.execution_account_id, registration.agent_id,
+               registration.strategy_version, registration.risk_version,
+               registration.strategy_manifest_sha256, registration.lighter_account_index,
+               registration.lighter_api_key_index, registration.robinhood_owner,
+               registration.robinhood_vault, registration.robinhood_signer,
+               registration.binding_sha256, account.status AS account_status,
+               control.mode AS control_mode, readiness.venue_approved,
+               readiness.oracle_healthy, readiness.sequencer_healthy,
+               readiness.reconciliation_ready, readiness.exit_authority_ready,
+               readiness.alerting_ready, readiness.safe_rotation_ready
+        FROM execution_account_registrations registration
+        JOIN execution_accounts account USING (execution_account_id)
+        JOIN execution_account_control control USING (execution_account_id)
+        JOIN execution_account_readiness readiness USING (execution_account_id)
+        WHERE registration.execution_account_id = $1
+        FOR SHARE OF registration, account, control, readiness
+        "#,
+    )
+    .bind(execution_account_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StoreError::AccountRegistrationMissing)?;
+    Ok(row.into())
+}
+
+fn registration_matches_request(
+    response: &AccountRegistrationResponse,
+    request: &AccountRegistrationRequest,
+) -> bool {
+    response.execution_account_id == request.execution_account_id
+        && response.agent_id == request.agent_id
+        && response.strategy_version == request.strategy_version
+        && response.risk_version == request.risk_version
+        && response.strategy_manifest_sha256 == request.strategy_manifest_sha256
+        && response.lighter_account_index == request.lighter_account_index
+        && response.lighter_api_key_index == request.lighter_api_key_index
+        && response.robinhood_owner == request.robinhood_owner
+        && response.robinhood_vault == request.robinhood_vault
+        && response.robinhood_signer == request.robinhood_signer
+        && response.binding_sha256 == request.binding_sha256
+}
+
+fn valid_account_registration(request: &AccountRegistrationRequest) -> bool {
+    valid_control_id(&request.execution_account_id)
+        && valid_control_id(&request.agent_id)
+        && request.strategy_version == CANARY_RISK_VERSION
+        && request.risk_version == CANARY_RISK_VERSION
+        && request.strategy_manifest_sha256 == BASIS_AAPL_V1_MANIFEST_SHA256
+        && request.lighter_account_index > 0
+        && (2..=254).contains(&request.lighter_api_key_index)
+        && valid_evm_address(&request.robinhood_owner)
+        && valid_evm_address(&request.robinhood_vault)
+        && valid_evm_address(&request.robinhood_signer)
+        && request.robinhood_owner != request.robinhood_vault
+        && request.robinhood_owner != request.robinhood_signer
+        && request.robinhood_vault != request.robinhood_signer
+        && request.binding_sha256.len() == 64
+        && request
+            .binding_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn valid_control_id(value: &str) -> bool {
     (8..=64).contains(&value.len())
         && value.bytes().enumerate().all(|(index, byte)| {
@@ -4998,5 +5392,49 @@ mod tests {
         assert_ne!(first, account_command_digest(&changed));
         assert!(valid_control_id(&command.command_id));
         assert!(!valid_control_id("invalid_command"));
+    }
+
+    #[test]
+    fn account_registration_digest_binds_every_identity() {
+        let mut registration = AccountRegistrationRequest {
+            execution_account_id: "registry-account-one".into(),
+            agent_id: "registry-agent-one".into(),
+            strategy_version: CANARY_RISK_VERSION.into(),
+            risk_version: CANARY_RISK_VERSION.into(),
+            strategy_manifest_sha256: BASIS_AAPL_V1_MANIFEST_SHA256.into(),
+            lighter_account_index: 71,
+            lighter_api_key_index: 2,
+            robinhood_owner: "0x0000000000000000000000000000000000000021".into(),
+            robinhood_vault: "0x0000000000000000000000000000000000000022".into(),
+            robinhood_signer: "0x0000000000000000000000000000000000000023".into(),
+            binding_sha256: String::new(),
+        };
+        registration.binding_sha256 = registration.calculate_binding_sha256();
+        assert!(valid_account_registration(&registration));
+        assert_eq!(registration.binding_sha256.len(), 64);
+        let digest = registration.binding_sha256.clone();
+        registration.lighter_account_index += 1;
+        assert_ne!(digest, registration.calculate_binding_sha256());
+    }
+
+    #[test]
+    fn account_registration_rejects_unreviewed_policy_and_reused_roles() {
+        let mut registration = AccountRegistrationRequest {
+            execution_account_id: "registry-account-one".into(),
+            agent_id: "registry-agent-one".into(),
+            strategy_version: "unreviewed".into(),
+            risk_version: CANARY_RISK_VERSION.into(),
+            strategy_manifest_sha256: BASIS_AAPL_V1_MANIFEST_SHA256.into(),
+            lighter_account_index: 71,
+            lighter_api_key_index: 2,
+            robinhood_owner: "0x0000000000000000000000000000000000000021".into(),
+            robinhood_vault: "0x0000000000000000000000000000000000000022".into(),
+            robinhood_signer: "0x0000000000000000000000000000000000000023".into(),
+            binding_sha256: "a".repeat(64),
+        };
+        assert!(!valid_account_registration(&registration));
+        registration.strategy_version = CANARY_RISK_VERSION.into();
+        registration.robinhood_signer = registration.robinhood_vault.clone();
+        assert!(!valid_account_registration(&registration));
     }
 }

@@ -1,6 +1,6 @@
 use coordinator::store::{
-    AccountCommandRequest, AccountCommandStatusRequest, ActionKind, ExitRequest,
-    NewAccountSnapshot, NewMarketQuote, NewVenueEvent, NextAction, ObservationOutcome,
+    AccountCommandRequest, AccountCommandStatusRequest, AccountRegistrationRequest, ActionKind,
+    ExitRequest, NewAccountSnapshot, NewMarketQuote, NewVenueEvent, NextAction, ObservationOutcome,
     RecoveryRequest, Store, StoreError,
 };
 use execution::{
@@ -46,6 +46,10 @@ async fn migration_and_promotion_gate_are_enforced() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0008_account_registration.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
     let legacy = sqlx::query_as::<_, (String, bool)>(
         "SELECT execution_account_id, active FROM execution_intents WHERE id = $1",
     )
@@ -88,12 +92,13 @@ async fn migration_and_promotion_gate_are_enforced() {
             robinhood_vault = '0x0000000000000000000000000000000000000002',
             robinhood_signer = '0x0000000000000000000000000000000000000003',
             owner_address = '0x0000000000000000000000000000000000000004',
-            strategy_manifest_sha256 = repeat('c', 64),
+            strategy_manifest_sha256 = $2,
             binding_sha256 = repeat('a', 64)
         WHERE execution_account_id = 'singleton-mainnet-canary'
         "#,
     )
     .bind(CANARY_RISK_VERSION)
+    .bind(execution::BASIS_AAPL_V1_MANIFEST_SHA256)
     .execute(&pool)
     .await
     .unwrap();
@@ -101,7 +106,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         r#"
         INSERT INTO execution_strategy_control
             (strategy_version, strategy_manifest_sha256, mode, reason)
-        VALUES ($1, repeat('c', 64), 'ACTIVE', 'integration test')
+        VALUES ($1, $2, 'ACTIVE', 'integration test')
         ON CONFLICT (strategy_version) DO UPDATE SET
             strategy_manifest_sha256 = EXCLUDED.strategy_manifest_sha256,
             mode = EXCLUDED.mode,
@@ -109,6 +114,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         "#,
     )
     .bind(CANARY_RISK_VERSION)
+    .bind(execution::BASIS_AAPL_V1_MANIFEST_SHA256)
     .execute(&pool)
     .await
     .unwrap();
@@ -223,6 +229,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         8,
         "0x0000000000000000000000000000000000000004",
         "0x0000000000000000000000000000000000000005",
+        "0x0000000000000000000000000000000000000006",
     )
     .await;
     for snapshot in account_snapshots_for(
@@ -230,6 +237,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         8,
         "0x0000000000000000000000000000000000000004",
         "0x0000000000000000000000000000000000000005",
+        "0x0000000000000000000000000000000000000006",
     ) {
         store.record_account_snapshot(&snapshot).await.unwrap();
     }
@@ -867,6 +875,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         11,
         "0x0000000000000000000000000000000000000012",
         "0x0000000000000000000000000000000000000013",
+        "0x0000000000000000000000000000000000000014",
     )
     .await;
     let mut snapshots = account_snapshots_for(
@@ -874,6 +883,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         11,
         "0x0000000000000000000000000000000000000012",
         "0x0000000000000000000000000000000000000013",
+        "0x0000000000000000000000000000000000000014",
     );
     for snapshot in &mut snapshots {
         snapshot.observed_at_ms = 4_998;
@@ -922,7 +932,7 @@ async fn migration_and_promotion_gate_are_enforced() {
     assert_eq!(withdrawal.owner_actions.len(), 1);
     assert_eq!(
         withdrawal.owner_actions[0].from,
-        "0x0000000000000000000000000000000000000004"
+        "0x0000000000000000000000000000000000000014"
     );
     assert!(withdrawal.owner_actions[0].data.starts_with("0x142834dd"));
 
@@ -947,6 +957,135 @@ async fn migration_and_promotion_gate_are_enforced() {
         .unwrap();
     assert_eq!(withdrawal.status, "completed");
     assert!(withdrawal.owner_actions.is_empty());
+
+    let first_registration = registration(
+        "registry-account-one",
+        "registry-agent-one",
+        71,
+        "0x0000000000000000000000000000000000000021",
+        "0x0000000000000000000000000000000000000022",
+        "0x0000000000000000000000000000000000000023",
+    );
+    let first = store
+        .register_execution_account(&first_registration)
+        .await
+        .unwrap();
+    assert!(first.created);
+    assert_eq!(first.response.account_status, "active");
+    assert_eq!(first.response.control_mode, "HALTED");
+    assert_eq!(
+        first.response.readiness,
+        coordinator::store::AccountRegistrationReadiness {
+            venue_approved: false,
+            oracle_healthy: false,
+            sequencer_healthy: false,
+            reconciliation_ready: false,
+            exit_authority_ready: false,
+            alerting_ready: false,
+            safe_rotation_ready: false,
+        }
+    );
+    let retry = store
+        .register_execution_account(&first_registration)
+        .await
+        .unwrap();
+    assert!(!retry.created);
+    assert_eq!(retry.response, first.response);
+    store
+        .claim_api_nonce(
+            "account_registration",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            1_900_000_000,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .claim_api_nonce(
+                "account_registration",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                1_900_000_000,
+            )
+            .await,
+        Err(StoreError::AuthorizationReplay)
+    ));
+
+    let second_registration = registration(
+        "registry-account-two",
+        "registry-agent-two",
+        72,
+        "0x0000000000000000000000000000000000000024",
+        "0x0000000000000000000000000000000000000025",
+        "0x0000000000000000000000000000000000000026",
+    );
+    store
+        .register_execution_account(&second_registration)
+        .await
+        .unwrap();
+    let second = store
+        .execution_account_registration("registry-account-two")
+        .await
+        .unwrap();
+    assert_eq!(second.binding_sha256, second_registration.binding_sha256);
+    assert_eq!(second.control_mode, "HALTED");
+
+    let mutation = sqlx::query(
+        "UPDATE execution_accounts SET robinhood_signer = $2 WHERE execution_account_id = $1",
+    )
+    .bind("registry-account-one")
+    .bind("0x0000000000000000000000000000000000000029")
+    .execute(&pool)
+    .await;
+    assert!(mutation.is_err());
+
+    let substituted = registration(
+        "registry-account-three",
+        "registry-agent-three",
+        71,
+        "0x0000000000000000000000000000000000000027",
+        "0x0000000000000000000000000000000000000028",
+        "0x0000000000000000000000000000000000000026",
+    );
+    assert!(matches!(
+        store.register_execution_account(&substituted).await,
+        Err(StoreError::AccountRegistrationConflict)
+    ));
+    let halted = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM execution_account_control
+        WHERE execution_account_id IN ('registry-account-one', 'registry-account-two')
+          AND mode = 'HALTED'
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(halted, 2);
+    let global_mode =
+        sqlx::query_scalar::<_, String>("SELECT mode FROM execution_control WHERE singleton")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(global_mode, "HALTED");
+    let incidents = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM execution_incidents
+        WHERE kind = 'account_registration_identity_conflict'
+          AND execution_account_id IN ('registry-account-one', 'registry-account-two')
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(incidents, 2);
+    assert!(matches!(
+        store
+            .execution_account_registration("registry-account-three")
+            .await,
+        Err(StoreError::AccountRegistrationMissing)
+    ));
 }
 
 async fn insert_transition(
@@ -1060,6 +1199,7 @@ fn account_snapshots() -> [NewAccountSnapshot; 2] {
         7,
         "0x0000000000000000000000000000000000000002",
         "0x0000000000000000000000000000000000000003",
+        "0x0000000000000000000000000000000000000004",
     )
 }
 
@@ -1068,6 +1208,7 @@ fn account_snapshots_for(
     account_index: u64,
     vault: &str,
     signer: &str,
+    owner: &str,
 ) -> [NewAccountSnapshot; 2] {
     [
         NewAccountSnapshot {
@@ -1101,7 +1242,7 @@ fn account_snapshots_for(
                 "wiring_verified": true,
                 "finality_healthy": true,
                 "flat": true,
-                "owner_address": "0x0000000000000000000000000000000000000004",
+                "owner_address": owner,
                 "agent_enabled": true,
                 "risk_mode": "ACTIVE",
                 "settlement_balance_raw": "25000000",
@@ -1120,6 +1261,7 @@ async fn register_account(
     lighter_account_index: i64,
     vault: &str,
     signer: &str,
+    owner: &str,
 ) {
     sqlx::query(
         r#"
@@ -1127,8 +1269,8 @@ async fn register_account(
             (execution_account_id, agent_id, strategy_version, risk_version, status,
              lighter_account_index, lighter_api_key_index, robinhood_vault,
              robinhood_signer, owner_address, strategy_manifest_sha256, binding_sha256)
-        VALUES ($1, $2, $3, $3, 'active', $4, 2, $5, $6,
-                '0x0000000000000000000000000000000000000004', repeat('c', 64), repeat('b', 64))
+        VALUES ($1, $2, $3, $3, 'active', $4, 2, $5, $6, $7,
+                $8, repeat('b', 64))
         "#,
     )
     .bind(execution_account_id)
@@ -1137,6 +1279,8 @@ async fn register_account(
     .bind(lighter_account_index)
     .bind(vault)
     .bind(signer)
+    .bind(owner)
+    .bind(execution::BASIS_AAPL_V1_MANIFEST_SHA256)
     .execute(pool)
     .await
     .unwrap();
@@ -1159,4 +1303,29 @@ async fn register_account(
     .execute(pool)
     .await
     .unwrap();
+}
+
+fn registration(
+    execution_account_id: &str,
+    agent_id: &str,
+    lighter_account_index: i64,
+    owner: &str,
+    vault: &str,
+    signer: &str,
+) -> AccountRegistrationRequest {
+    let mut request = AccountRegistrationRequest {
+        execution_account_id: execution_account_id.into(),
+        agent_id: agent_id.into(),
+        strategy_version: CANARY_RISK_VERSION.into(),
+        risk_version: CANARY_RISK_VERSION.into(),
+        strategy_manifest_sha256: execution::BASIS_AAPL_V1_MANIFEST_SHA256.into(),
+        lighter_account_index,
+        lighter_api_key_index: 2,
+        robinhood_owner: owner.into(),
+        robinhood_vault: vault.into(),
+        robinhood_signer: signer.into(),
+        binding_sha256: String::new(),
+    };
+    request.binding_sha256 = request.calculate_binding_sha256();
+    request
 }

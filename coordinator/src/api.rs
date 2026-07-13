@@ -1,13 +1,14 @@
 use crate::{
     store::{
-        AccountCommandRequest, AccountCommandStatusRequest, ExitRequest, NewAccountSnapshot,
-        NewMarketQuote, NewVenueEvent, RecoveryRequest, StoreError,
+        AccountCommandRequest, AccountCommandStatusRequest, AccountRegistrationRequest,
+        ExitRequest, NewAccountSnapshot, NewMarketQuote, NewVenueEvent, RecoveryRequest,
+        StoreError,
     },
     AppState,
 };
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -30,9 +31,80 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/v1/account-snapshots", post(record_account_snapshot))
         .route("/v1/account-commands", post(submit_account_command))
         .route("/v1/account-command-status", post(account_command_status))
+        .route("/v1/account-registrations", post(register_account))
+        .route(
+            "/v1/account-registrations/{execution_account_id}",
+            get(account_registration),
+        )
         .route("/v1/market-quotes", post(record_market_quote))
         .layer(axum::extract::DefaultBodyLimit::max(64 << 10))
         .with_state(state)
+}
+
+async fn register_account(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err((status, message)) = authorize(
+        &state,
+        AuthScope::AccountRegistration,
+        "/v1/account-registrations",
+        &headers,
+        &body,
+    )
+    .await
+    {
+        return error(status, message);
+    }
+    let Some(store) = &state.store else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled");
+    };
+    let request: AccountRegistrationRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid request"),
+    };
+    match store.register_execution_account(&request).await {
+        Ok(outcome) => {
+            let status = if outcome.created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            };
+            (status, Json(serde_json::json!(outcome.response))).into_response()
+        }
+        Err(error) => store_error_response(error),
+    }
+}
+
+async fn account_registration(
+    State(state): State<Arc<AppState>>,
+    Path(execution_account_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let path = format!("/v1/account-registrations/{execution_account_id}");
+    if let Err((status, message)) = authorize_method(
+        &state,
+        AuthScope::AccountRegistration,
+        "GET",
+        &path,
+        &headers,
+        &[],
+    )
+    .await
+    {
+        return error(status, message);
+    }
+    let Some(store) = &state.store else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled");
+    };
+    match store
+        .execution_account_registration(&execution_account_id)
+        .await
+    {
+        Ok(response) => (StatusCode::OK, Json(serde_json::json!(response))).into_response(),
+        Err(error) => store_error_response(error),
+    }
 }
 
 async fn submit_account_command(
@@ -386,6 +458,7 @@ enum AuthScope {
     AccountSnapshot,
     MarketQuote,
     AccountCommand,
+    AccountRegistration,
 }
 
 impl AuthScope {
@@ -398,6 +471,7 @@ impl AuthScope {
             Self::AccountSnapshot => "account_snapshot",
             Self::MarketQuote => "market_quote",
             Self::AccountCommand => "account_command",
+            Self::AccountRegistration => "account_registration",
         }
     }
 }
@@ -405,6 +479,17 @@ impl AuthScope {
 async fn authorize(
     state: &AppState,
     scope: AuthScope,
+    path: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(), (StatusCode, &'static str)> {
+    authorize_method(state, scope, "POST", path, headers, body).await
+}
+
+async fn authorize_method(
+    state: &AppState,
+    scope: AuthScope,
+    method: &str,
     path: &str,
     headers: &HeaderMap,
     body: &[u8],
@@ -440,6 +525,10 @@ async fn authorize(
             state.config.control_hmac_key.as_ref(),
             state.config.control_caller_id.as_deref(),
         ),
+        AuthScope::AccountRegistration => (
+            state.config.registration_hmac_key.as_ref(),
+            state.config.registration_caller_id.as_deref(),
+        ),
     };
     let (Some(key), Some(caller)) = (key, caller) else {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled"));
@@ -474,7 +563,15 @@ async fn authorize(
         .and_then(|value| hex::decode(value).ok())
         .ok_or((StatusCode::UNAUTHORIZED, "unauthorized"))?;
     if supplied_caller != caller
-        || !verify_request_signature(key, path, caller, &timestamp_text, nonce, body, &signature)
+        || !verify_request_signature(
+            key,
+            (method, path),
+            caller,
+            &timestamp_text,
+            nonce,
+            body,
+            &signature,
+        )
     {
         return Err((StatusCode::UNAUTHORIZED, "unauthorized"));
     }
@@ -501,7 +598,7 @@ async fn signer_ready(client: &reqwest::Client, base_url: Option<&str>) -> bool 
 
 fn verify_request_signature(
     key: &[u8; 32],
-    path: &str,
+    target: (&str, &str),
     caller: &str,
     timestamp: &str,
     nonce: &str,
@@ -511,9 +608,10 @@ fn verify_request_signature(
     if signature.len() != 32 {
         return false;
     }
+    let (method, path) = target;
     let digest = Sha256::digest(body);
     let canonical = format!(
-        "POST\n{path}\n{caller}\n{timestamp}\n{nonce}\n{}",
+        "{method}\n{path}\n{caller}\n{timestamp}\n{nonce}\n{}",
         hex::encode(digest)
     );
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("fixed-length HMAC key");
@@ -550,6 +648,7 @@ fn store_error_response(error: StoreError) -> axum::response::Response {
         StoreError::InvalidAction | StoreError::InvalidIntent(_) => StatusCode::BAD_REQUEST,
         StoreError::CoordinatorHalted => StatusCode::SERVICE_UNAVAILABLE,
         StoreError::AccountCommandBlocked => StatusCode::CONFLICT,
+        StoreError::AccountRegistrationMissing => StatusCode::NOT_FOUND,
         _ => StatusCode::CONFLICT,
     };
     error_response(status, &error.to_string())
@@ -582,15 +681,30 @@ mod tests {
         let signature = mac.finalize().into_bytes();
 
         assert!(verify_request_signature(
-            &key, path, caller, timestamp, nonce, body, &signature
+            &key,
+            ("POST", path),
+            caller,
+            timestamp,
+            nonce,
+            body,
+            &signature
         ));
         assert!(!verify_request_signature(
             &key,
-            path,
+            ("POST", path),
             caller,
             timestamp,
             nonce,
             br#"{"id":"two"}"#,
+            &signature,
+        ));
+        assert!(!verify_request_signature(
+            &key,
+            ("GET", path),
+            caller,
+            timestamp,
+            nonce,
+            body,
             &signature,
         ));
     }

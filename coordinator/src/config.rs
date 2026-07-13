@@ -18,6 +18,8 @@ pub struct Config {
     pub market_caller_id: Option<String>,
     pub control_hmac_key: Option<[u8; 32]>,
     pub control_caller_id: Option<String>,
+    pub registration_hmac_key: Option<[u8; 32]>,
+    pub registration_caller_id: Option<String>,
     pub lighter_signer_url: Option<String>,
     pub robinhood_signer_url: Option<String>,
     pub signer_caller_id: Option<String>,
@@ -72,6 +74,8 @@ impl Config {
                 market_caller_id: None,
                 control_hmac_key: None,
                 control_caller_id: None,
+                registration_hmac_key: None,
+                registration_caller_id: None,
                 lighter_signer_url: None,
                 robinhood_signer_url: None,
                 signer_caller_id: None,
@@ -97,6 +101,8 @@ impl Config {
             market_caller_id: env::var("MARKET_QUOTE_CALLER_ID").ok(),
             control_hmac_key: hmac_key("COORDINATOR_CONTROL_HMAC_KEY")?,
             control_caller_id: env::var("CONTROL_CALLER_ID").ok(),
+            registration_hmac_key: hmac_key("COORDINATOR_REGISTRATION_HMAC_KEY")?,
+            registration_caller_id: env::var("REGISTRATION_CALLER_ID").ok(),
             lighter_signer_url: signer_url("LIGHTER_SIGNER_URL", "LIGHTER_SIGNER_HOSTPORT")?,
             robinhood_signer_url: signer_url("ROBINHOOD_SIGNER_URL", "ROBINHOOD_SIGNER_HOSTPORT")?,
             signer_caller_id: env::var("SIGNER_CALLER_ID").ok(),
@@ -131,6 +137,7 @@ impl Config {
             || self.account_hmac_key.is_none()
             || self.market_hmac_key.is_none()
             || self.control_hmac_key.is_none()
+            || self.registration_hmac_key.is_none()
         {
             return Err(ConfigError::InvalidHmacKey);
         }
@@ -141,6 +148,7 @@ impl Config {
             self.account_caller_id.as_deref(),
             self.market_caller_id.as_deref(),
             self.control_caller_id.as_deref(),
+            self.registration_caller_id.as_deref(),
         ] {
             if caller.is_none_or(|value| !valid_caller_id(value)) {
                 return Err(ConfigError::InvalidCallerId);
@@ -164,6 +172,7 @@ impl Config {
             self.account_hmac_key.unwrap(),
             self.market_hmac_key.unwrap(),
             self.control_hmac_key.unwrap(),
+            self.registration_hmac_key.unwrap(),
             self.lighter_signer_hmac_key.unwrap(),
             self.robinhood_signer_hmac_key.unwrap(),
         ];
@@ -292,6 +301,8 @@ mod tests {
             market_caller_id: Some("execution-authority".into()),
             control_hmac_key: Some([8; 32]),
             control_caller_id: Some("product-command-worker".into()),
+            registration_hmac_key: Some([9; 32]),
+            registration_caller_id: Some("account-provisioner".into()),
             lighter_signer_url: Some("http://lighter.internal:8080".into()),
             robinhood_signer_url: Some("https://signer.example".into()),
             signer_caller_id: Some("execution-coordinator".into()),
@@ -319,6 +330,8 @@ mod tests {
         config.market_caller_id = None;
         config.control_hmac_key = None;
         config.control_caller_id = None;
+        config.registration_hmac_key = None;
+        config.registration_caller_id = None;
         config.lighter_signer_url = None;
         config.robinhood_signer_url = None;
         config.signer_caller_id = None;
@@ -369,7 +382,7 @@ mod tests {
     #[test]
     fn hmac_key_distinctness_checks_every_pair() {
         let unique = [
-            [1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32], [7; 32], [8; 32],
+            [1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32], [7; 32], [8; 32], [9; 32],
         ];
         assert!(hmac_keys_are_distinct(&unique));
         for left in 0..unique.len() {
