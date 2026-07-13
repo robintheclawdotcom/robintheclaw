@@ -47,6 +47,11 @@ Before a strategy enters paired shadow execution, it must have a registered hypo
 dataset snapshot, verified executable spot and perp quote sources, and a cost model that includes
 fees, gas, funding, impact, and quote age.
 
+Where a strategy uses convergence or regime assumptions, it must also demonstrate rolling
+cointegration, residual stationarity, capacity, and an HMM `unknown`/`dislocated` veto before
+it can create a shadow intent. Portfolio sizing requires shrinkage covariance, concentration, and
+factor-exposure controls rather than independent per-trade Kelly allocations.
+
 Before any mainnet deployment is considered, retain at least 180 calendar days of capture and 60
 continuous shadow days covering off-hours, weekends, volatile windows, and low-liquidity windows.
 Require embargoed walk-forward results, adjusted significance of at least 3.0, positive

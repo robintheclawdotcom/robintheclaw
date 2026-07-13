@@ -67,6 +67,10 @@ cargo test
 The process refuses to start without a database and R2 configuration. It does not accept a wallet,
 private key, or venue write credential.
 
+The planned model hierarchy, RWA-specific source requirements, and promotion criteria are defined
+in [edge research methodology](research-methodology.md). Do not add a model to the execution path
+without implementing its documented validation and fail-closed behavior.
+
 ## Contract deployment modes
 
 `Deploy.s.sol` is production-oriented and requires explicit `OWNER`, `AGENT`, and `ASSET` values.

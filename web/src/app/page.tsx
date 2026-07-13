@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { testnetProof } from "../lib/testnet-proof";
 
-type DocId = "overview" | "signal" | "contracts" | "verifier" | "engine" | "testnet" | "architecture" | "developer" | "operations" | "security" | "venues";
+type DocId = "overview" | "signal" | "contracts" | "verifier" | "engine" | "testnet" | "methodology" | "architecture" | "developer" | "operations" | "security" | "venues";
 
 const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }> = {
   overview: {
@@ -129,6 +129,11 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
         <div className="code-block"><span>$</span> cd engine && cargo test</div>
       </>
     ),
+  },
+  methodology: {
+    file: "docs/research-methodology.md",
+    title: "Edge research methodology",
+    body: <PublishedDoc file="research-methodology.md" />,
   },
   architecture: { file: "docs/architecture.md", title: "Architecture", body: <PublishedDoc file="architecture.md" /> },
   developer: { file: "docs/developer-guide.md", title: "Developer guide", body: <PublishedDoc file="developer-guide.md" /> },
@@ -346,6 +351,7 @@ export default function Home() {
                 <div className="cards">
                   <article><span>[ signal ]</span><h2>Basis scanner</h2><p>Discovers v4 pools, compares spot with live perps, and records whether a spread can survive real costs.</p></article>
                   <article><span>[ engine ]</span><h2>Decision gates</h2><p>Deterministic basis, sizing, risk, and neutrality checks advance only opportunities with modeled net edge.</p></article>
+                  <article><span>[ research ]</span><h2>Model hierarchy</h2><p>Convergence, regime, portfolio, and execution models must clear statistical promotion gates.</p></article>
                   <article><span>[ contracts ]</span><h2>Bounded custody</h2><p>An allowlisted, capped, haltable execution boundary limits what an agent may attempt.</p></article>
                   <article><span>[ verifier ]</span><h2>Recompute the record</h2><p>Independent records make measured performance auditable as the agent moves toward live execution.</p></article>
                 </div>

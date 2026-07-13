@@ -14,6 +14,7 @@ boundaries, and performance verification so the strategy can be promoted only on
 - [Testnet proof](testnet-proof.md): the deployed no-execution proof path and independent check.
 - [Venue gates](venue-gates.md): what must be verified before any order path exists.
 - [Research runtime](research-runtime.md): private high-frequency capture, raw evidence, and shadow execution.
+- [Edge research methodology](research-methodology.md): model hierarchy, RWA inputs, statistical gates, and implementation roadmap.
 
 ## Non-negotiable operating rules
 
