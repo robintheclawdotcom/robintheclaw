@@ -119,7 +119,15 @@ WITH complete_snapshots AS (
     FROM complete_snapshots
     ORDER BY execution_account_id, observed_at DESC, snapshot_id DESC
 ), latest AS (
-    SELECT evidence.execution_account_id, evidence.check_name, evidence.ready,
+    SELECT evidence.execution_account_id, evidence.check_name,
+           evidence.ready
+             AND evidence.expires_at > now()
+             AND evidence.observed_at <= now() + interval '5 seconds'
+             AND evidence.observed_at >= now() - CASE
+                 WHEN evidence.check_name IN ('lighter_linked', 'robinhood_deployed')
+                     THEN interval '24 hours'
+                 ELSE interval '5 seconds'
+             END AS ready,
            evidence.observed_at, evidence.expires_at
     FROM agent_readiness_evidence evidence
     JOIN latest_snapshot snapshot
@@ -128,15 +136,15 @@ WITH complete_snapshots AS (
 )
 SELECT
     account.id AS execution_account_id,
-    coalesce(bool_or(ready AND expires_at > now()) FILTER (WHERE check_name = 'lighter_linked'), false) AS lighter_linked,
-    coalesce(bool_or(ready AND expires_at > now()) FILTER (WHERE check_name = 'lighter_funded'), false) AS lighter_funded,
-    coalesce(bool_or(ready AND expires_at > now()) FILTER (WHERE check_name = 'robinhood_deployed'), false) AS robinhood_deployed,
-    coalesce(bool_or(ready AND expires_at > now()) FILTER (WHERE check_name = 'robinhood_funded'), false) AS robinhood_funded,
-    coalesce(bool_or(ready AND expires_at > now()) FILTER (WHERE check_name = 'user_gas_ready'), false) AS user_gas_ready,
-    coalesce(bool_or(ready AND expires_at > now()) FILTER (WHERE check_name = 'execution_gas_ready'), false) AS execution_gas_ready,
-    coalesce(bool_or(ready AND expires_at > now()) FILTER (WHERE check_name = 'policy_active'), false) AS policy_active,
-    coalesce(bool_or(ready AND expires_at > now()) FILTER (WHERE check_name = 'reconciled'), false) AS reconciled,
-    min(expires_at) FILTER (WHERE ready AND expires_at > now()) AS valid_until
+    coalesce(bool_or(ready) FILTER (WHERE check_name = 'lighter_linked'), false) AS lighter_linked,
+    coalesce(bool_or(ready) FILTER (WHERE check_name = 'lighter_funded'), false) AS lighter_funded,
+    coalesce(bool_or(ready) FILTER (WHERE check_name = 'robinhood_deployed'), false) AS robinhood_deployed,
+    coalesce(bool_or(ready) FILTER (WHERE check_name = 'robinhood_funded'), false) AS robinhood_funded,
+    coalesce(bool_or(ready) FILTER (WHERE check_name = 'user_gas_ready'), false) AS user_gas_ready,
+    coalesce(bool_or(ready) FILTER (WHERE check_name = 'execution_gas_ready'), false) AS execution_gas_ready,
+    coalesce(bool_or(ready) FILTER (WHERE check_name = 'policy_active'), false) AS policy_active,
+    coalesce(bool_or(ready) FILTER (WHERE check_name = 'reconciled'), false) AS reconciled,
+    min(expires_at) FILTER (WHERE ready) AS valid_until
 FROM execution_accounts account
 LEFT JOIN latest ON latest.execution_account_id = account.id
 GROUP BY account.id;

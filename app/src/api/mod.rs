@@ -11,6 +11,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/health", web::get().to(health::health))
         .service(
             web::scope("/internal/v1")
+                .app_data(web::PayloadConfig::new(64 << 10))
                 .route("/readiness", web::post().to(internal::record_readiness)),
         )
         .service(

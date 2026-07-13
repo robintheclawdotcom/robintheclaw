@@ -1004,6 +1004,19 @@ impl ProductStore {
             if item.expires_at <= item.observed_at || item.expires_at - item.observed_at > max_age {
                 return Err(anyhow!("invalid readiness evidence lifetime"));
             }
+            let freshness = if matches!(item.check_name, "lighter_linked" | "robinhood_deployed") {
+                Duration::hours(24)
+            } else {
+                Duration::seconds(5)
+            };
+            let now = Utc::now();
+            if item.ready
+                && (item.observed_at < now - freshness
+                    || item.observed_at > now + Duration::seconds(5)
+                    || item.expires_at <= now)
+            {
+                return Err(anyhow!("readiness evidence is stale or future-dated"));
+            }
         }
 
         let pool = self.pool()?;

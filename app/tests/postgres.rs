@@ -89,6 +89,47 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
     .await
     .unwrap();
     assert_eq!(readiness, (true, true, true, true, true, true, true, true));
+
+    let future_snapshot_id = Uuid::new_v4();
+    let future_observed_at = Utc::now() + Duration::hours(1);
+    for check_name in [
+        "lighter_linked",
+        "lighter_funded",
+        "robinhood_deployed",
+        "robinhood_funded",
+        "user_gas_ready",
+        "execution_gas_ready",
+        "policy_active",
+        "reconciled",
+    ] {
+        evidence_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO agent_readiness_evidence (
+                id, execution_account_id, snapshot_id, check_name, ready, source,
+                evidence_digest, observed_at, expires_at
+            ) VALUES ($1, $2, $3, $4, true, 'integration-test', $5, $6, $7)
+            "#,
+        )
+        .bind(evidence_id)
+        .bind(account_id)
+        .bind(future_snapshot_id)
+        .bind(check_name)
+        .bind("2".repeat(64))
+        .bind(future_observed_at)
+        .bind(future_observed_at + Duration::seconds(30))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let future_readiness = sqlx::query_as::<_, (bool, bool)>(
+        "SELECT lighter_linked, lighter_funded FROM current_agent_readiness WHERE execution_account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(future_readiness, (false, false));
     assert!(
         sqlx::query("UPDATE agent_readiness_evidence SET ready = false WHERE id = $1")
             .bind(evidence_id)
