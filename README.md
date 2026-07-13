@@ -20,7 +20,7 @@ that can recognize relative-value opportunities and act on them with precision.
 - **Execution foundation:** pairs custody and delegated execution contracts with a clean path to
   venue adapters, position workflows, and operational control.
 - **Personal strategy accounts:** email, passkey, social, and wallet login lead to a stable smart
-  account, a personal vault, a unified dashboard, and gas-sponsored testnet operations.
+  account, a personal vault, a unified dashboard, and one-operation testnet onboarding.
 - **Record integrity:** commits strategy records onchain as a supporting tool for research,
   operations, and inspection.
 
@@ -61,15 +61,21 @@ cd signal && node src/basis.mjs
 cd contracts && forge test -vv
 ```
 
-The first onchain foundation is deployed on Robinhood Chain testnet. Venue adapters and the
-full execution lifecycle are the next major build-out. The initial universe is the 21 Stock
-Tokens that also have a live perp.
+The personal-vault factory, test asset, and faucet are deployed on Robinhood Chain testnet. The
+paid application service, private API, and dedicated product database are live on Render. Venue
+adapters and the full execution lifecycle are the next major build-out. The initial universe is
+the 21 Stock Tokens that also have a live perp.
 
 ## Website and application
 
 The public site and authenticated product live in `web/`. Authenticated requests pass through
 same-origin Next.js handlers to the private Rust API; provider credentials and the application
 database remain in managed service settings.
+
+The default product path is no-code: sign in, create or restore a strategy account, link funding
+wallets, create a personal vault, and manage it from the dashboard. A separately managed
+WalletConnect project is not a launch dependency; Privy provides embedded login and named external
+wallet connections.
 
 ```bash
 cd web

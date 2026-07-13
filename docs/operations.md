@@ -37,27 +37,49 @@ run `./scripts/renderctl guard`. After a push, confirm that the deploy reference
 commit, reaches `live`, and that `https://robintheclaw.com` returns the new public copy.
 
 The public site and authenticated application run in the `robintheclaw` Next.js service. The
-browser receives only the public Privy app ID, Alchemy API key, and WalletConnect project ID.
-Authenticated requests use the same-origin proxy to the private `robin-api` service.
+browser receives only the public Privy app ID. Authenticated application requests use the
+same-origin proxy to the private `robin-api` service. Sponsored wallet requests use a separate
+same-origin proxy that validates the session and planned calls before adding server-held Alchemy
+credentials.
 
 `robin-api` is a private Rust service in the same region. It connects to the dedicated
 `robin-app` Postgres database and receives the Privy secret, ES256 verification key, provider RPC,
-Alchemy API key and sponsorship policy, and confirmed application contract addresses through managed
-settings. The product database is separate from `robin-research`.
+sponsorship policy, and confirmed application contract addresses through managed settings. The
+product database is separate from `robin-research`.
+
+Current testnet resources:
+
+| Resource | Plan | Role |
+| --- | --- | --- |
+| `robintheclaw` | Starter | Public website and authenticated application |
+| `robin-api` | Starter | Private Rust application API and activity indexer |
+| `robin-app` | Basic 1 GB | Dedicated application PostgreSQL database |
+
+All three application resources run in the same Render region. The API and database are private.
 
 Before enabling onboarding:
 
-1. Deploy `DeployUxTestnet.s.sol` on chain ID 46630 and confirm the asset, faucet, and factory.
+1. Confirm the chain ID, runtime bytecode, factory/faucet wiring, and addresses in
+   `deployments/ux-testnet.json`.
 2. Create an Alchemy sponsorship policy limited to those contracts, child vaults and guards, the
-   required selectors, and per-account quotas.
+   `claim`, `approve`, `createVault`, `deposit`, `withdraw`, and `setHalted` selectors, with
+   per-account and global quotas. The Gas Manager Admin API requires an Alchemy access key with
+   Gas Manager Read & Write and the app ID; the ordinary Node API key cannot create or activate a
+   policy. Store only the resulting policy ID in the web and API service settings.
 3. Configure all `sync: false` application values in Render. Use a provider RPC for `APP_RPC_URL`.
-4. Configure Privy allowed origins, email/passkey login, Google and Apple OAuth, embedded EVM
-   wallet creation for all users, and the WalletConnect project.
+   Keep `PRODUCT_INDEXER_BLOCK_RANGE` within the provider's `eth_getLogs` limit; the testnet
+   Blueprint uses Alchemy's 10,000-block PAYG range and a 50,000-block initial lookback.
+4. Configure Privy allowed origins, email/passkey login, Google and Apple OAuth, and embedded EVM
+   wallet creation for all users. No separately managed WalletConnect project is required for
+   launch. Privy's SDK still uses its documented WalletConnect relay and verification domains for
+   named mobile-wallet connections, so keep those domains in the CSP.
 5. Run an embedded-user onboarding smoke test, verify the factory receipt in `robin-api`, reload
    during confirmation, link two external wallets, change the funding source, pause, resume,
    deposit, withdraw, unlink, sign out, and recover the same account.
 6. Confirm that dashboard values match provider RPC and that positions and P&L remain empty before
    real execution.
+7. Confirm the security headers on the production domain and review structured `wallet_proxy_failed`
+   and `app_proxy_failed` events during the smoke test without logging tokens, signatures, or calls.
 
 The private collector is a separate Render worker named `robin-research-collector`. It has no
 public URL. Its Postgres database allows no public IPs, and its R2 credentials are worker-only

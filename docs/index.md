@@ -12,6 +12,7 @@ onchain execution, continuous event capture, research models, and a no-code stra
 - [Operations](operations.md): roles, release procedure, and operational response.
 - [Security model](security-model.md): assets, trust boundaries, and controls.
 - [Testnet foundation](testnet-proof.md): the deployed onchain contract and record pipeline.
+- [Application testnet](ux-testnet.md): the deployed personal-vault factory, faucet, and no-code onboarding path.
 - [Venue integration](venue-gates.md): the path from market data to live venue support.
 - [Research runtime](research-runtime.md): high-frequency capture, raw evidence, and shadow execution.
 - [Edge research methodology](research-methodology.md): model hierarchy, RWA inputs, and implementation roadmap.
@@ -19,10 +20,15 @@ onchain execution, continuous event capture, research models, and a no-code stra
 
 ## Current foundation
 
-1. The product layer connects Privy identity, Alchemy smart accounts, personal vaults, and a real account dashboard.
+1. The deployed product layer connects Privy identity, Alchemy smart accounts, personal vaults,
+   and a real account dashboard.
 2. Market intelligence, continuous event capture, and trade planning run as independent components.
 3. The model roadmap covers cointegration, Ornstein-Uhlenbeck spreads, Kalman hedge ratios,
    hidden-Markov regimes, and portfolio covariance.
 4. Venue adapters and the complete position lifecycle are the next execution milestone.
 5. Records are available as a supporting tool for research and operations.
 6. Secrets belong in ignored local files or managed secret storage.
+
+The public web service, private Rust API, dedicated product database, PAYG chain access, and
+personal-vault contracts are live for production testnet work. Gas-sponsored onboarding activates
+when the restricted Alchemy policy is attached.

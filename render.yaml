@@ -57,9 +57,11 @@ services:
           property: hostport
       - key: NEXT_PUBLIC_PRIVY_APP_ID
         sync: false
-      - key: NEXT_PUBLIC_ALCHEMY_API_KEY
+      - key: PRIVY_VERIFICATION_KEY
         sync: false
-      - key: NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
+      - key: ALCHEMY_API_KEY
+        sync: false
+      - key: ALCHEMY_POLICY_ID
         sync: false
 
   - type: pserv
@@ -91,6 +93,10 @@ services:
         value: "46630"
       - key: APP_RPC_URL
         sync: false
+      - key: PRODUCT_INDEXER_LOOKBACK_BLOCKS
+        value: "50000"
+      - key: PRODUCT_INDEXER_BLOCK_RANGE
+        value: "10000"
       - key: PRIVY_APP_ID
         sync: false
       - key: PRIVY_APP_SECRET

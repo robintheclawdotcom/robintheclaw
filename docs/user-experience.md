@@ -15,7 +15,8 @@ until venue execution produces real data.
 
 | Route | Experience |
 | --- | --- |
-| `/` | Public product narrative, documentation, and `Open app` action |
+| `/` | Public product narrative and `Open app` action |
+| `/docs` | Architecture, research, contracts, operations, and developer documentation |
 | `/app` | Total value, available balance, deployed capital, P&L, strategy, opportunities, positions, and recent activity |
 | `/app/onboarding` | Resumable account, recovery, wallet, and one-click vault setup |
 | `/app/strategy` | Mandate state, vault details, funding, withdrawal, and positions |
@@ -30,11 +31,14 @@ passkey, Google, Apple, and EVM wallet. Privy creates an embedded EVM signer for
 address is used as the Alchemy EIP-7702 smart-account address and permanently owns that factory
 version's personal vault.
 
-MetaMask, Phantom, Robinhood Wallet, WalletConnect, and other EVM wallets can be progressively
-linked. They appear as portfolio and funding sources. The active funding preference changes which
+MetaMask, Phantom, Robinhood Wallet, and other detected EVM wallets can be progressively linked.
+They appear as portfolio and funding sources. The active funding preference changes which
 connected wallet signs an approval-and-deposit batch; it never changes the vault owner. The API
 refreshes wallet ownership directly from Privy and rejects an address already attached to another
 Robin user. Recovery sends the user back to the existing account instead of merging identities.
+
+Privy owns the embedded and external-wallet connection experience. Launch does not require a
+separate WalletConnect project or project ID.
 
 Before first funding, the account must have a verified email or passkey. Embedded wallets cannot
 be unlinked from the application. External wallets can be unlinked; if the active funding wallet
@@ -55,9 +59,9 @@ account -> recovery -> vault prepared -> wallet confirmation
 3. `POST /api/v1/vaults/prepare` checks recovery, duplicate database state, `vaultOf(owner)`, faucet
    claim state, and `predictVault(owner)`.
 4. The response returns an ordered call batch: faucet claim when needed, token approval, factory
-   creation, and deposit. It also returns the configured sponsorship policy.
-5. The Alchemy smart-wallet client submits the calls on Robinhood Chain testnet and waits for
-   inclusion.
+   creation, and deposit. Sponsorship credentials remain on the server.
+5. The Alchemy smart-wallet client submits the calls through the authenticated same-origin wallet
+   proxy on Robinhood Chain testnet and waits for inclusion.
 6. The browser saves the call ID before server confirmation. `POST /api/v1/vaults/confirm` resolves
    the transaction receipt, verifies the exact factory event, owner, asset, version, and deployed
    vault relationships, then persists the result idempotently.
@@ -67,6 +71,10 @@ account -> recovery -> vault prepared -> wallet confirmation
 The interface distinguishes account expiry, missing recovery, wallet conflicts, a disconnected
 funding signer, a pending operation, failed inclusion, and an included operation awaiting server
 confirmation. Each state offers a direct recovery action.
+
+The application asset, faucet, and version-one personal-vault factory are deployed on Robinhood
+Chain testnet. Addresses, configuration, and deployment transactions are recorded in
+`deployments/ux-testnet.json` and summarized in `docs/ux-testnet.md`.
 
 ## Dashboard data contract
 
@@ -92,8 +100,10 @@ synthetic balances.
 
 The Next.js application uses Privy, Alchemy Wallet APIs, viem, and TanStack Query. It creates an
 HTTP-only same-origin session cookie and forwards authenticated requests through `/api/app/*` to
-the private Rust service. The Rust API validates every Privy JWT, resolves linked accounts from
-Privy, and stores product state in the dedicated `robin-app` PostgreSQL database.
+the private Rust service. It forwards Wallet API methods through `/api/wallet`, where the session,
+chain, account, call batch, targets, and selectors are checked before sponsorship is added. The
+Rust API validates every Privy JWT, resolves linked accounts from Privy, and stores product state
+in the dedicated `robin-app` PostgreSQL database.
 
 The API service does not reuse the research collector database and does not accept a client wallet
 list as proof. It has no user private key, embedded-wallet export, or owner signing route.

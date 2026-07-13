@@ -31,7 +31,6 @@ export function me(withVault = true) {
 
 export const dashboard = {
   environment: "robinhood-testnet", asOf: "2026-07-13T10:05:00Z", infrastructureReady: true,
-  policyId: "test-policy",
   totalValue: { raw: "1000000000", decimals: 6, symbol: "tUSDG" },
   availableBalance: { raw: "0", decimals: 6, symbol: "tUSDG" },
   deployedCapital: { raw: "1000000000", decimals: 6, symbol: "tUSDG" }, pnl: null,
@@ -54,11 +53,11 @@ async function respond(route: Route, withVault: boolean) {
   if (path.endsWith("/dashboard")) return json(route, dashboard);
   if (path.endsWith("/activity")) return json(route, { items: [], nextCursor: null });
   if (path.endsWith("/preferences")) return json(route, me(withVault).preferences);
-  if (path.endsWith("/vaults/prepare")) return json(route, { chainId: 46630, smartAccount: embedded, expectedVault: vaultAddress, policyId: "test-policy", calls: [{ to: vault.assetAddress, data: "0x095ea7b3", value: "0" }] });
+  if (path.endsWith("/vaults/prepare")) return json(route, { chainId: 46630, smartAccount: embedded, expectedVault: vaultAddress, calls: [{ to: vault.assetAddress, data: "0x095ea7b3", value: "0" }] });
   if (path.endsWith("/vaults/confirm")) return json(route, vault);
   if (path.endsWith("/wallets/sync")) {
     const synced = me(withVault);
-    synced.wallets.push({ ...wallet("0x3333333333333333333333333333333333333333", "external", false), id: "walletconnect-wallet", label: "WalletConnect" });
+    synced.wallets.push({ ...wallet("0x3333333333333333333333333333333333333333", "external", false), id: "phantom-wallet", label: "Phantom" });
     return json(route, synced);
   }
   if (path.endsWith("/me")) return json(route, me(withVault));

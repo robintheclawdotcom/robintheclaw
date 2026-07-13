@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Node.js 20 or newer for `signal/`, `verifier/`, and `web/`.
+- Node.js 24 or newer for `web/`; Node.js 20 or newer for `signal/` and `verifier/`.
 - Rust stable for `engine/` and `app/`.
 - Rust stable for the private `runtime/` collector.
 - Foundry with Solidity 0.8.28 for `contracts/`.
@@ -91,14 +91,25 @@ settings.
 ## Product application
 
 The authenticated Rust routes require `DATABASE_URL`, `PRIVY_APP_ID`, `PRIVY_APP_SECRET`,
-`PRIVY_VERIFICATION_KEY`, provider `APP_RPC_URL`, `ALCHEMY_API_KEY`, `ALCHEMY_POLICY_ID`, and the three confirmed
-testnet contract addresses. The web application requires the public Privy app ID, Alchemy API key,
-WalletConnect project ID, and the private API host. Render owns these values; do not place them in
-tracked environment files.
+`PRIVY_VERIFICATION_KEY`, provider `APP_RPC_URL`, `ALCHEMY_POLICY_ID`, and the three confirmed
+testnet contract addresses. The web service requires the public Privy app ID, the private API host,
+the Privy verification key, and server-only Alchemy API key and sponsorship policy. Render owns
+these values; do not place them in tracked environment files.
 
-The API runs migrations at startup. It accepts Privy access tokens through a bearer header or the
-HTTP-only same-origin session cookie, then resolves wallet ownership from Privy server-side. The
-server never trusts client-supplied wallet lists or signs an owner operation.
+The API runs migrations at startup. Next.js validates a Privy access token before creating the
+HTTP-only same-origin session cookie. The Rust API validates the token again and resolves wallet
+ownership from Privy server-side. The server never trusts client-supplied wallet lists or signs an
+owner operation.
+
+Alchemy Wallet API traffic uses `POST /api/wallet`. This authenticated proxy accepts only the
+prepare, submit, and status methods used by the application, verifies each prepared batch against
+the user's server-side account and vault state, injects the sponsorship policy, rate-limits the
+session, and forwards the request without exposing provider credentials to the browser.
+
+Runtime RPC access uses the Alchemy app API key. Policy provisioning is a separate administrative
+operation and requires an Alchemy access key with Gas Manager Read & Write plus the Alchemy app ID.
+After creating and activating the policy, place only its policy ID in `ALCHEMY_POLICY_ID` on the
+web and API services.
 
 ## Record integrity
 

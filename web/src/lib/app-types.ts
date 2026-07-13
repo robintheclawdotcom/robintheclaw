@@ -101,7 +101,6 @@ export type DashboardSnapshot = {
   environment: string;
   asOf: string;
   infrastructureReady: boolean;
-  policyId: string | null;
   totalValue: Amount;
   availableBalance: Amount;
   deployedCapital: Amount;
@@ -124,7 +123,6 @@ export type TransactionPlan = {
   chainId: number;
   smartAccount: `0x${string}`;
   expectedVault: `0x${string}`;
-  policyId: string;
   calls: TransactionCall[];
 };
 

@@ -78,10 +78,11 @@ pub async fn prepare_vault(
     let auth = require_user(&req, &state)?;
     ensure_database(&state)?;
     ensure_contracts(&state)?;
-    let policy_id =
-        state.config.alchemy_policy_id.clone().ok_or_else(|| {
-            ApiError::ServiceUnavailable("Gas sponsorship is not configured.".into())
-        })?;
+    state
+        .config
+        .alchemy_policy_id
+        .as_ref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("Gas sponsorship is not configured.".into()))?;
     let me = state
         .product_store
         .me(&auth.did)
@@ -167,7 +168,6 @@ pub async fn prepare_vault(
         chain_id: state.config.app_chain_id,
         smart_account,
         expected_vault,
-        policy_id,
         calls,
     }))
 }
@@ -294,7 +294,6 @@ pub async fn dashboard(
         environment: "robinhood-testnet".to_string(),
         as_of: chrono::Utc::now(),
         infrastructure_ready: ready,
-        policy_id: state.config.alchemy_policy_id.clone(),
         total_value: amount(&state, total_raw),
         available_balance: amount(&state, available_raw),
         deployed_capital: amount(&state, deployed_raw),

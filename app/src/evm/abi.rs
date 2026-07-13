@@ -39,7 +39,7 @@ pub fn call_address_u256(signature: &str, address: &str, value: &str) -> Result<
 
 pub fn encode_address_word(address: &str) -> Result<String> {
     let normalized = normalize_address(address)?;
-    Ok(format!("{:0>64}", &normalized[2..].to_ascii_lowercase()))
+    Ok(format!("{:0>64}", normalized[2..].to_ascii_lowercase()))
 }
 
 pub fn encode_u256_word(value: &str) -> Result<String> {
