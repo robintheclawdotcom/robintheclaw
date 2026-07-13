@@ -2,10 +2,12 @@ package strategyrunner
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,13 +17,26 @@ import (
 	"github.com/robin-the-claw/liveexec/protocol"
 )
 
+type fakeDispatcher struct {
+	intents []PairIntent
+	err     error
+}
+
+func (f *fakeDispatcher) SubmitIntent(_ context.Context, intent PairIntent) (IntentPersistence, error) {
+	f.intents = append(f.intents, intent)
+	if f.err != nil {
+		return IntentPersistence{}, f.err
+	}
+	return IntentPersistence{Status: "persisted", IntentID: intent.ID, CoordinatorState: "prechecked", CoordinatorVersion: 1}, nil
+}
+
 func TestRunnerEmitsDeterministicCanonicalPairIntent(t *testing.T) {
 	service, input := validInput(t, protocol.ActionEntry)
-	output, err := service.Run(input)
+	output, err := service.Run(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output.Kind != protocol.ActionEntry || output.PairIntent == nil || output.Unwind != nil {
+	if output.Kind != protocol.ActionEntry || output.PairIntent == nil || output.Unwind != nil || output.Persistence == nil {
 		t.Fatal("runner emitted wrong output type")
 	}
 	intent := output.PairIntent
@@ -33,6 +48,9 @@ func TestRunnerEmitsDeterministicCanonicalPairIntent(t *testing.T) {
 		intent.SpotSide != "buy" || intent.PerpSide != "short" || intent.MaxUnwindAttempts != 3 {
 		t.Fatal("intent did not apply the fixed risk policy")
 	}
+	if output.Persistence.IntentID != intent.ID || len(service.dispatcher.(*fakeDispatcher).intents) != 1 {
+		t.Fatal("runner reported success without coordinator persistence")
+	}
 	copy := *intent
 	if err := copy.deriveIDs(); err != nil {
 		t.Fatal(err)
@@ -41,7 +59,8 @@ func TestRunnerEmitsDeterministicCanonicalPairIntent(t *testing.T) {
 		t.Fatal("intent ids are not deterministic and domain separated")
 	}
 
-	again, err := service.Run(input)
+	service.now = func() time.Time { return time.UnixMilli(101_000) }
+	again, err := service.Run(context.Background(), input)
 	if err != nil || again.PairIntent.ID != intent.ID {
 		t.Fatal("same frozen evidence produced a different intent")
 	}
@@ -59,6 +78,16 @@ func TestRunnerEmitsDeterministicCanonicalPairIntent(t *testing.T) {
 	}
 }
 
+func TestRunnerNeverReportsUnpersistedIntent(t *testing.T) {
+	service, input := validInput(t, protocol.ActionEntry)
+	dispatcher := service.dispatcher.(*fakeDispatcher)
+	dispatcher.err = ErrCoordinatorAmbiguous
+	output, err := service.Run(context.Background(), input)
+	if !errors.Is(err, ErrCoordinatorAmbiguous) || output.PairIntent != nil || output.Persistence != nil || len(dispatcher.intents) != 1 {
+		t.Fatalf("unpersisted intent was reported as success: output=%+v err=%v", output, err)
+	}
+}
+
 func TestRunnerEmitsEpisodeBoundReduceOnlyUnwind(t *testing.T) {
 	service, input := validInput(t, protocol.ActionUnwind)
 	pairID := testHash("open-pair")
@@ -69,21 +98,21 @@ func TestRunnerEmitsEpisodeBoundReduceOnlyUnwind(t *testing.T) {
 		MinimumSettlementAmountOut: "24000000",
 		PerpBaseAmount:             input.Quotes.Perp.BaseAmount,
 	}
-	output, err := service.Run(input)
+	directive, err := buildUnwind(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output.Kind != protocol.ActionUnwind || output.Unwind == nil || output.PairIntent != nil {
-		t.Fatal("runner emitted wrong unwind output type")
-	}
-	unwind := output.Unwind
+	unwind := &directive
 	if !unwind.ReduceOnly || unwind.SpotSide != "sell" || unwind.PerpSide != "long" ||
 		unwind.PairIntentID != pairID || unwind.SpotUnwindIntentID != input.OpenEpisode.SpotUnwindIntentID || !validHash(unwind.ID) {
 		t.Fatal("unwind directive is not bound to the open episode")
 	}
 
+	if _, err := service.Run(context.Background(), input); !errors.Is(err, ErrUnwindProtocolGap) {
+		t.Fatalf("unwind dispatch did not fail closed: %v", err)
+	}
 	input.OpenEpisode.PerpBaseAmount++
-	if _, err := service.Run(input); err == nil {
+	if _, err := buildUnwind(input); err == nil {
 		t.Fatal("cross-episode quantity substitution accepted")
 	}
 }
@@ -106,7 +135,7 @@ func TestRunnerFailsClosedOnReadinessAndIdentityFailures(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			service, input := validInput(t, protocol.ActionEntry)
 			mutate(&input)
-			if _, err := service.Run(input); err == nil {
+			if _, err := service.Run(context.Background(), input); err == nil {
 				t.Fatal("invalid evidence accepted")
 			}
 		})
@@ -116,13 +145,13 @@ func TestRunnerFailsClosedOnReadinessAndIdentityFailures(t *testing.T) {
 func TestRunnerRejectsStaleOrTamperedQuotes(t *testing.T) {
 	service, input := validInput(t, protocol.ActionEntry)
 	input.Quotes.ExpiresAtMS = 100_000
-	if _, err := service.Run(input); err == nil {
+	if _, err := service.Run(context.Background(), input); err == nil {
 		t.Fatal("tampered expired quote accepted")
 	}
 
 	service, input = validInput(t, protocol.ActionEntry)
 	input.Quotes.ExecutionAccountID = "account-canary-2"
-	if _, err := service.Run(input); err == nil {
+	if _, err := service.Run(context.Background(), input); err == nil {
 		t.Fatal("tampered account quote accepted")
 	}
 }
@@ -145,7 +174,7 @@ func TestRunRequestRejectsStrategyParameters(t *testing.T) {
 func validInput(t *testing.T, action protocol.Action) (*Service, RunRequest) {
 	t.Helper()
 	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
-	service, err := NewService(privateKey.Public().(ed25519.PublicKey))
+	service, err := NewService(privateKey.Public().(ed25519.PublicKey), &fakeDispatcher{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,18 +2,24 @@ package strategyrunner
 
 import (
 	"crypto/ed25519"
+	"crypto/hmac"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
-	Enabled        bool
-	ListenAddress  string
-	Caller         string
-	AuthKey        []byte
-	QuotePublicKey ed25519.PublicKey
+	Enabled           bool
+	ListenAddress     string
+	Caller            string
+	AuthKey           []byte
+	QuotePublicKey    ed25519.PublicKey
+	CoordinatorURL    string
+	CoordinatorCaller string
+	CoordinatorKey    []byte
 }
 
 func LoadConfig() (Config, error) {
@@ -22,6 +28,18 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("ROBIN_STRATEGY_RUNNER_ENABLED must be true or false")
 	}
 	config := Config{Enabled: enabled, ListenAddress: valueOrDefault("ROBIN_STRATEGY_RUNNER_LISTEN", ":8080")}
+	coordinatorURL := os.Getenv("ROBIN_COORDINATOR_URL")
+	coordinatorCaller := os.Getenv("ROBIN_COORDINATOR_INTENT_CALLER")
+	coordinatorKey := os.Getenv("ROBIN_COORDINATOR_INTENT_HMAC_KEY")
+	configuredCoordinatorValues := 0
+	for _, value := range []string{coordinatorURL, coordinatorCaller, coordinatorKey} {
+		if value != "" {
+			configuredCoordinatorValues++
+		}
+	}
+	if configuredCoordinatorValues != 0 && configuredCoordinatorValues != 3 {
+		return Config{}, errors.New("coordinator URL, caller, and HMAC key must be configured together")
+	}
 	if !enabled {
 		return config, nil
 	}
@@ -36,6 +54,24 @@ func LoadConfig() (Config, error) {
 	}
 	if config.Caller == "" {
 		return Config{}, errors.New("ROBIN_STRATEGY_RUNNER_CALLER is required")
+	}
+	if configuredCoordinatorValues != 3 {
+		return Config{}, errors.New("coordinator persistence configuration is required")
+	}
+	config.CoordinatorURL = coordinatorURL
+	config.CoordinatorCaller = coordinatorCaller
+	config.CoordinatorKey, err = hex.DecodeString(coordinatorKey)
+	if err != nil || len(config.CoordinatorKey) != 32 || coordinatorKey != strings.ToLower(coordinatorKey) {
+		return Config{}, errors.New("ROBIN_COORDINATOR_INTENT_HMAC_KEY must be a 32-byte hex value")
+	}
+	if _, err := coordinatorEndpoint(config.CoordinatorURL); err != nil {
+		return Config{}, err
+	}
+	if !validCaller(config.Caller) || !validCaller(config.CoordinatorCaller) || config.Caller == config.CoordinatorCaller {
+		return Config{}, errors.New("runner and coordinator callers must be distinct lowercase service identifiers")
+	}
+	if hmac.Equal(config.AuthKey, config.CoordinatorKey) {
+		return Config{}, errors.New("runner and coordinator HMAC keys must be distinct")
 	}
 	config.QuotePublicKey = ed25519.PublicKey(key)
 	return config, nil

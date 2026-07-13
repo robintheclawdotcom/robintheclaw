@@ -3,6 +3,7 @@ package strategyrunner
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
@@ -63,8 +64,20 @@ func (s *Server) run(w http.ResponseWriter, request *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid strategy evidence"})
 		return
 	}
-	output, err := s.service.Run(input)
+	output, err := s.service.Run(request.Context(), input)
 	if err != nil {
+		if errors.Is(err, ErrCoordinatorAmbiguous) {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "coordinator persistence is ambiguous"})
+			return
+		}
+		if errors.Is(err, ErrCoordinatorDeclined) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "coordinator declined intent"})
+			return
+		}
+		if errors.Is(err, ErrUnwindProtocolGap) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "coordinator exit authority is unavailable"})
+			return
+		}
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "strategy evidence rejected"})
 		return
 	}

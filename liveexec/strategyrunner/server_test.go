@@ -70,6 +70,46 @@ func TestDisabledServerStaysFailClosed(t *testing.T) {
 	}
 }
 
+func TestServerNeverReportsAmbiguousPersistence(t *testing.T) {
+	service, input := validInput(t, protocol.ActionEntry)
+	service.dispatcher.(*fakeDispatcher).err = ErrCoordinatorAmbiguous
+	response := serveAuthenticated(t, service, input, "nonce-ambiguous")
+	if response.Code != http.StatusBadGateway || bytes.Contains(response.Body.Bytes(), []byte(`"pair_intent"`)) {
+		t.Fatalf("ambiguous persistence returned %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestServerFailsClosedOnUnwindProtocolGap(t *testing.T) {
+	service, input := validInput(t, protocol.ActionUnwind)
+	pairID := testHash("open-pair")
+	input.OpenEpisode = &OpenEpisode{
+		PairIntentID: pairID, SpotUnwindIntentID: domainHash(spotUnwindDomain, []byte(pairID)),
+		SpotAmount: input.Quotes.Spot.StockAmount, MinimumSettlementAmountOut: "24000000", PerpBaseAmount: input.Quotes.Perp.BaseAmount,
+	}
+	response := serveAuthenticated(t, service, input, "nonce-unwind-gap")
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unwind protocol gap returned %d %s", response.Code, response.Body.String())
+	}
+}
+
+func serveAuthenticated(t *testing.T, service *Service, input RunRequest, nonce string) *httptest.ResponseRecorder {
+	t.Helper()
+	key := []byte("01234567890123456789012345678901")
+	auth, err := protocol.NewAuthenticator(key, "evaluation-service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	signature := hex.EncodeToString(protocol.RequestMAC(key, "POST", "/v1/run", "evaluation-service", timestamp, nonce, body))
+	response := httptest.NewRecorder()
+	NewServer(service, auth, true).Handler().ServeHTTP(response, authenticatedRequest(body, timestamp, nonce, signature))
+	return response
+}
+
 func authenticatedRequest(body []byte, timestamp, nonce, signature string) *http.Request {
 	request := httptest.NewRequest(http.MethodPost, "/v1/run", bytes.NewReader(body))
 	request.Header.Set("X-Robin-Caller", "evaluation-service")

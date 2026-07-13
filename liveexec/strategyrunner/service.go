@@ -1,11 +1,13 @@
 package strategyrunner
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"time"
@@ -27,19 +29,22 @@ var (
 	unwindDirectiveDomain = []byte("robin.live.unwind-directive.v1\x00")
 )
 
+var ErrUnwindProtocolGap = errors.New("coordinator exit authority is unavailable")
+
 type Service struct {
 	quotePublicKey ed25519.PublicKey
+	dispatcher     IntentDispatcher
 	now            func() time.Time
 }
 
-func NewService(quotePublicKey ed25519.PublicKey) (*Service, error) {
-	if len(quotePublicKey) != ed25519.PublicKeySize {
-		return nil, errors.New("trusted quote public key is required")
+func NewService(quotePublicKey ed25519.PublicKey, dispatcher IntentDispatcher) (*Service, error) {
+	if len(quotePublicKey) != ed25519.PublicKeySize || dispatcher == nil {
+		return nil, errors.New("trusted quote public key and coordinator dispatcher are required")
 	}
-	return &Service{quotePublicKey: append(ed25519.PublicKey(nil), quotePublicKey...), now: time.Now}, nil
+	return &Service{quotePublicKey: append(ed25519.PublicKey(nil), quotePublicKey...), dispatcher: dispatcher, now: time.Now}, nil
 }
 
-func (s *Service) Run(input RunRequest) (RunOutput, error) {
+func (s *Service) Run(ctx context.Context, input RunRequest) (RunOutput, error) {
 	nowMS := uint64(s.now().UnixMilli())
 	if err := input.Quotes.Verify(s.quotePublicKey, nowMS); err != nil {
 		return RunOutput{}, err
@@ -53,13 +58,20 @@ func (s *Service) Run(input RunRequest) (RunOutput, error) {
 		if err != nil {
 			return RunOutput{}, err
 		}
-		return RunOutput{Kind: protocol.ActionEntry, PairIntent: &intent}, nil
-	case protocol.ActionUnwind:
-		directive, err := buildUnwind(input)
+		persistence, err := s.dispatcher.SubmitIntent(ctx, intent)
 		if err != nil {
 			return RunOutput{}, err
 		}
-		return RunOutput{Kind: protocol.ActionUnwind, Unwind: &directive}, nil
+		if persistence.Status != "persisted" || persistence.IntentID != intent.ID ||
+			persistence.CoordinatorState != "prechecked" || persistence.CoordinatorVersion != 1 {
+			return RunOutput{}, fmt.Errorf("%w: invalid persistence receipt", ErrCoordinatorAmbiguous)
+		}
+		return RunOutput{Kind: protocol.ActionEntry, PairIntent: &intent, Persistence: &persistence}, nil
+	case protocol.ActionUnwind:
+		if _, err := buildUnwind(input); err != nil {
+			return RunOutput{}, err
+		}
+		return RunOutput{}, ErrUnwindProtocolGap
 	default:
 		return RunOutput{}, errors.New("unsupported strategy action")
 	}
@@ -147,6 +159,7 @@ func buildEntry(input RunRequest, nowMS uint64) (PairIntent, error) {
 	if state.NextUnwindOrderIndex+uint64(maximumUnwindAttempts)-1 > maximumClientOrderIndex {
 		return PairIntent{}, errors.New("unwind order range is not available")
 	}
+	createdAtMS := quotes.ObservedAtMS
 	intent := PairIntent{
 		Version:                    2,
 		ExecutionAccountID:         state.ExecutionAccountID,
@@ -180,11 +193,11 @@ func buildEntry(input RunRequest, nowMS uint64) (PairIntent, error) {
 		PerpUnwindPrice:            uint32(unwindPrice),
 		UnwindClientOrderIndex:     state.NextUnwindOrderIndex,
 		MaxUnwindAttempts:          maximumUnwindAttempts,
-		PerpOrderExpiryMS:          nowMS + 300_000,
-		EmergencyDeadlineMS:        nowMS + 600_000,
-		ReconciliationDeadlineMS:   nowMS + 86_400_000,
+		PerpOrderExpiryMS:          createdAtMS + 300_000,
+		EmergencyDeadlineMS:        createdAtMS + 600_000,
+		ReconciliationDeadlineMS:   createdAtMS + 86_400_000,
 		LeverageMicros:             1_000_000,
-		CreatedAtMS:                nowMS,
+		CreatedAtMS:                createdAtMS,
 		DeadlineMS:                 quotes.ExpiresAtMS,
 		Evidence: FrozenEvidence{
 			DatasetManifest:          input.Evaluation.DatasetManifest,
@@ -198,7 +211,7 @@ func buildEntry(input RunRequest, nowMS uint64) (PairIntent, error) {
 			EstimatedTotalCostMicros: input.Evaluation.EstimatedCostMicros,
 		},
 	}
-	if intent.DeadlineMS <= intent.CreatedAtMS {
+	if intent.DeadlineMS <= nowMS || intent.DeadlineMS <= intent.CreatedAtMS {
 		return PairIntent{}, errors.New("entry quote expired before intent creation")
 	}
 	if err := intent.deriveIDs(); err != nil {

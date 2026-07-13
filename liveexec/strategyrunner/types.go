@@ -159,7 +159,8 @@ type UnwindDirective struct {
 }
 
 type RunOutput struct {
-	Kind       protocol.Action  `json:"kind"`
-	PairIntent *PairIntent      `json:"pair_intent,omitempty"`
-	Unwind     *UnwindDirective `json:"unwind,omitempty"`
+	Kind        protocol.Action    `json:"kind"`
+	PairIntent  *PairIntent        `json:"pair_intent,omitempty"`
+	Unwind      *UnwindDirective   `json:"unwind,omitempty"`
+	Persistence *IntentPersistence `json:"persistence,omitempty"`
 }

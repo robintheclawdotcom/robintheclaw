@@ -3,7 +3,7 @@
 This module contains two internal services for `basis-aapl-v1`:
 
 - `quote-authority` obtains simultaneous executable spot and perp quotes from a reviewed adapter, pins every route and policy identity, and signs the bundle with Ed25519.
-- `strategy-runner` verifies the signed quote and authenticated evaluation, readiness, and account snapshots before emitting a deterministic `PairIntent v2` entry or an episode-bound reduce-only unwind directive.
+- `strategy-runner` verifies the signed quote and authenticated evaluation, readiness, and account snapshots, then submits the exact deterministic `PairIntent v2` entry to the coordinator.
 
 Neither service accepts strategy code, calldata, market, leverage, threshold, or route inputs. Both services reject unknown JSON fields. The runner has no venue credential, wallet key, KMS permission, withdrawal path, or transfer path.
 
@@ -20,7 +20,17 @@ Do not remove that startup block until the adapter:
 - fails on RPC disagreement, order-book gaps, stale data, route/code-hash mismatch, or partial source availability; and
 - has independent review plus mainnet-fork and venue integration coverage.
 
-Production activation also requires durable replay storage shared by every replica. The current HMAC nonce cache is process-local and is suitable only for a single disabled or test instance. The coordinator must accept the runner's authenticated output and persist the evaluation/quote evidence before either binary is enabled.
+Production activation also requires durable replay storage shared by every replica. The current inbound HMAC nonce cache is process-local and is suitable only for a single disabled or test instance.
+
+## Coordinator persistence
+
+Authenticated readiness and account-state fields in a runner request are proposals, not production authorization. An entry succeeds only when the coordinator independently revalidates its authoritative account snapshots, market authority, controls, promotion, and turnover, persists the exact PairIntent, and returns a bounded `201` response for the same intent in `prechecked` state at version 1. The runner verifies all response fields and never reports an intent when submission is declined or ambiguous.
+
+The PairIntent timestamp and identifier derive from signed quote evidence, not runner wall-clock time. Retrying the same frozen request therefore cannot create a different intent. The runner sends once and never automatically retries a transport timeout, redirect, oversized response, malformed response, or response-identity mismatch.
+
+There is not yet an authenticated coordinator lookup or idempotent create response for an existing intent. If the coordinator commits and the response is lost, the runner reports ambiguous persistence; a later exact retry is expected to conflict and still cannot prove that the stored payload is identical. That durable cross-replica reconciliation endpoint is a P0 requirement before enabling the runner.
+
+Unwind dispatch is intentionally unavailable. Coordinator `/v1/exits` requires a `quote_source_session` and `quote_source_event_id` that identify an already persisted `/v1/market-quotes` record bound to the intent, spot amount, expected output, and deadlines. The signed quote bundle currently has source labels but no durable coordinator session/event identity or proof that such a record was accepted. The runner validates the episode-bound unwind directive and then fails closed without calling `/v1/exits`. Adding invented session or event values would bypass the coordinator's market-authority contract.
 
 ## Fixed policy
 
@@ -67,8 +77,11 @@ Strategy runner:
 - `ROBIN_STRATEGY_RUNNER_CALLER`
 - `ROBIN_STRATEGY_RUNNER_HMAC_KEY`
 - `ROBIN_QUOTE_AUTHORITY_ED25519_PUBLIC_KEY`
+- `ROBIN_COORDINATOR_URL`
+- `ROBIN_COORDINATOR_INTENT_CALLER`
+- `ROBIN_COORDINATOR_INTENT_HMAC_KEY`
 
-All key values are base64. They belong in the deployment secret store, never in repository files or examples.
+Runner ingress and quote-authority keys are base64. The coordinator intent HMAC key is exactly 32 bytes encoded as lowercase hex, matching coordinator authentication. The runner ingress and coordinator callers and HMAC keys must be distinct. Coordinator HTTP is accepted only for loopback, private IPs, or `.internal` hosts; other endpoints require HTTPS. Keys belong in the deployment secret store, never in repository files or examples.
 
 ## Validation
 

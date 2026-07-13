@@ -23,7 +23,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service, err := strategyrunner.NewService(config.QuotePublicKey)
+	coordinator, err := strategyrunner.NewCoordinatorClient(config.CoordinatorURL, config.CoordinatorCaller, config.CoordinatorKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+	service, err := strategyrunner.NewService(config.QuotePublicKey, coordinator)
 	if err != nil {
 		log.Fatal(err)
 	}
