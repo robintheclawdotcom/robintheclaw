@@ -1,5 +1,6 @@
 import type {
   ActivityPage,
+  AgentRecord,
   DashboardSnapshot,
   MeResponse,
   PreferencesRecord,
@@ -43,6 +44,17 @@ export class AppApi {
 
   dashboard(): Promise<DashboardSnapshot> {
     return this.request("/v1/dashboard");
+  }
+
+  launchAgent(): Promise<AgentRecord> {
+    return this.request("/v1/agents", { method: "POST" });
+  }
+
+  updateAgent(id: string, status: "running" | "paused"): Promise<AgentRecord> {
+    return this.request(`/v1/agents/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ status }),
+    });
   }
 
   activity(cursor?: string): Promise<ActivityPage> {

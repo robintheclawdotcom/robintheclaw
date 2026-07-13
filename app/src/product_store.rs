@@ -1,6 +1,7 @@
 use crate::product::{
-    ActivityPage, ActivityRecord, ConfirmedVault, IdentitySnapshot, MeResponse, PreferencesInput,
-    PreferencesRecord, SmartAccountRecord, UserRecord, VaultRecord, WalletRecord,
+    ActivityPage, ActivityRecord, AgentRecord, AgentSnapshot, ConfirmedVault, IdentitySnapshot,
+    MeResponse, PreferencesInput, PreferencesRecord, SmartAccountRecord, UserRecord, VaultRecord,
+    WalletRecord,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -387,6 +388,85 @@ impl ProductStore {
             None
         };
         Ok(ActivityPage { items, next_cursor })
+    }
+
+    pub async fn launch_agent(&self, did: &str, strategy_version: &str) -> Result<AgentRecord> {
+        let user = self.ensure_user(did).await?;
+        if self.vault_for_user(user.id).await?.is_none() {
+            return Err(anyhow!("create a vault before launching an agent"));
+        }
+        let pool = self.pool()?;
+        sqlx::query_as::<_, AgentRecord>(
+            r#"
+            INSERT INTO agents (id, user_id, strategy_version, mode, status)
+            VALUES ($1, $2, $3, 'paper', 'running')
+            ON CONFLICT (user_id) DO UPDATE SET
+                status = 'running',
+                updated_at = now()
+            RETURNING id, strategy_version, mode, status, created_at, updated_at
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(user.id)
+        .bind(strategy_version)
+        .fetch_one(pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn set_agent_status(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+        status: &str,
+    ) -> Result<AgentRecord> {
+        let user = self.ensure_user(did).await?;
+        sqlx::query_as::<_, AgentRecord>(
+            r#"
+            UPDATE agents SET status = $3, updated_at = now()
+            WHERE id = $1 AND user_id = $2
+            RETURNING id, strategy_version, mode, status, created_at, updated_at
+            "#,
+        )
+        .bind(agent_id)
+        .bind(user.id)
+        .bind(status)
+        .fetch_optional(self.pool()?)
+        .await?
+        .ok_or_else(|| anyhow!("agent not found"))
+    }
+
+    pub async fn agent_snapshot(&self, user_id: Uuid) -> Result<Option<AgentSnapshot>> {
+        let Some(record) = sqlx::query_as::<_, AgentRecord>(
+            r#"
+            SELECT id, strategy_version, mode, status, created_at, updated_at
+            FROM agents WHERE user_id = $1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(self.pool()?)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let (evaluations, candidates, last_evaluated_at) =
+            sqlx::query_as::<_, (i64, i64, Option<DateTime<Utc>>)>(
+                r#"
+            SELECT count(*)::bigint,
+                   count(*) FILTER (WHERE status = 'candidate')::bigint,
+                   max(evaluated_at)
+            FROM agent_paper_events WHERE agent_id = $1
+            "#,
+            )
+            .bind(record.id)
+            .fetch_one(self.pool()?)
+            .await?;
+        Ok(Some(AgentSnapshot {
+            record,
+            evaluations,
+            candidates,
+            last_evaluated_at,
+        }))
     }
 
     pub async fn watched_contracts(&self) -> Result<Vec<(Uuid, String)>> {

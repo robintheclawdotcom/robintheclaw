@@ -9,7 +9,8 @@ background workers connected to the private research database:
 - `robin-research-collector` captures venue and chain events, maintains source health, and archives
   the original wire payloads.
 - `robin-paper-agent` consumes durable ticker events, requests block-pinned Uniswap v4 quotes, and
-  persists every evaluation and opportunity episode.
+  persists every evaluation and opportunity episode. It also assigns committed evaluations to
+  each running user agent in the private product database.
 
 Neither worker accepts inbound traffic. Neither process contains an EVM signer, Lighter API key,
 wallet path, transaction broadcaster, or contract write interface.
@@ -49,6 +50,11 @@ from the last committed event after a restart. When the processor cannot keep pa
 updates, it evaluates the latest event and counts the superseded ticks instead of building an
 ever-growing stale backlog.
 
+User agents have an independent launch and pause state. A durable outbox is committed with each
+paper evaluation before the research cursor advances. Assignments to the product database are
+idempotent and retried until acknowledged, so a product-database outage cannot silently drop an
+agent evaluation.
+
 ## Production configuration
 
 | Variable | Service | Purpose |
@@ -59,6 +65,7 @@ ever-growing stale backlog.
 | `RUNTIME_UNIVERSE` | collector | Validated subset of the canonical capture universe. |
 | `PAPER_AGENT_CONFIG` | paper agent | Versioned strategy registration path. |
 | `PAPER_MINIMUM_NET_EDGE_PPM` | paper agent | Private production entry threshold. |
+| `AGENT_DATABASE_URL` | paper agent | Direct private product-database connection for durable user-agent assignments. |
 | `R2_BUCKET` | collector | Private raw-event archive. |
 | `AWS_ENDPOINT_URL` | collector | Cloudflare R2 S3 endpoint. |
 | `AWS_ACCESS_KEY_ID` | collector | Bucket-scoped archive credential. |
@@ -81,6 +88,7 @@ A production launch is complete when all of the following are observed from the 
 5. Paper evaluations advance for the configured market.
 6. Evaluation evidence includes a block-pinned executable spot quote, code hashes, and current multiplier state.
 7. Replaying an already committed event does not create another evaluation or episode.
+8. Running user agents receive one assignment per evaluation and the fanout outbox has no stale pending rows.
 
 An open episode is not required for liveness. When the configured net edge is absent, a continuous
 stream of evidence-backed declines is the correct output.
@@ -110,6 +118,12 @@ SELECT count(*) AS pending_archive_events,
        min(received_at) AS oldest_pending_event
 FROM event_staging
 WHERE state <> 'archived';
+
+SELECT count(*) AS pending_agent_assignments,
+       min(created_at) AS oldest_pending_assignment,
+       max(delivery_attempts) AS maximum_attempts
+FROM agent_fanout_outbox
+WHERE delivered_at IS NULL;
 ```
 
 ## Recovery
@@ -119,6 +133,7 @@ WHERE state <> 'archived';
 - An archival upload is acknowledged only after R2 accepts the segment. Expired leases return to
   the pending queue.
 - A paper-agent restart resumes from its committed cursor. Database uniqueness constraints make
-  event evaluation and episode creation idempotent.
+  event evaluation, episode creation, and per-agent assignment idempotent. Pending agent fanout
+  remains in the outbox until the product database accepts it.
 - A nonce discontinuity invalidates the local Lighter book and forces reconnect rather than joining
   incompatible deltas.

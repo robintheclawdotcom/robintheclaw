@@ -57,8 +57,13 @@ end
 
 paper_agent = services.find { |service| service["name"] == "robin-paper-agent" }
 paper_env = paper_agent&.fetch("envVars", [])&.map { |variable| variable["key"] }.compact || []
-%w[PAPER_AGENT_CONFIG PAPER_MINIMUM_NET_EDGE_PPM ROBINHOOD_RPC_URL].each do |key|
+%w[AGENT_DATABASE_URL PAPER_AGENT_CONFIG PAPER_MINIMUM_NET_EDGE_PPM ROBINHOOD_RPC_URL].each do |key|
   errors << "robin-paper-agent: #{key} is missing" unless paper_env.include?(key)
+end
+agent_database = paper_agent&.fetch("envVars", [])&.find { |variable| variable["key"] == "AGENT_DATABASE_URL" }
+unless agent_database&.dig("fromDatabase", "name") == "robin-app" &&
+       agent_database&.dig("fromDatabase", "property") == "connectionString"
+  errors << "robin-paper-agent: agent fanout requires the direct product database"
 end
 
 %w[robin-api robin-execution-coordinator robin-lighter-signer robin-robinhood-signer].each do |name|

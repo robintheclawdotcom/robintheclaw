@@ -80,3 +80,12 @@ test("funding and withdrawal controls complete without changing ownership", asyn
   await expect(page.getByLabel("Amount to withdraw")).toHaveValue("");
   await expect(page.getByText("0x1111…1111").first()).toBeVisible();
 });
+
+test("user launches a Robin agent from the strategy page", async ({ page }) => {
+  await mockApplication(page, { withAgent: false });
+  await page.goto("/app/strategy");
+  await expect(page.getByRole("heading", { name: "Not launched" })).toBeVisible();
+  await page.getByRole("button", { name: "Launch Robin agent" }).click();
+  await expect(page.getByRole("heading", { name: "Agent running" })).toBeVisible();
+  await expect(page.getByText("basis-paper-v1")).toBeVisible();
+});

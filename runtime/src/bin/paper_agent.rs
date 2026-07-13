@@ -1,6 +1,7 @@
 use anyhow::Context;
 use chrono::Utc;
 use robin_runtime::{
+    agents::AgentStore,
     paper::{evaluate, PaperConfig, RobinhoodReader},
     storage::{PaperRecordOutcome, PaperStore},
 };
@@ -76,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
     let reader = RobinhoodReader::new(rpc_url)?;
     reader.verify_chain(config.chain_id).await?;
     let store = PaperStore::from_env().await?;
+    let agents = AgentStore::from_env().await?;
     let consumer = format!("paper-agent:{}", config.strategy_version);
     let symbols = config.symbols();
     store
@@ -101,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             _ = report.tick() => counters.report(),
-            result = process_next(&store, &reader, &config, &consumer, &symbols) => {
+            result = process_next(&store, agents.as_ref(), &reader, &config, &consumer, &symbols) => {
                 match result {
                     Ok(Some((candidate, outcome))) => counters.record(candidate, outcome),
                     Ok(None) => sleep(Duration::from_millis(250)).await,
@@ -118,11 +120,29 @@ async fn main() -> anyhow::Result<()> {
 
 async fn process_next(
     store: &PaperStore,
+    agents: Option<&AgentStore>,
     reader: &RobinhoodReader,
     config: &PaperConfig,
     consumer: &str,
     symbols: &[String],
 ) -> anyhow::Result<Option<(bool, PaperRecordOutcome)>> {
+    if let Some(agents) = agents {
+        if let Some(fanout) = store.next_agent_fanout().await? {
+            match agents.record_evaluation(&fanout).await {
+                Ok(_) => {
+                    store
+                        .mark_agent_fanout_delivered(fanout.evaluation_id)
+                        .await?
+                }
+                Err(error) => {
+                    store
+                        .record_agent_fanout_error(fanout.evaluation_id, &error.to_string())
+                        .await?;
+                    return Err(error);
+                }
+            }
+        }
+    }
     let Some(event) = store.next_ticker(consumer, symbols).await? else {
         return Ok(None);
     };

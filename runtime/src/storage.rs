@@ -1,3 +1,4 @@
+use crate::agents::AgentFanout;
 use crate::archive::{ArchiveSegment, DailyManifest, ManifestEntry};
 use crate::paper::{
     ActivePaperPosition, PaperEntry, PaperEvaluation, PaperMark, PaperStatus, PaperTickerEvent,
@@ -29,6 +30,7 @@ pub struct PaperStore {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PaperRecordOutcome {
     pub inserted: bool,
+    pub episode_id: Option<Uuid>,
     pub episode_opened: bool,
     pub episode_marked: bool,
     pub episode_closed: bool,
@@ -707,6 +709,7 @@ impl PaperStore {
 
         let mut outcome = PaperRecordOutcome {
             inserted: true,
+            episode_id: active_episode,
             superseded_events: event.superseded_events,
             ..PaperRecordOutcome::default()
         };
@@ -752,6 +755,7 @@ impl PaperStore {
                 .execute(&mut *transaction)
                 .await?;
                 episode_id = Some(opened);
+                outcome.episode_id = Some(opened);
                 outcome.episode_opened = true;
             }
         } else if let (Some(active_id), true, Some(mark)) = (
@@ -784,6 +788,7 @@ impl PaperStore {
             .execute(&mut *transaction)
             .await?;
             outcome.episode_closed = true;
+            outcome.episode_id = Some(active_id);
         }
 
         sqlx::query(
@@ -813,12 +818,74 @@ impl PaperStore {
         .execute(&mut *transaction)
         .await
         .context("persist paper evaluation")?;
+        sqlx::query(
+            "INSERT INTO agent_fanout_outbox \
+                (evaluation_id, strategy_version, market_event_id, episode_id, symbol, status, \
+                 reason, net_edge_ppm, evaluated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6::paper_evaluation_status, $7, $8, $9)",
+        )
+        .bind(evaluation.id)
+        .bind(strategy_version)
+        .bind(event.id)
+        .bind(episode_id)
+        .bind(&event.symbol)
+        .bind(evaluation.status.as_db())
+        .bind(&evaluation.reason)
+        .bind(evaluation.net_edge_ppm)
+        .bind(evaluation.evaluated_at)
+        .execute(&mut *transaction)
+        .await
+        .context("queue agent fanout")?;
         advance_paper_cursor(&mut transaction, consumer, event).await?;
         transaction
             .commit()
             .await
             .context("commit paper evaluation")?;
         Ok(outcome)
+    }
+
+    pub async fn next_agent_fanout(&self) -> anyhow::Result<Option<AgentFanout>> {
+        sqlx::query_as::<_, AgentFanout>(
+            r#"
+            SELECT evaluation_id, strategy_version, market_event_id, episode_id, symbol,
+                   status::text, reason, net_edge_ppm, evaluated_at
+            FROM agent_fanout_outbox
+            WHERE delivered_at IS NULL
+            ORDER BY created_at, evaluation_id
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("load pending agent fanout")
+    }
+
+    pub async fn mark_agent_fanout_delivered(&self, evaluation_id: Uuid) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE agent_fanout_outbox SET delivered_at = now(), delivery_attempts = delivery_attempts + 1, last_error = NULL WHERE evaluation_id = $1 AND delivered_at IS NULL",
+        )
+        .bind(evaluation_id)
+        .execute(&self.pool)
+        .await
+        .context("mark agent fanout delivered")?;
+        Ok(())
+    }
+
+    pub async fn record_agent_fanout_error(
+        &self,
+        evaluation_id: Uuid,
+        error: &str,
+    ) -> anyhow::Result<()> {
+        let bounded: String = error.chars().take(256).collect();
+        sqlx::query(
+            "UPDATE agent_fanout_outbox SET delivery_attempts = delivery_attempts + 1, last_error = $2 WHERE evaluation_id = $1 AND delivered_at IS NULL",
+        )
+        .bind(evaluation_id)
+        .bind(bounded)
+        .execute(&self.pool)
+        .await
+        .context("record agent fanout failure")?;
+        Ok(())
     }
 }
 
