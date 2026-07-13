@@ -10,3 +10,6 @@ ruby scripts/validate-blueprint.rb
 cargo run --quiet --locked --manifest-path research/Cargo.toml \
   --bin strategy-manifest-gate -- config/strategies/basis-aapl-v1.manifest.json
 bash liveexec/scripts/validate.sh
+(cd publisher && go test ./...)
+(cd runtime/live-scheduler && go test ./...)
+(cd ops/mainnet-live/restrictctl && go test ./...)
