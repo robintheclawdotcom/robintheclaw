@@ -26,3 +26,16 @@ test("documentation has a dedicated route", async ({ page }) => {
   await page.getByRole("link", { name: "home", exact: true }).first().click();
   await expect(page).toHaveURL(/\/$/);
 });
+
+test("roadmap leads with live venue execution", async ({ page }) => {
+  await page.goto("/roadmap");
+
+  await expect(page).toHaveURL(/\/roadmap$/);
+  await expect(page.getByRole("heading", { name: "From deployed infrastructure to bounded autonomy." })).toBeVisible();
+  await expect(page.getByRole("link", { name: "roadmap", exact: true }).first()).toHaveClass(/nav-active/);
+  await expect(page.getByText("live venue execution", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("live agent trading: in development", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Production evidence" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Bounded activation" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "read the readiness specification", exact: false })).toHaveAttribute("href", "/docs");
+});

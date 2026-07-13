@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { robinhoodMainnetExplorer } from "../lib/chain";
+import Roadmap from "./roadmap";
 
 const mainnetDeployment = {
   explorer: robinhoodMainnetExplorer,
@@ -224,7 +225,7 @@ function ThemeToggle({
   );
 }
 
-export default function PublicSite({ view }: { view: "home" | "docs" }) {
+export default function PublicSite({ view }: { view: "home" | "docs" | "roadmap" }) {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [doc, setDoc] = useState<DocId>("overview");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -270,6 +271,7 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
           <div className="window-controls" aria-hidden="true"><span /><span /><span /></div>
           <nav className="desktop-nav" aria-label="Primary navigation">
             <a className={view === "home" ? "nav-active" : ""} href="/">home</a>
+            <a className={view === "roadmap" ? "nav-active" : ""} href="/roadmap">roadmap</a>
             <a className={view === "docs" ? "nav-active" : ""} href="/docs">docs</a>
             <a className="open-app-link" href="/app">open app</a>
           </nav>
@@ -302,6 +304,7 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
               </div>
               <div className="drawer-links">
                 <a className={view === "home" ? "active" : ""} href="/">home</a>
+                <a className={view === "roadmap" ? "active" : ""} href="/roadmap">roadmap</a>
                 <a className={view === "docs" ? "active" : ""} href="/docs">docs</a>
                 <a className="drawer-app-link" href="/app">open app</a>
                 <ThemeToggle theme={theme} onToggle={toggleTheme} className="drawer-theme" />
@@ -396,7 +399,7 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
                 <div className="docs-cta-actions"><a href="/app">open app →</a><a className="docs-link" href="/docs">docs</a></div>
               </section>
             </div>
-          ) : (
+          ) : view === "docs" ? (
             <div className="docs-view">
               <aside><DocsTree doc={doc} onSelect={selectDoc} /></aside>
               <article className="doc-article">
@@ -405,12 +408,14 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
                 {docs[doc].body}
               </article>
             </div>
+          ) : (
+            <Roadmap />
           )}
         </div>
 
         <footer>
           <span>© 2026 Robin the Claw · built on Robinhood Chain</span>
-          <span><a href="https://github.com/robintheclawdotcom/robintheclaw">github</a><a href="https://x.com/RobinTheClaw">x / twitter</a></span>
+          <span><a href="/roadmap">roadmap</a><a href="https://github.com/robintheclawdotcom/robintheclaw">github</a><a href="https://x.com/RobinTheClaw">x / twitter</a></span>
         </footer>
       </section>
     </main>
