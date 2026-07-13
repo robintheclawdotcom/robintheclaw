@@ -1,0 +1,20 @@
+{
+  "channel": "trade:0",
+  "liquidation_trades": [],
+  "nonce": 8630448841,
+  "trades": [
+    {
+      "trade_id": 123456,
+      "market_id": 0,
+      "size": "0.1000",
+      "price": "2064.50",
+      "usd_amount": "206.45",
+      "is_maker_ask": true,
+      "block_height": 1000,
+      "timestamp": 1774884000000,
+      "type": "trade",
+      "taker_fee": 196
+    }
+  ],
+  "type": "update/trade"
+}
