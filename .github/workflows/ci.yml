@@ -33,6 +33,35 @@ jobs:
           components: rustfmt, clippy
       - run: bash scripts/check-rust-crates.sh
 
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: robin_runtime_test
+          POSTGRES_USER: robin
+          POSTGRES_PASSWORD: robin_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U robin -d robin_runtime_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgres://robin:robin_test@127.0.0.1:5432/robin_runtime_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - name: Validate runtime migrations
+        run: |
+          for migration in runtime/migrations/*.sql; do
+            psql "$TEST_DATABASE_URL" --set ON_ERROR_STOP=1 --file "$migration"
+          done
+      - name: Validate coordinator promotion gates
+        run: cargo test --locked --manifest-path coordinator/Cargo.toml --test postgres -- --ignored
+
   node:
     runs-on: ubuntu-latest
     steps:

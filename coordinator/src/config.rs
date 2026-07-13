@@ -36,8 +36,8 @@ impl Config {
             listen,
             database_url: env::var("DATABASE_URL").ok(),
             api_token: env::var("COORDINATOR_API_TOKEN").ok(),
-            lighter_signer_url: env::var("LIGHTER_SIGNER_URL").ok(),
-            robinhood_signer_url: env::var("ROBINHOOD_SIGNER_URL").ok(),
+            lighter_signer_url: signer_url("LIGHTER_SIGNER_URL", "LIGHTER_SIGNER_HOSTPORT")?,
+            robinhood_signer_url: signer_url("ROBINHOOD_SIGNER_URL", "ROBINHOOD_SIGNER_HOSTPORT")?,
         };
         config.validate()?;
         if !enabled {
@@ -97,6 +97,37 @@ fn is_private_http(value: &str) -> bool {
         })
 }
 
+fn signer_url(
+    url_key: &'static str,
+    hostport_key: &'static str,
+) -> Result<Option<String>, ConfigError> {
+    if let Ok(value) = env::var(url_key) {
+        return Ok(Some(value));
+    }
+    let Ok(hostport) = env::var(hostport_key) else {
+        return Ok(None);
+    };
+    private_hostport_url(&hostport).map(Some)
+}
+
+fn private_hostport_url(hostport: &str) -> Result<String, ConfigError> {
+    let Some((host, port)) = hostport.rsplit_once(':') else {
+        return Err(ConfigError::InvalidSignerUrl);
+    };
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| ConfigError::InvalidSignerUrl)?;
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || port == 0
+    {
+        return Err(ConfigError::InvalidSignerUrl);
+    }
+    Ok(format!("http://{hostport}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +159,21 @@ mod tests {
         let mut config = enabled();
         config.lighter_signer_url = Some("http://public.example".into());
         assert_eq!(config.validate(), Err(ConfigError::InvalidSignerUrl));
+    }
+
+    #[test]
+    fn render_private_hostport_is_accepted() {
+        assert_eq!(
+            private_hostport_url("robin-lighter-signer:10000"),
+            Ok("http://robin-lighter-signer:10000".into())
+        );
+        assert_eq!(
+            private_hostport_url("public.example:10000"),
+            Err(ConfigError::InvalidSignerUrl)
+        );
+        assert_eq!(
+            private_hostport_url("robin-lighter-signer:0"),
+            Err(ConfigError::InvalidSignerUrl)
+        );
     }
 }

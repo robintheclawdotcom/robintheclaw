@@ -14,12 +14,39 @@ services.each do |service|
   unless service["autoDeployTrigger"] == "checksPass"
     errors << "#{name}: autoDeployTrigger must be checksPass"
   end
-  errors << "#{name}: buildCommand must use a locked install" unless service.fetch("buildCommand", "").include?("--locked") || service.fetch("buildCommand", "").include?("npm ci")
+  build = service.fetch("buildCommand", "")
+  locked = build.include?("--locked") || build.include?("npm ci") ||
+    (build.include?("go mod download") && build.include?("go mod verify"))
+  errors << "#{name}: buildCommand must use a locked install" unless locked
 end
 
 enabled = services.map { |service| service["name"] }
-%w[robin-shadow robin-execution-coordinator robin-lighter-signer robin-robinhood-signer].each do |name|
-  errors << "#{name}: must remain absent until its implementation is reviewed" if enabled.include?(name)
+required = %w[
+  robintheclaw
+  robin-research-collector
+  robin-control-api
+  robin-execution-coordinator
+  robin-lighter-signer
+  robin-robinhood-signer
+]
+required.each do |name|
+  errors << "#{name}: service is missing" unless enabled.include?(name)
+end
+
+%w[robin-control-api robin-execution-coordinator robin-lighter-signer robin-robinhood-signer].each do |name|
+  service = services.find { |item| item["name"] == name }
+  errors << "#{name}: must be a private service" unless service&.fetch("type", nil) == "pserv"
+end
+
+{
+  "robin-execution-coordinator" => "COORDINATOR_ENABLED",
+  "robin-lighter-signer" => "LIGHTER_SIGNER_ENABLED",
+  "robin-robinhood-signer" => "ROBINHOOD_SIGNER_ENABLED"
+}.each do |name, key|
+  service = services.find { |item| item["name"] == name }
+  setting = service&.fetch("envVars", [])&.find { |variable| variable["key"] == key }
+  errors << "#{name}: must enter the Blueprint disabled" unless setting&.fetch("value", nil) == "false"
+  errors << "#{name}: disabled liveness check must use /livez" unless service&.fetch("healthCheckPath", nil) == "/livez"
 end
 
 control = services.find { |service| service["name"] == "robin-control-api" }
