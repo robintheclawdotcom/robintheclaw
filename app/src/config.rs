@@ -73,7 +73,6 @@ pub struct Config {
     pub test_asset_symbol: String,
     pub test_asset_decimals: u8,
     pub test_claim_amount: String,
-    pub alchemy_policy_id: Option<String>,
     pub alchemy_wallet_rpc_url: String,
 }
 
@@ -127,9 +126,6 @@ impl Config {
             test_asset_symbol: env_or("TEST_ASSET_SYMBOL", "tUSDG"),
             test_asset_decimals: env_u64("TEST_ASSET_DECIMALS", 6) as u8,
             test_claim_amount: env_or("TEST_CLAIM_AMOUNT", "1000000000"),
-            alchemy_policy_id: env::var("ALCHEMY_POLICY_ID")
-                .ok()
-                .filter(|v| !v.trim().is_empty()),
             alchemy_wallet_rpc_url: env::var("ALCHEMY_WALLET_RPC_URL")
                 .ok()
                 .filter(|v| !v.trim().is_empty())

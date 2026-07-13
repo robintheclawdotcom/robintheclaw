@@ -103,8 +103,6 @@ services:
         sync: false
       - key: PRIVY_VERIFICATION_KEY
         sync: false
-      - key: ALCHEMY_POLICY_ID
-        sync: false
       - key: ALCHEMY_API_KEY
         sync: false
       - key: PERSONAL_VAULT_FACTORY

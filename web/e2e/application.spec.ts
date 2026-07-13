@@ -27,7 +27,7 @@ test("multi-wallet funding preference never changes the vault owner", async ({ p
   await expect(page.getByText("0x1111…1111").last()).toBeVisible();
 });
 
-test("sponsored onboarding confirms the vault transaction", async ({ page }) => {
+test("self-funded onboarding confirms the vault transaction", async ({ page }) => {
   await mockApplication(page, { withVault: false });
   await page.goto("/app/onboarding");
   await expect(page.getByRole("heading", { name: "Create your strategy vault" })).toBeVisible();

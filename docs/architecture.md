@@ -55,7 +55,7 @@ linked wallets                  PersonalStrategyVaultFactory
 Next.js application -> authenticated Rust API -> robin-app Postgres
         |                         |
         |                         +-> provider RPC + receipt verification
-        +-> guarded Wallet API proxy -> Alchemy sponsorship
+        +-> guarded Wallet API proxy -> Alchemy Wallet APIs
 ```
 
 The Privy DID is the durable application identity. Its embedded EVM wallet supplies the stable
@@ -95,12 +95,13 @@ wallet, and reserves withdrawals, mandate control, and agent rotation for the sm
 
 `TestAssetFaucet` supports the one-click testnet path with one fixed claim per smart account. The
 onboarding batch claims the asset, approves the predicted vault, creates it, and deposits in one
-sponsored operation.
+wallet operation.
 
 The browser does not receive the Alchemy API key or sponsorship policy. The Next.js wallet proxy
-validates the Privy session, signing account, Robinhood testnet chain, and requested calls against
-the authenticated API before adding sponsorship. Alchemy policy rules provide the corresponding
-provider-side target, selector, quota, and spend controls.
+validates the Privy session, signing account, Robinhood Chain, and requested calls against the
+authenticated API. It strips client-supplied paymaster data and adds the server policy only when
+one is configured. Without a policy, the embedded account pays the Wallet API operation fee in
+ETH. With a policy, Alchemy adds provider-side target, selector, quota, and spend controls.
 
 ## Required invariants
 

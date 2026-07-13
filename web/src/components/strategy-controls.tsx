@@ -105,7 +105,7 @@ export function AddFundsForm({ dashboard }: { dashboard: DashboardSnapshot }) {
       </select>
       <label htmlFor="deposit-amount">Amount to add</label>
       <div className="amount-input"><input id="deposit-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="0.00" /><span>{vault.balance.symbol}</span></div>
-      <small>Approval and deposit are submitted as one sponsored batch.</small>
+      <small>Approval and deposit are submitted as one smart-account batch.</small>
       <button className="button button-primary" disabled={mutation.isPending || !amount || !wallet} type="submit">{mutation.isPending ? "Adding funds…" : "Add funds"}</button>
       {mutation.error && <ErrorNotice error={mutation.error} />}
     </form>

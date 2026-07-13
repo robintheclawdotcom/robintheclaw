@@ -55,7 +55,7 @@ export function ActivityList({ items, compact = false }: { items: ActivityRecord
 export function SetupCard() {
   return (
     <section className="setup-card">
-      <div><span className="eyebrow">Strategy vault</span><h2>Create your strategy vault</h2><p>Establish and fund your vault in one sponsored operation.</p></div>
+      <div><span className="eyebrow">Strategy vault</span><h2>Create your strategy vault</h2><p>Establish and fund your testnet vault in one signed operation.</p></div>
       <Link className="button button-primary" href="/app/onboarding">Create vault</Link>
     </section>
   );

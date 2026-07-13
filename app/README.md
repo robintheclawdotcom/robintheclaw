@@ -49,7 +49,7 @@ fully configured.
 | `PUT /api/v1/me/preferences` | Update display, notification, and funding-wallet preferences |
 | `GET /api/v1/dashboard` | Real balances, strategy state, positions, opportunities, and activity |
 | `GET /api/v1/activity?cursor=` | Cursor-paginated account activity |
-| `POST /api/v1/vaults/prepare` | Deterministic sponsored onboarding call plan |
+| `POST /api/v1/vaults/prepare` | Deterministic onboarding call plan |
 | `POST /api/v1/vaults/confirm` | Idempotent receipt and contract-state verification |
 | `GET /api/v1/ws` | Authenticated live event feed |
 

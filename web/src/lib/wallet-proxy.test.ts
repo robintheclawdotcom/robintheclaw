@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { injectSponsorship, parseWalletRpc, WalletProxyError } from "./wallet-proxy";
+import { configureSponsorship, parseWalletRpc, WalletProxyError } from "./wallet-proxy";
 
 describe("wallet proxy", () => {
   it("accepts only the required wallet methods", () => {
@@ -18,8 +18,20 @@ describe("wallet proxy", () => {
       method: "wallet_prepareCalls",
       params: [{ capabilities: { paymasterService: { policyId: "client" }, auxiliary: true } }],
     });
-    expect(injectSponsorship(request, "server").params[0]).toEqual({
+    expect(configureSponsorship(request, "server").params[0]).toEqual({
       capabilities: { auxiliary: true, paymasterService: { policyId: "server" } },
+    });
+  });
+
+  it("removes client paymaster data when sponsorship is disabled", () => {
+    const request = parseWalletRpc({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "wallet_prepareCalls",
+      params: [{ capabilities: { paymasterService: { policyId: "client" }, paymaster: { policyId: "client" }, auxiliary: true } }],
+    });
+    expect(configureSponsorship(request).params[0]).toEqual({
+      capabilities: { auxiliary: true },
     });
   });
 });

@@ -78,11 +78,6 @@ pub async fn prepare_vault(
     let auth = require_user(&req, &state)?;
     ensure_database(&state)?;
     ensure_contracts(&state)?;
-    state
-        .config
-        .alchemy_policy_id
-        .as_ref()
-        .ok_or_else(|| ApiError::ServiceUnavailable("Gas sponsorship is not configured.".into()))?;
     let me = state
         .product_store
         .me(&auth.did)
