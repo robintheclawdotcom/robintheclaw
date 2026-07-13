@@ -37,8 +37,10 @@ export const liveAgent = {
 
 export const readiness = {
   executionAccountId: "execution-account-id",
+  lighterAccountIndex: null,
   robinhoodOwnerAddress: embedded,
   robinhoodVaultAddress: "0x8888888888888888888888888888888888888888",
+  robinhoodSignerAddress: "0x9999999999999999999999999999999999999999",
   coordinatorRegistered: false,
   lighterLinked: false,
   lighterFunded: false,

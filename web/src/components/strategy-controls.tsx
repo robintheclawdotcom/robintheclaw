@@ -6,6 +6,7 @@ import type { AgentCommandRecord, AgentStatus, DashboardSnapshot, ExecutionBindi
 import { agentAction, agentStatusLabel } from "../lib/agent-lifecycle";
 import { depositCalls, mandateCall, parseTokenAmount, withdrawalCall } from "../lib/strategy-calls";
 import { formatAddress } from "../lib/format";
+import { robinhoodMainnetExplorer, robinhoodMainnetUSDG } from "../lib/chain";
 import { canonicalDeploymentAction, canonicalOwnerActionSet } from "../lib/mainnet-actions";
 import { useAppApi, useRobinAuth, useSmartWallet } from "./app-providers";
 import { ErrorNotice } from "./app-ui";
@@ -81,6 +82,7 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
   const [submittedOwnerActions, setSubmittedOwnerActions] = useState<string[]>([]);
   const [lighterAccountIndex, setLighterAccountIndex] = useState("");
   const [lighterNonce, setLighterNonce] = useState("0");
+  const [robinhoodDepositAmount, setRobinhoodDepositAmount] = useState("");
   const [lighterOwner, setLighterOwner] = useState<string>(auth.embeddedAddress ?? auth.accounts[0]?.address ?? "");
   useEffect(() => {
     if (!lighterOwner && auth.accounts.length) setLighterOwner(auth.accounts[0].address);
@@ -92,6 +94,25 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
     enabled: hasAccount,
     retry: false,
     refetchInterval: agent && matchesProvisioning(agent.status) ? 5_000 : false,
+  });
+  const mainnetDeposit = useMutation({
+    mutationFn: async () => {
+      const current = readiness.data;
+      if (!current?.robinhoodOwnerAddress || !current.robinhoodVaultAddress) {
+        throw new Error("The verified Robinhood owner and vault are not ready.");
+      }
+      const owner = requireAddress(current.robinhoodOwnerAddress);
+      const vault = requireAddress(current.robinhoodVaultAddress);
+      const amount = parseTokenAmount(robinhoodDepositAmount, 6);
+      for (const call of depositCalls(robinhoodMainnetUSDG, vault, amount)) {
+        await smartWallet.executeMainnetCall(call, owner);
+      }
+    },
+    onSuccess: () => {
+      setRobinhoodDepositAmount("");
+      void readiness.refetch();
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
   });
   const lighter = useMutation({
     mutationFn: () => {
@@ -266,6 +287,13 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
       </div>
       {state?.validUntil && <small>Readiness evidence valid until {new Date(state.validUntil).toLocaleString()}.</small>}
       {state?.blockers.length ? <small role="status">Blocked by: {state.blockers.map(formatReadinessBlocker).join(", ")}.</small> : null}
+      {state?.robinhoodVaultAddress && <small>Robinhood vault: <a href={`${robinhoodMainnetExplorer}/address/${state.robinhoodVaultAddress}`} target="_blank" rel="noreferrer">{formatAddress(state.robinhoodVaultAddress)}</a>.</small>}
+      {state?.robinhoodDeployed && !state.robinhoodFunded && <div className="button-row">
+        <label>USDG to deposit<input inputMode="decimal" value={robinhoodDepositAmount} onChange={(event) => setRobinhoodDepositAmount(event.target.value)} placeholder="25.00" /></label>
+        <button className="button button-primary" disabled={mainnetDeposit.isPending || !robinhoodDepositAmount} onClick={() => mainnetDeposit.mutate()}>{mainnetDeposit.isPending ? "Depositing…" : "Deposit USDG with owner ETH"}</button>
+      </div>}
+      {state?.lighterLinked && !state.lighterFunded && <small>Fund Lighter account {state.lighterAccountIndex ?? "pending"} with USDC through the user-owned Lighter account. <a href="https://apidocs.lighter.xyz/docs/deposits-transfers-and-withdrawals" target="_blank" rel="noreferrer">Lighter funding instructions ↗</a></small>}
+      {state?.robinhoodSignerAddress && !state.executionGasReady && <small>Execution signer ETH address: <a href={`${robinhoodMainnetExplorer}/address/${state.robinhoodSignerAddress}`} target="_blank" rel="noreferrer">{state.robinhoodSignerAddress}</a>.</small>}
       {agent.status === "setup" ? (
         <small>Set up the execution account before linking venues or funding capital.</small>
       ) : (
@@ -290,7 +318,7 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
       {lighterBinding && <small>Lighter request {lighterBinding.requestId}: {lighterBinding.status}. The user-owned L1 wallet must sign the association payload before verification can complete.</small>}
       {robinhoodBinding && <small>Robinhood request {robinhoodBinding.requestId}: {robinhoodBinding.status}. Deployment and deposit remain owner-controlled transactions.</small>}
       <small>The product API stores only public binding references. Wallet private keys and secret Lighter API keys are never accepted here. Commands stay pending until execution and reconciliation services return evidence. Withdrawals require an owner signature.</small>
-      {(readiness.error || lighter.error || lighterConfirm.error || robinhood.error || robinhoodDeploy.error || lifecycle.error || commandStatus.error || ownerAction.error) && <ErrorNotice error={readiness.error ?? lighter.error ?? lighterConfirm.error ?? robinhood.error ?? robinhoodDeploy.error ?? lifecycle.error ?? commandStatus.error ?? ownerAction.error} />}
+      {(readiness.error || mainnetDeposit.error || lighter.error || lighterConfirm.error || robinhood.error || robinhoodDeploy.error || lifecycle.error || commandStatus.error || ownerAction.error) && <ErrorNotice error={readiness.error ?? mainnetDeposit.error ?? lighter.error ?? lighterConfirm.error ?? robinhood.error ?? robinhoodDeploy.error ?? lifecycle.error ?? commandStatus.error ?? ownerAction.error} />}
     </section>
   );
 }
@@ -309,6 +337,11 @@ function terminalCommand(status?: AgentCommandRecord["status"]) {
 
 function formatReadinessBlocker(blocker: string) {
   return blocker.replaceAll("_", " ");
+}
+
+function requireAddress(value: string): `0x${string}` {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(value)) throw new Error("The verified account address is invalid.");
+  return value as `0x${string}`;
 }
 
 function deploymentStorageKey(requestId: string) {

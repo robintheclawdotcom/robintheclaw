@@ -165,8 +165,10 @@ export type ExecutionBindingRecord = {
 
 export type AgentReadiness = {
   executionAccountId: string;
+  lighterAccountIndex: number | null;
   robinhoodOwnerAddress: string | null;
   robinhoodVaultAddress: string | null;
+  robinhoodSignerAddress: string | null;
   coordinatorRegistered: boolean;
   lighterLinked: boolean;
   lighterFunded: boolean;

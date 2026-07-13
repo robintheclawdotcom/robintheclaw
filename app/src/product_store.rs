@@ -1370,13 +1370,20 @@ impl ProductStore {
             SELECT r.execution_account_id, r.lighter_linked, r.lighter_funded,
                 r.robinhood_deployed, r.robinhood_funded, r.user_gas_ready,
                 r.execution_gas_ready, r.policy_active, r.reconciled, r.valid_until,
+                coalesce(registration.lighter_account_index, lighter.lighter_account_index)
+                    AS lighter_account_index,
                 coalesce(registration.robinhood_owner, robinhood.owner_address)
                     AS robinhood_owner_address,
                 coalesce(registration.robinhood_vault, robinhood.robinhood_vault_address)
                     AS robinhood_vault_address,
+                coalesce(registration.robinhood_signer, robinhood.robinhood_signer_address)
+                    AS robinhood_signer_address,
                 coalesce(registration.status = 'registered', false) AS coordinator_registered
             FROM current_agent_readiness r
             JOIN execution_accounts e ON e.id = r.execution_account_id
+            LEFT JOIN execution_account_bindings lighter
+             ON lighter.execution_account_id = e.id
+             AND lighter.venue = 'lighter' AND lighter.status = 'linked'
             LEFT JOIN execution_account_bindings robinhood
              ON robinhood.execution_account_id = e.id
              AND robinhood.venue = 'robinhood' AND robinhood.status = 'linked'

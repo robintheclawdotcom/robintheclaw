@@ -32,6 +32,7 @@ The critical architectural correction is in place: gas sponsorship is not an own
 - Exit quotes and unwind dispatch are durable and idempotent. Pause, close, natural exit, and bounded repair still require production adapter and recovery proof.
 - The product command dispatcher uses durable leases, authenticated coordinator requests, explicit ambiguity handling, and owner-only unsigned withdrawal actions after flat reconciliation.
 - The browser recovers and polls pending launch, pause, resume, close, and withdrawal commands, refreshes terminal state, and persists owner transaction hashes at submission time rather than after receipt confirmation.
+- Readiness exposes the canonical Lighter account, Robinhood vault, and execution signer. The owner can approve and deposit USDG into the verified mainnet vault with ordinary ETH gas; Lighter USDC funding remains a user-owned venue action.
 - Linked public venue and custody bindings enter the coordinator through a durable product outbox and an authenticated, immutable registration contract. Product readiness and every command remain blocked until that registration succeeds.
 - Intent persistence stores a canonical payload digest. Exact duplicates are idempotent, lost responses are resolved through an authenticated status query, and payload collisions halt account and global execution with a critical incident.
 - The browser submits only the provisioner-authorized `deploy(owner)` call on chain 4663, pays ordinary ETH gas, persists its transaction hash across the 64-block finality wait, and confirms with no client-supplied graph address.
@@ -56,7 +57,7 @@ The critical architectural correction is in place: gas sponsorship is not an own
 | Canonical account registration deployment | Deploy the implemented product outbox and coordinator registration APIs, then prove failover, exact retries, substitutions, and conflict-triggered halt behavior against production-like databases. |
 | Dynamic Robinhood provisioning deployment | Deploy the implemented private KMS and deterministic-graph provisioner with audited chain-4663 factory, registry, bytecode, policy, and timelocked agent-approval values. |
 | Command worker deployment | Deploy the implemented command dispatcher, exercise every coordinator ambiguity path, and prove owner-signed close and withdrawal behavior after flat reconciliation. |
-| Human-usable mainnet onboarding | Replace manual Lighter account index and nonce entry with owner-side creation or discovery, verify that the subaccount is new and flat, expose both venue funding actions and exact addresses, and provide recovery for rejected and pre-registration close states. |
+| Human-usable mainnet onboarding | Replace manual Lighter account index and nonce entry with owner-side creation or discovery, verify that the subaccount is new and flat, and provide recovery for rejected and pre-registration close states. |
 | Complete capital recovery | Show and verify both the Robinhood owner withdrawal and the separate secure Lighter USDC withdrawal path. The current browser action covers only the Robinhood vault. |
 | Exit proof | A production-sized exit is executable through every dependency, including the bounded reduce-only repair path. |
 | Operations | Connect the implemented metrics, alerts, and dashboard to production producers and paging; execute and retain evidence for global, strategy, account, guardian, and user kill drills. |
@@ -102,7 +103,7 @@ Every deployment must expose disabled, live, and ready health separately. A proc
 - Rust unit and PostgreSQL migration/integration tests for account-scoped execution, fresh readiness, append-only evidence, and tenant uniqueness.
 - Go provisioner and signer unit, race, vet, build, replay, mismatch, and rotation tests.
 - Web unit, type, build, and onboarding lifecycle checks.
-- Human-flow review of create, venue linkage, deployment, readiness, lifecycle commands, and withdrawal. The flow did not pass: it dead-ends at live funding, and Lighter account creation, rejected-link recovery, and complete withdrawal recovery are not usable end to end.
+- Human-flow review of create, venue linkage, deployment, readiness, lifecycle commands, and withdrawal. The flow did not pass as self-service: Lighter account creation and nonce discovery remain outside the product, and rejected-link and complete withdrawal recovery are not usable end to end.
 - Exact activation-policy, release-manifest, Render blueprint, identity, and leak checks.
 
 These tests validate disabled software behavior. Browser launch and localhost binding were denied by the execution sandbox, so no claim is made that a real browser completed the flow. They do not satisfy audits, venue approval, oracle review, historical capture, shadow operation, or live exit proof.

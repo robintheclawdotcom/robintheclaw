@@ -244,8 +244,10 @@ pub struct ExecutionBindingRecord {
 #[serde(rename_all = "camelCase")]
 pub struct AgentReadiness {
     pub execution_account_id: Uuid,
+    pub lighter_account_index: Option<i64>,
     pub robinhood_owner_address: Option<String>,
     pub robinhood_vault_address: Option<String>,
+    pub robinhood_signer_address: Option<String>,
     pub coordinator_registered: bool,
     pub lighter_linked: bool,
     pub lighter_funded: bool,
@@ -424,8 +426,10 @@ mod agent_tests {
     fn readiness_is_fail_closed() {
         let readiness = AgentReadiness {
             execution_account_id: Uuid::nil(),
+            lighter_account_index: None,
             robinhood_owner_address: None,
             robinhood_vault_address: None,
+            robinhood_signer_address: None,
             coordinator_registered: true,
             lighter_linked: true,
             lighter_funded: true,
