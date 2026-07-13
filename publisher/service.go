@@ -245,7 +245,8 @@ func (s *Service) publishReadiness(ctx context.Context, accountID string, policy
 		Robinhood RobinhoodObservation
 	}{lighter, robinhood})
 	reconciled := lighter.RESTReconstructed && lighter.Nonce == lighter.ExpectedNonce &&
-		lighter.NoUnknownOrders && lighter.NoUnknownPositions && robinhood.WiringVerified && robinhood.FinalityHealthy
+		lighter.NoUnknownOrders && lighter.NoUnknownPositions && lighter.Flat &&
+		robinhood.WiringVerified && robinhood.FinalityHealthy && robinhood.Flat
 	checks := []ReadinessEvidence{
 		readiness("execution_gas_ready", robinhood.SignerGasReady, "robinhood-dual-rpc", digest, now),
 		readiness("lighter_funded", lighter.CollateralReady, "lighter-auth-rest", digest, now),

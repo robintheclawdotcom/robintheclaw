@@ -105,6 +105,34 @@ func TestRunOnceDiscoversAndRemovesAccountsWithoutRestart(t *testing.T) {
 	assertPolicyEvidence(t, application.bodies[2], true)
 }
 
+func TestReadinessRequiresBothVenuesFlat(t *testing.T) {
+	application := &recordingSnapshotClient{}
+	service := &Service{application: application}
+	lighter := LighterObservation{
+		Nonce: 9, ExpectedNonce: 9, NoUnknownOrders: true, NoUnknownPositions: true,
+		Flat: false, RESTReconstructed: true,
+	}
+	robinhood := RobinhoodObservation{Flat: true, WiringVerified: true, FinalityHealthy: true}
+
+	if err := service.publishReadiness(context.Background(), "account-00000001", true, lighter, robinhood); err != nil {
+		t.Fatal(err)
+	}
+	assertReadinessEvidence(t, application.bodies[0], "reconciled", false)
+
+	lighter.Flat = true
+	robinhood.Flat = false
+	if err := service.publishReadiness(context.Background(), "account-00000001", true, lighter, robinhood); err != nil {
+		t.Fatal(err)
+	}
+	assertReadinessEvidence(t, application.bodies[1], "reconciled", false)
+
+	robinhood.Flat = true
+	if err := service.publishReadiness(context.Background(), "account-00000001", true, lighter, robinhood); err != nil {
+		t.Fatal(err)
+	}
+	assertReadinessEvidence(t, application.bodies[2], "reconciled", true)
+}
+
 func assertPolicyEvidence(t *testing.T, body []byte, expected bool) {
 	t.Helper()
 	var snapshot ReadinessSnapshot
@@ -120,4 +148,21 @@ func assertPolicyEvidence(t *testing.T, body []byte, expected bool) {
 		}
 	}
 	t.Fatal("policy_active evidence missing")
+}
+
+func assertReadinessEvidence(t *testing.T, body []byte, name string, expected bool) {
+	t.Helper()
+	var snapshot ReadinessSnapshot
+	if err := json.Unmarshal(body, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	for _, evidence := range snapshot.Evidence {
+		if evidence.CheckName == name {
+			if evidence.Ready != expected {
+				t.Fatalf("%s evidence = %+v", name, evidence)
+			}
+			return
+		}
+	}
+	t.Fatalf("%s evidence missing", name)
 }
