@@ -194,6 +194,32 @@ function DocsTree({ doc, onSelect }: { doc: DocId; onSelect: (id: DocId) => void
   );
 }
 
+function ThemeToggle({
+  theme,
+  onToggle,
+  className = "",
+}: {
+  theme: "dark" | "light";
+  onToggle: () => void;
+  className?: string;
+}) {
+  const next = theme === "dark" ? "light" : "dark";
+
+  return (
+    <button
+      type="button"
+      className={`theme-toggle ${className}`.trim()}
+      onClick={onToggle}
+      role="switch"
+      aria-checked={theme === "light"}
+      aria-label={`Use ${next} theme`}
+    >
+      <span className="theme-track" aria-hidden="true"><span className="theme-thumb" /></span>
+      <span className="theme-label">{theme}</span>
+    </button>
+  );
+}
+
 export default function PublicSite({ view }: { view: "home" | "docs" }) {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [doc, setDoc] = useState<DocId>("overview");
@@ -256,9 +282,7 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
           </nav>
           <div className="terminal-title">robin@claw · /public · zsh</div>
           <div className="desktop-actions">
-            <button className="theme-toggle" onClick={toggleTheme} aria-label="Toggle color theme">
-              <span className="theme-dot" />{theme}
-            </button>
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
             <a className="icon-link" href="https://github.com/robintheclawdotcom/robintheclaw" target="_blank" rel="noreferrer" aria-label="GitHub">
               <img className="github-mark" src="/icons/github-mark.svg" alt="" aria-hidden="true" />
             </a>
@@ -287,7 +311,7 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
                 <a className={view === "home" ? "active" : ""} href="/">home</a>
                 <a className={view === "docs" ? "active" : ""} href="/docs">docs</a>
                 <a className="drawer-app-link" href="/app">open app</a>
-                <button className="drawer-theme" onClick={toggleTheme}><span className="theme-dot" />theme: {theme}</button>
+                <ThemeToggle theme={theme} onToggle={toggleTheme} className="drawer-theme" />
               </div>
               {view === "docs" && <div className="drawer-docs"><DocsTree doc={doc} onSelect={selectDoc} /></div>}
               <div className="drawer-socials">
