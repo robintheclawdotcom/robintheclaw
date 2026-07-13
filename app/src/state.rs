@@ -5,6 +5,7 @@ use crate::evm::{EvmIndexer, EvmRpc};
 use crate::lighter_provisioner::LighterProvisioner;
 use crate::privy::PrivyClient;
 use crate::product_store::ProductStore;
+use crate::robinhood_provisioner::RobinhoodProvisioner;
 use crate::service_auth::ServiceAuth;
 use crate::store::Store;
 use crate::ws::WsHub;
@@ -24,5 +25,6 @@ pub struct AppState {
     pub auth: AuthService,
     pub privy: PrivyClient,
     pub lighter_provisioner: LighterProvisioner,
+    pub robinhood_provisioner: RobinhoodProvisioner,
     pub readiness_auth: ServiceAuth,
 }

@@ -186,7 +186,6 @@ pub const LIVE_STRATEGY_MANIFEST_SHA256: &str =
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCreateInput {
     pub strategy_version: String,
-    pub strategy_manifest_sha256: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -205,6 +204,7 @@ pub struct ExecutionAccountRecord {
     pub id: Uuid,
     pub agent_id: Uuid,
     pub strategy_version: String,
+    pub strategy_manifest_sha256: String,
     pub chain_id: i64,
     pub status: String,
     pub created_at: DateTime<Utc>,
@@ -222,6 +222,15 @@ pub struct ExecutionBindingRecord {
     pub lighter_account_index: Option<i64>,
     pub lighter_api_key_index: Option<i16>,
     pub robinhood_vault_address: Option<String>,
+    pub robinhood_signer_address: Option<String>,
+    pub robinhood_key_version: Option<i64>,
+    pub robinhood_factory_address: Option<String>,
+    pub robinhood_registry_address: Option<String>,
+    pub robinhood_policy_digest: Option<String>,
+    pub robinhood_risk_manager_address: Option<String>,
+    pub robinhood_spot_adapter_address: Option<String>,
+    pub robinhood_deployment_block: Option<i64>,
+    pub robinhood_deployment_action: Option<Value>,
     pub public_identifier: Option<String>,
     pub public_key: Option<String>,
     pub association_payload: Option<String>,
@@ -299,8 +308,6 @@ pub struct LighterConfirmInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RobinhoodConfirmInput {
     pub request_id: Uuid,
-    pub owner_address: String,
-    pub vault_address: String,
     pub transaction_hash: String,
 }
 
@@ -454,6 +461,33 @@ mod agent_tests {
             "ethereumPrivateKey": "never-accepted"
         });
         assert!(serde_json::from_value::<LighterLinkRequestInput>(payload).is_err());
+    }
+
+    #[test]
+    fn live_agent_request_accepts_only_the_strategy_version() {
+        let input = serde_json::from_value::<AgentCreateInput>(serde_json::json!({
+            "strategyVersion": "basis-aapl-v1"
+        }))
+        .unwrap();
+        assert_eq!(input.strategy_version, LIVE_STRATEGY_VERSION);
+        assert!(
+            serde_json::from_value::<AgentCreateInput>(serde_json::json!({
+                "strategyVersion": "basis-aapl-v1",
+                "strategyManifestSha256": LIVE_STRATEGY_MANIFEST_SHA256
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn robinhood_confirmation_rejects_user_supplied_graph_identity() {
+        let input = serde_json::json!({
+            "requestId": Uuid::new_v4(),
+            "transactionHash": format!("0x{}", "11".repeat(32)),
+            "ownerAddress": "0x1111111111111111111111111111111111111111",
+            "vaultAddress": "0x2222222222222222222222222222222222222222"
+        });
+        assert!(serde_json::from_value::<RobinhoodConfirmInput>(input).is_err());
     }
 }
 

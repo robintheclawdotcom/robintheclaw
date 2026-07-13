@@ -8,7 +8,8 @@ use crate::product::{
     OpportunitySnapshot, PreferencesInput, RobinhoodConfirmInput, TransactionCall, TransactionPlan,
     VaultSnapshot, WalletBalanceSnapshot, LIVE_STRATEGY_VERSION,
 };
-use crate::product_store::{normalize_address, ExecutionBindingConfirmation};
+use crate::product_store::normalize_address;
+use crate::robinhood_provisioner::{ConfirmGraph, PrepareGraph};
 use crate::state::AppState;
 use actix_web::{web, HttpRequest, HttpResponse};
 use num_bigint::BigUint;
@@ -490,6 +491,12 @@ pub async fn robinhood_prepare(
 ) -> Result<HttpResponse, ApiError> {
     let auth = require_user(&req, &state)?;
     ensure_database(&state)?;
+    if !state.robinhood_provisioner.is_enabled() {
+        return Err(ApiError::ServiceUnavailable(
+            "Robinhood graph provisioning is not enabled.".to_string(),
+        ));
+    }
+    let agent_id = path.into_inner();
     let me = state
         .product_store
         .me(&auth.did)
@@ -499,14 +506,33 @@ pub async fn robinhood_prepare(
         .wallets
         .iter()
         .find(|wallet| wallet.is_primary)
-        .or_else(|| me.wallets.first())
-        .ok_or_else(|| ApiError::BadRequest("Link an execution wallet first.".to_string()))?;
+        .ok_or_else(|| {
+            ApiError::BadRequest("Select a primary execution wallet first.".to_string())
+        })?;
     let binding = state
         .product_store
-        .request_execution_binding(&auth.did, path.into_inner(), "robinhood", &owner.address)
+        .request_execution_binding(&auth.did, agent_id, "robinhood", &owner.address)
         .await
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    Ok(HttpResponse::Accepted().json(binding))
+    let account = state
+        .product_store
+        .execution_account(&auth.did, agent_id)
+        .await
+        .map_err(ApiError::internal)?;
+    let graph = state
+        .robinhood_provisioner
+        .prepare(&PrepareGraph {
+            execution_account_id: account.id,
+            owner_address: &binding.owner_address,
+        })
+        .await
+        .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
+    let binding = state
+        .product_store
+        .apply_robinhood_prepare(&auth.did, agent_id, binding.request_id, &graph)
+        .await
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    Ok(HttpResponse::Ok().json(binding))
 }
 
 pub async fn robinhood_confirm(
@@ -517,29 +543,52 @@ pub async fn robinhood_confirm(
 ) -> Result<HttpResponse, ApiError> {
     let auth = require_user(&req, &state)?;
     ensure_database(&state)?;
-    let vault = normalize_address(&input.vault_address)
-        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    if !is_hex_identifier(&input.transaction_hash) {
+    if !state.robinhood_provisioner.is_enabled() {
+        return Err(ApiError::ServiceUnavailable(
+            "Robinhood graph provisioning is not enabled.".to_string(),
+        ));
+    }
+    if !is_transaction_hash(&input.transaction_hash) {
         return Err(ApiError::BadRequest(
             "Robinhood deployment transaction is invalid.".to_string(),
         ));
     }
+    let agent_id = path.into_inner();
     let binding = state
         .product_store
-        .confirm_execution_binding(
-            &auth.did,
-            path.into_inner(),
-            &ExecutionBindingConfirmation {
-                venue: "robinhood",
-                request_id: input.request_id,
-                owner_address: &input.owner_address,
-                public_identifier: &vault,
-                proof_transaction_hash: &input.transaction_hash,
-            },
-        )
+        .execution_binding(&auth.did, agent_id, "robinhood", input.request_id)
         .await
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    Ok(HttpResponse::Accepted().json(binding))
+    let account = state
+        .product_store
+        .execution_account(&auth.did, agent_id)
+        .await
+        .map_err(ApiError::internal)?;
+    if binding.provider_request_id != Some(account.id) {
+        return Err(ApiError::Conflict(
+            "Robinhood deployment does not match this execution account.".to_string(),
+        ));
+    }
+    let graph = state
+        .robinhood_provisioner
+        .confirm(&ConfirmGraph {
+            execution_account_id: account.id,
+            deployment_transaction_hash: &input.transaction_hash,
+        })
+        .await
+        .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
+    let binding = state
+        .product_store
+        .apply_robinhood_confirmation(
+            &auth.did,
+            agent_id,
+            input.request_id,
+            &input.transaction_hash,
+            &graph,
+        )
+        .await
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    Ok(HttpResponse::Ok().json(binding))
 }
 
 pub async fn agent_readiness(
@@ -937,6 +986,13 @@ fn is_hex_identifier(value: &str) -> bool {
     (8..=510).contains(&value.len())
         && value.len() % 2 == 0
         && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn is_transaction_hash(value: &str) -> bool {
+    value
+        .strip_prefix("0x")
+        .is_some_and(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+        && !value[2..].bytes().all(|byte| byte == b'0')
 }
 
 #[cfg(test)]

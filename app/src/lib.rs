@@ -15,6 +15,7 @@ pub mod privy;
 pub mod product;
 pub mod product_indexer;
 pub mod product_store;
+pub mod robinhood_provisioner;
 pub mod service_auth;
 pub mod state;
 pub mod store;

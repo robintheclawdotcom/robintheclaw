@@ -16,6 +16,7 @@ use app::lighter_provisioner::LighterProvisioner;
 use app::orchestrator;
 use app::privy::PrivyClient;
 use app::product_store::ProductStore;
+use app::robinhood_provisioner::RobinhoodProvisioner;
 use app::service_auth::ServiceAuth;
 use app::state::AppState;
 use app::store::Store;
@@ -64,6 +65,16 @@ async fn main() -> std::io::Result<()> {
         .map_err(|error| {
             std::io::Error::other(format!("readiness publisher configuration failed: {error}"))
         })?;
+    let robinhood_provisioner = RobinhoodProvisioner::new(
+        &config.robinhood_provisioner_url,
+        &config.robinhood_provisioner_caller_id,
+        &config.robinhood_provisioner_hmac_key,
+    )
+    .map_err(|error| {
+        std::io::Error::other(format!(
+            "Robinhood provisioner configuration failed: {error}"
+        ))
+    })?;
     let command_client = CoordinatorCommandClient::new(
         &config.coordinator_command_url,
         &config.coordinator_command_caller_id,
@@ -86,6 +97,7 @@ async fn main() -> std::io::Result<()> {
         auth,
         privy,
         lighter_provisioner,
+        robinhood_provisioner,
         readiness_auth,
     });
 

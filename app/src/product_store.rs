@@ -6,6 +6,7 @@ use crate::product::{
     PreferencesRecord, ReadinessEvidenceInput, SmartAccountRecord, UserRecord, VaultRecord,
     WalletRecord, LIVE_STRATEGY_MANIFEST_SHA256, LIVE_STRATEGY_VERSION,
 };
+use crate::robinhood_provisioner::{PublicGraphBinding, UnsignedAction};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
 use sha3::{Digest, Keccak256};
@@ -26,14 +27,6 @@ pub struct ContractActivity {
     pub block_number: u64,
     pub log_index: u64,
     pub payload: serde_json::Value,
-}
-
-pub struct ExecutionBindingConfirmation<'a> {
-    pub venue: &'a str,
-    pub request_id: Uuid,
-    pub owner_address: &'a str,
-    pub public_identifier: &'a str,
-    pub proof_transaction_hash: &'a str,
 }
 
 impl ProductStore {
@@ -634,9 +627,9 @@ impl ProductStore {
         let owner_is_linked = sqlx::query_scalar::<_, bool>(
             r#"
             SELECT EXISTS (
-                SELECT 1 FROM wallet_links WHERE user_id = $1 AND address = $2
+                SELECT 1 FROM wallet_links WHERE user_id = $1 AND lower(address) = lower($2)
                 UNION ALL
-                SELECT 1 FROM smart_accounts WHERE user_id = $1 AND address = $2
+                SELECT 1 FROM smart_accounts WHERE user_id = $1 AND lower(address) = lower($2)
             )
             "#,
         )
@@ -658,6 +651,10 @@ impl ProductStore {
                 updated_at = execution_account_bindings.updated_at
             RETURNING binding_ref, request_id, provider_request_id, venue, owner_address,
                 lighter_account_index, lighter_api_key_index, robinhood_vault_address,
+                robinhood_signer_address, robinhood_key_version, robinhood_factory_address,
+                robinhood_registry_address, robinhood_policy_digest,
+                robinhood_risk_manager_address, robinhood_spot_adapter_address,
+                robinhood_deployment_block, robinhood_deployment_action,
                 public_identifier, public_key, association_payload, proof_transaction_hash, status,
                 created_at, updated_at
             "#,
@@ -682,43 +679,158 @@ impl ProductStore {
         Ok(binding)
     }
 
-    pub async fn confirm_execution_binding(
+    pub async fn apply_robinhood_prepare(
         &self,
         did: &str,
         agent_id: Uuid,
-        confirmation: &ExecutionBindingConfirmation<'_>,
+        request_id: Uuid,
+        graph: &PublicGraphBinding,
     ) -> Result<ExecutionBindingRecord> {
-        let owner = normalize_address(confirmation.owner_address)?;
         let account = self.execution_account(did, agent_id).await?;
+        if account.id != graph.execution_account_id {
+            return Err(anyhow!(
+                "Robinhood provisioner returned a different execution account"
+            ));
+        }
+        let public = validate_robinhood_graph(graph, false)?;
         sqlx::query_as::<_, ExecutionBindingRecord>(
             r#"
             UPDATE execution_account_bindings SET
+                provider_request_id = $4,
                 public_identifier = $5,
-                robinhood_vault_address = CASE WHEN $2 = 'robinhood' THEN $5 ELSE robinhood_vault_address END,
-                proof_transaction_hash = $6,
-                status = 'verifying',
+                robinhood_vault_address = $5,
+                robinhood_signer_address = $6,
+                robinhood_key_version = $7,
+                robinhood_factory_address = $8,
+                robinhood_registry_address = $9,
+                robinhood_policy_digest = $10,
+                robinhood_risk_manager_address = $11,
+                robinhood_spot_adapter_address = $12,
+                robinhood_deployment_action = CASE
+                    WHEN $16 = 'linked' THEN NULL
+                    ELSE coalesce($13, robinhood_deployment_action)
+                END,
+                proof_transaction_hash = coalesce($14, proof_transaction_hash),
+                robinhood_deployment_block = coalesce($15, robinhood_deployment_block),
+                status = $16,
                 updated_at = now()
-            WHERE execution_account_id = $1 AND venue = $2 AND request_id = $3
-              AND owner_address = $4
-              AND (
-                  status IN ('provisioning', 'awaiting_signature')
-                  OR (status = 'verifying' AND public_identifier = $5 AND proof_transaction_hash = $6)
-              )
+            WHERE execution_account_id = $1 AND venue = 'robinhood' AND request_id = $2
+              AND owner_address = $3
+              AND (provider_request_id IS NULL OR provider_request_id = $4)
+              AND (robinhood_vault_address IS NULL OR lower(robinhood_vault_address) = lower($5))
+              AND (robinhood_signer_address IS NULL OR lower(robinhood_signer_address) = lower($6))
+              AND (robinhood_key_version IS NULL OR robinhood_key_version = $7)
+              AND (robinhood_factory_address IS NULL OR lower(robinhood_factory_address) = lower($8))
+              AND (robinhood_registry_address IS NULL OR lower(robinhood_registry_address) = lower($9))
+              AND (robinhood_policy_digest IS NULL OR lower(robinhood_policy_digest) = lower($10))
+              AND (robinhood_risk_manager_address IS NULL OR lower(robinhood_risk_manager_address) = lower($11))
+              AND (robinhood_spot_adapter_address IS NULL OR lower(robinhood_spot_adapter_address) = lower($12))
+              AND ($13::jsonb IS NULL OR robinhood_deployment_action IS NULL OR robinhood_deployment_action = $13)
+              AND (proof_transaction_hash IS NULL OR proof_transaction_hash = $14)
+              AND ($15::bigint IS NULL OR robinhood_deployment_block IS NULL OR robinhood_deployment_block = $15)
+              AND status IN ('provisioning', 'awaiting_signature', 'linked')
             RETURNING binding_ref, request_id, provider_request_id, venue, owner_address,
                 lighter_account_index, lighter_api_key_index, robinhood_vault_address,
+                robinhood_signer_address, robinhood_key_version, robinhood_factory_address,
+                robinhood_registry_address, robinhood_policy_digest,
+                robinhood_risk_manager_address, robinhood_spot_adapter_address,
+                robinhood_deployment_block, robinhood_deployment_action,
                 public_identifier, public_key, association_payload, proof_transaction_hash, status,
                 created_at, updated_at
             "#,
         )
         .bind(account.id)
-        .bind(confirmation.venue)
-        .bind(confirmation.request_id)
-        .bind(owner)
-        .bind(confirmation.public_identifier)
-        .bind(confirmation.proof_transaction_hash)
+        .bind(request_id)
+        .bind(public.owner_address)
+        .bind(account.id)
+        .bind(public.vault_address)
+        .bind(public.signer_address)
+        .bind(graph.key_version)
+        .bind(public.factory_address)
+        .bind(public.registry_address)
+        .bind(public.policy_digest)
+        .bind(public.risk_manager_address)
+        .bind(public.spot_adapter_address)
+        .bind(public.action)
+        .bind(public.deployment_transaction_hash)
+        .bind(public.deployment_block)
+        .bind(public.status)
         .fetch_optional(self.pool()?)
         .await?
-        .ok_or_else(|| anyhow!("binding request not found or cannot be confirmed"))
+        .ok_or_else(|| anyhow!("Robinhood graph does not match its prepared account"))
+    }
+
+    pub async fn apply_robinhood_confirmation(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+        request_id: Uuid,
+        transaction_hash: &str,
+        graph: &PublicGraphBinding,
+    ) -> Result<ExecutionBindingRecord> {
+        let account = self.execution_account(did, agent_id).await?;
+        if account.id != graph.execution_account_id {
+            return Err(anyhow!(
+                "Robinhood provisioner returned a different execution account"
+            ));
+        }
+        let transaction_hash = normalize_bytes32(transaction_hash, "deployment transaction")?;
+        let public = validate_robinhood_graph(graph, true)?;
+        if public.deployment_transaction_hash.as_deref() != Some(transaction_hash.as_str()) {
+            return Err(anyhow!(
+                "Robinhood provisioner returned a different deployment transaction"
+            ));
+        }
+        sqlx::query_as::<_, ExecutionBindingRecord>(
+            r#"
+            UPDATE execution_account_bindings SET
+                proof_transaction_hash = $13,
+                robinhood_deployment_action = NULL,
+                robinhood_deployment_block = $14,
+                status = 'linked',
+                updated_at = now()
+            WHERE execution_account_id = $1 AND venue = 'robinhood' AND request_id = $2
+              AND provider_request_id = $1
+              AND owner_address = $3
+              AND lower(robinhood_vault_address) = lower($4)
+              AND lower(robinhood_signer_address) = lower($5)
+              AND robinhood_key_version = $6
+              AND lower(robinhood_factory_address) = lower($7)
+              AND lower(robinhood_registry_address) = lower($8)
+              AND lower(robinhood_policy_digest) = lower($9)
+              AND lower(robinhood_risk_manager_address) = lower($10)
+              AND lower(robinhood_spot_adapter_address) = lower($11)
+              AND public_identifier = $4
+              AND status IN ('awaiting_signature', 'verifying', 'linked')
+              AND (proof_transaction_hash IS NULL OR lower(proof_transaction_hash) = lower($12))
+              AND (robinhood_deployment_block IS NULL OR robinhood_deployment_block = $14)
+            RETURNING binding_ref, request_id, provider_request_id, venue, owner_address,
+                lighter_account_index, lighter_api_key_index, robinhood_vault_address,
+                robinhood_signer_address, robinhood_key_version, robinhood_factory_address,
+                robinhood_registry_address, robinhood_policy_digest,
+                robinhood_risk_manager_address, robinhood_spot_adapter_address,
+                robinhood_deployment_block, robinhood_deployment_action,
+                public_identifier, public_key, association_payload, proof_transaction_hash, status,
+                created_at, updated_at
+            "#,
+        )
+        .bind(account.id)
+        .bind(request_id)
+        .bind(public.owner_address)
+        .bind(public.vault_address)
+        .bind(public.signer_address)
+        .bind(graph.key_version)
+        .bind(public.factory_address)
+        .bind(public.registry_address)
+        .bind(public.policy_digest)
+        .bind(public.risk_manager_address)
+        .bind(public.spot_adapter_address)
+        .bind(&transaction_hash)
+        .bind(&transaction_hash)
+        .bind(public.deployment_block)
+        .fetch_optional(self.pool()?)
+        .await?
+        .ok_or_else(|| anyhow!("Robinhood confirmation does not match its prepared graph"))
     }
 
     pub async fn apply_lighter_link(
@@ -774,6 +886,10 @@ impl ProductStore {
               AND (public_key IS NULL OR lower(public_key) = lower($8))
             RETURNING binding_ref, request_id, provider_request_id, venue, owner_address,
                 lighter_account_index, lighter_api_key_index, robinhood_vault_address,
+                robinhood_signer_address, robinhood_key_version, robinhood_factory_address,
+                robinhood_registry_address, robinhood_policy_digest,
+                robinhood_risk_manager_address, robinhood_spot_adapter_address,
+                robinhood_deployment_block, robinhood_deployment_action,
                 public_identifier, public_key, association_payload, proof_transaction_hash, status,
                 created_at, updated_at
             "#,
@@ -806,6 +922,10 @@ impl ProductStore {
             r#"
             SELECT binding_ref, request_id, provider_request_id, venue, owner_address,
                 lighter_account_index, lighter_api_key_index, robinhood_vault_address,
+                robinhood_signer_address, robinhood_key_version, robinhood_factory_address,
+                robinhood_registry_address, robinhood_policy_digest,
+                robinhood_risk_manager_address, robinhood_spot_adapter_address,
+                robinhood_deployment_block, robinhood_deployment_action,
                 public_identifier, public_key, association_payload, proof_transaction_hash, status,
                 created_at, updated_at
             FROM execution_account_bindings
@@ -1578,6 +1698,164 @@ async fn upsert_identity_user(
     .map_err(Into::into)
 }
 
+struct ValidatedRobinhoodGraph {
+    owner_address: String,
+    signer_address: String,
+    factory_address: String,
+    registry_address: String,
+    policy_digest: String,
+    vault_address: String,
+    risk_manager_address: String,
+    spot_adapter_address: String,
+    deployment_transaction_hash: Option<String>,
+    deployment_block: Option<i64>,
+    action: Option<serde_json::Value>,
+    status: &'static str,
+}
+
+fn validate_robinhood_graph(
+    graph: &PublicGraphBinding,
+    confirming: bool,
+) -> Result<ValidatedRobinhoodGraph> {
+    let owner_address = nonzero_address(&graph.owner_address, "owner")?;
+    let signer_address = nonzero_address(&graph.signer_address, "signer")?;
+    let factory_address = nonzero_address(&graph.factory_address, "factory")?;
+    let registry_address = nonzero_address(&graph.registry_address, "registry")?;
+    let vault_address = nonzero_address(&graph.graph.vault, "vault")?;
+    let risk_manager_address = nonzero_address(&graph.graph.risk_manager, "risk manager")?;
+    let spot_adapter_address = nonzero_address(&graph.graph.spot_adapter, "spot adapter")?;
+    let policy_digest = normalize_bytes32(&graph.policy_digest, "policy digest")?;
+    if graph.key_version <= 0 {
+        return Err(anyhow!(
+            "Robinhood provisioner returned an invalid key version"
+        ));
+    }
+    let graph_addresses = [
+        vault_address.to_ascii_lowercase(),
+        risk_manager_address.to_ascii_lowercase(),
+        spot_adapter_address.to_ascii_lowercase(),
+    ];
+    if graph_addresses[0] == graph_addresses[1]
+        || graph_addresses[0] == graph_addresses[2]
+        || graph_addresses[1] == graph_addresses[2]
+    {
+        return Err(anyhow!("Robinhood provisioner returned an invalid graph"));
+    }
+    chrono::DateTime::parse_from_rfc3339(&graph.updated_at)
+        .map_err(|_| anyhow!("Robinhood provisioner returned an invalid update time"))?;
+
+    let deployment_transaction_hash = graph
+        .deployment_transaction_hash
+        .as_deref()
+        .map(|value| normalize_bytes32(value, "deployment transaction"))
+        .transpose()?;
+    let (status, action) = match graph.status.as_str() {
+        "awaiting_deployment" if !confirming => {
+            if deployment_transaction_hash.is_some() || graph.deployment_block.is_some() {
+                return Err(anyhow!(
+                    "Robinhood provisioner returned premature deployment evidence"
+                ));
+            }
+            let [action] = graph.actions.as_slice() else {
+                return Err(anyhow!(
+                    "Robinhood provisioner did not return exactly one deployment action"
+                ));
+            };
+            validate_deployment_action(action, &factory_address, &owner_address)?;
+            ("awaiting_signature", Some(serde_json::to_value(action)?))
+        }
+        "active" => {
+            if !graph.actions.is_empty()
+                || deployment_transaction_hash.is_none()
+                || graph.deployment_block.is_none_or(|block| block == 0)
+            {
+                return Err(anyhow!(
+                    "Robinhood provisioner returned incomplete active deployment evidence"
+                ));
+            }
+            ("linked", None)
+        }
+        _ => {
+            return Err(anyhow!(
+                "Robinhood provisioner returned a graph that is not ready for this operation"
+            ));
+        }
+    };
+    if confirming && status != "linked" {
+        return Err(anyhow!(
+            "Robinhood provisioner did not confirm an active graph"
+        ));
+    }
+
+    Ok(ValidatedRobinhoodGraph {
+        owner_address,
+        signer_address,
+        factory_address,
+        registry_address,
+        policy_digest,
+        vault_address,
+        risk_manager_address,
+        spot_adapter_address,
+        deployment_transaction_hash,
+        deployment_block: graph
+            .deployment_block
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| anyhow!("Robinhood provisioner returned an invalid deployment block"))?,
+        action,
+        status,
+    })
+}
+
+fn validate_deployment_action(
+    action: &UnsignedAction,
+    factory_address: &str,
+    owner_address: &str,
+) -> Result<()> {
+    let selector = Keccak256::digest(b"deploy(address)");
+    let expected_data = format!(
+        "0x{}{}{}",
+        hex::encode(&selector[..4]),
+        "0".repeat(24),
+        owner_address.trim_start_matches("0x").to_ascii_lowercase()
+    );
+    if action.kind != "deploy_user_graph"
+        || action.chain_id != "4663"
+        || action.value != "0"
+        || !action.to.eq_ignore_ascii_case(factory_address)
+        || !action.data.eq_ignore_ascii_case(&expected_data)
+    {
+        return Err(anyhow!(
+            "Robinhood provisioner returned an invalid deployment action"
+        ));
+    }
+    Ok(())
+}
+
+fn nonzero_address(value: &str, field: &str) -> Result<String> {
+    let normalized = normalize_address(value)
+        .map_err(|_| anyhow!("Robinhood provisioner returned an invalid {field} address"))?;
+    if normalized.eq_ignore_ascii_case("0x0000000000000000000000000000000000000000") {
+        return Err(anyhow!(
+            "Robinhood provisioner returned an invalid {field} address"
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_bytes32(value: &str, field: &str) -> Result<String> {
+    let Some(value) = value.strip_prefix("0x") else {
+        return Err(anyhow!("invalid {field}"));
+    };
+    if value.len() != 64
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || value.bytes().all(|byte| byte == b'0')
+    {
+        return Err(anyhow!("invalid {field}"));
+    }
+    Ok(format!("0x{}", value.to_ascii_lowercase()))
+}
+
 pub fn normalize_address(value: &str) -> Result<String> {
     let address = value.trim().strip_prefix("0x").unwrap_or(value.trim());
     if address.len() != 40 || !address.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -1612,6 +1890,28 @@ mod tests {
             normalize_address("0x52908400098527886e0f7030069857d2e4169ee7").unwrap(),
             "0x52908400098527886E0F7030069857D2E4169EE7"
         );
+    }
+
+    #[test]
+    fn robinhood_deployment_action_is_exact() {
+        let owner = "0x1111111111111111111111111111111111111111";
+        let factory = "0x2222222222222222222222222222222222222222";
+        let selector = Keccak256::digest(b"deploy(address)");
+        let mut action = UnsignedAction {
+            kind: "deploy_user_graph".into(),
+            chain_id: "4663".into(),
+            to: factory.into(),
+            value: "0".into(),
+            data: format!(
+                "0x{}{}{}",
+                hex::encode(&selector[..4]),
+                "0".repeat(24),
+                owner.trim_start_matches("0x")
+            ),
+        };
+        assert!(validate_deployment_action(&action, factory, owner).is_ok());
+        action.data.replace_range(action.data.len() - 1.., "2");
+        assert!(validate_deployment_action(&action, factory, owner).is_err());
     }
 
     #[test]
