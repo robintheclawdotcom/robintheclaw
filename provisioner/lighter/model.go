@@ -133,8 +133,8 @@ func validateAccount(accountIndex int64, apiKeyIndex uint8) error {
 	if accountIndex <= 0 {
 		return errors.New("accountIndex must be positive")
 	}
-	if apiKeyIndex < 2 || apiKeyIndex > 254 {
-		return errors.New("apiKeyIndex must be between 2 and 254")
+	if apiKeyIndex < 4 || apiKeyIndex > 254 {
+		return errors.New("apiKeyIndex must be between 4 and 254")
 	}
 	return nil
 }

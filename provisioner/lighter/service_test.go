@@ -31,13 +31,29 @@ func newTestService() (*service, *memoryStore, *fakeLighter) {
 	}, store, lighter
 }
 
+func TestPrepareRejectsReservedAPIKeyIndexes(t *testing.T) {
+	service, _, _ := newTestService()
+	for _, index := range []uint8{0, 1, 2, 3} {
+		_, err := service.prepare(context.Background(), prepareRequest{
+			ExecutionAccountID: testExecutionID,
+			OwnerAddress:       testOwner,
+			AccountIndex:       42,
+			APIKeyIndex:        index,
+			Nonce:              7,
+		})
+		if err == nil || !strings.Contains(err.Error(), "between 4 and 254") {
+			t.Fatalf("reserved API key index %d returned %v", index, err)
+		}
+	}
+}
+
 func TestConfirmBlocksRegisteredKeyMismatch(t *testing.T) {
 	service, store, lighter := newTestService()
 	link, err := service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Nonce:              7,
 	})
 	if err != nil {
@@ -69,7 +85,7 @@ func TestRotationBlocksCredentialUseUntilNewCredentialVerifies(t *testing.T) {
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Nonce:              7,
 	})
 	if err != nil {
@@ -91,7 +107,7 @@ func TestRotationBlocksCredentialUseUntilNewCredentialVerifies(t *testing.T) {
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Nonce:              8,
 	})
 	if err != nil {
@@ -123,7 +139,7 @@ func TestAmbiguousSubmissionIsNeverRebroadcast(t *testing.T) {
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Nonce:              7,
 	})
 	if err != nil {
@@ -156,7 +172,7 @@ func TestSubmissionResponseMismatchBlocksCredential(t *testing.T) {
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Nonce:              7,
 	})
 	if err != nil {
@@ -185,7 +201,7 @@ func TestPrepareRetryReturnsExistingAssociation(t *testing.T) {
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Nonce:              7,
 	}
 	first, err := service.prepare(context.Background(), request)
@@ -219,7 +235,7 @@ func TestSigningStopsDuringRotationAndUsesNewCredentialAfterActivation(t *testin
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Nonce:              7,
 	})
 	if err != nil {
@@ -247,7 +263,7 @@ func TestSigningStopsDuringRotationAndUsesNewCredentialAfterActivation(t *testin
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Nonce:              8,
 	})
 	if err != nil {
@@ -277,7 +293,7 @@ func TestSigningRejectsCrossAccountSubstitution(t *testing.T) {
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Nonce:              7,
 	})
 	if err != nil {

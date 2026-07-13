@@ -152,7 +152,7 @@ func (value *service) publisherAccountState(ctx context.Context, request publish
 }
 
 func (value *liveLighterClient) ObserveAccount(ctx context.Context, token string, accountIndex int64, apiKeyIndex uint8, marketID uint16, expectedNonce uint64) (lighterAccountState, error) {
-	if token == "" || accountIndex <= 0 || apiKeyIndex < 2 || apiKeyIndex > 254 || marketID == 0 {
+	if token == "" || accountIndex <= 0 || apiKeyIndex < 4 || apiKeyIndex > 254 || marketID == 0 {
 		return lighterAccountState{}, errors.New("invalid Lighter observation binding")
 	}
 	accountValue := strconv.FormatInt(accountIndex, 10)

@@ -152,7 +152,7 @@ func (value *service) activeSecret(ctx context.Context, executionID string) (cre
 	if err != nil {
 		return credential{}, nil, errors.New("execution account has no active Lighter credential")
 	}
-	if record.ExecutionAccountID != executionID || record.AccountIndex <= 0 || record.APIKeyIndex < 2 || record.APIKeyIndex > 254 {
+	if record.ExecutionAccountID != executionID || record.AccountIndex <= 0 || record.APIKeyIndex < 4 || record.APIKeyIndex > 254 {
 		return credential{}, nil, errors.New("active Lighter credential identity mismatch")
 	}
 	registered, err := value.lighter.RegisteredPublicKey(record.AccountIndex, record.APIKeyIndex)

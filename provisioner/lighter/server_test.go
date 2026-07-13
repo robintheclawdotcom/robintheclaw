@@ -102,7 +102,7 @@ func TestHMACNonceCannotBeReplayed(t *testing.T) {
 
 func TestPrepareReturnsOnlyPublicAssociationData(t *testing.T) {
 	server, _ := newTestServer()
-	body := `{"executionAccountId":"11111111-1111-4111-8111-111111111111","ownerAddress":"0x1111111111111111111111111111111111111111","accountIndex":42,"apiKeyIndex":3,"nonce":7}`
+	body := `{"executionAccountId":"11111111-1111-4111-8111-111111111111","ownerAddress":"0x1111111111111111111111111111111111111111","accountIndex":42,"apiKeyIndex":4,"nonce":7}`
 	response := httptest.NewRecorder()
 	server.handler().ServeHTTP(response, signedRequest(t, server, "/v1/links/prepare", body, strings.Repeat("a", 32)))
 	if response.Code != http.StatusCreated {
@@ -122,7 +122,7 @@ func TestPrepareReturnsOnlyPublicAssociationData(t *testing.T) {
 func TestSecretBearingPrepareFieldsAreRejected(t *testing.T) {
 	server, _ := newTestServer()
 	for index, field := range []string{"ethereumPrivateKey", "apiPrivateKey", "secretApiKey"} {
-		body := fmt.Sprintf(`{"executionAccountId":"11111111-1111-4111-8111-111111111111","ownerAddress":"0x1111111111111111111111111111111111111111","accountIndex":42,"apiKeyIndex":3,"nonce":7,%q:"forbidden"}`, field)
+		body := fmt.Sprintf(`{"executionAccountId":"11111111-1111-4111-8111-111111111111","ownerAddress":"0x1111111111111111111111111111111111111111","accountIndex":42,"apiKeyIndex":4,"nonce":7,%q:"forbidden"}`, field)
 		response := httptest.NewRecorder()
 		nonce := fmt.Sprintf("%032d", index+1)
 		server.handler().ServeHTTP(response, signedRequest(t, server, "/v1/links/prepare", body, nonce))
@@ -163,7 +163,7 @@ func TestSigningBridgeIsAuthenticatedAndReplayProtected(t *testing.T) {
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Nonce:              7,
 	})
 	if err != nil {

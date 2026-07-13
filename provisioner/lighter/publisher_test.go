@@ -27,7 +27,7 @@ func TestPublisherBridgeReturnsPublicAccountStateOnly(t *testing.T) {
 			t.Fatalf("publisher response exposed %q: %s", forbidden, response.Body.String())
 		}
 	}
-	for _, required := range []string{`"executionAccountId"`, `"accountIndex":42`, `"apiKeyIndex":3`, `"expectedNonce":8`} {
+	for _, required := range []string{`"executionAccountId"`, `"accountIndex":42`, `"apiKeyIndex":4`, `"expectedNonce":8`} {
 		if !strings.Contains(response.Body.String(), required) {
 			t.Fatalf("publisher response missing %s: %s", required, response.Body.String())
 		}
@@ -96,7 +96,7 @@ func activatePublisherCredential(t *testing.T, server *server, lighter *fakeLigh
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Nonce:              7,
 	})
 	if err != nil {

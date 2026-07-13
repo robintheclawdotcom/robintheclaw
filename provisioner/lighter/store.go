@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -66,12 +67,21 @@ func (value *pgStore) Close() {
 }
 
 func (value *pgStore) migrate(ctx context.Context) error {
-	contents, err := migrationFiles.ReadFile("migrations/0001_credentials.sql")
+	entries, err := migrationFiles.ReadDir("migrations")
 	if err != nil {
-		return errors.New("read provisioner migration")
+		return errors.New("read provisioner migrations")
 	}
-	if _, err := value.pool.Exec(ctx, string(contents)); err != nil {
-		return fmt.Errorf("apply provisioner migration: %w", err)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		contents, err := migrationFiles.ReadFile("migrations/" + entry.Name())
+		if err != nil {
+			return fmt.Errorf("read provisioner migration %s: %w", entry.Name(), err)
+		}
+		if _, err := value.pool.Exec(ctx, string(contents)); err != nil {
+			return fmt.Errorf("apply provisioner migration %s: %w", entry.Name(), err)
+		}
 	}
 	return nil
 }

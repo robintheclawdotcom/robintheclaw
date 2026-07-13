@@ -14,7 +14,7 @@ func TestEnvelopeRejectsAADMismatchBeforeKMSDecrypt(t *testing.T) {
 	record := credential{
 		ExecutionAccountID: "11111111-1111-4111-8111-111111111111",
 		AccountIndex:       42,
-		APIKeyIndex:        3,
+		APIKeyIndex:        4,
 		Version:            1,
 	}
 	sealed, err := vault.seal(context.Background(), record, []byte("credential material"))
