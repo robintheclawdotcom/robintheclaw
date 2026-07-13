@@ -92,3 +92,42 @@ test("user launches a Robin agent from the strategy page", async ({ page }) => {
   await expect(page.getByText("Lighter USDC")).toBeVisible();
   await expect(page.getByText("Alchemy sponsorship is optional", { exact: false })).toBeVisible();
 });
+
+test("owner pays ETH to deploy the prepared mainnet graph", async ({ page }) => {
+  await mockApplication(page, { withAgent: false });
+  await page.goto("/app/strategy");
+  await page.getByRole("button", { name: "Create mainnet agent" }).click();
+  await page.getByRole("button", { name: "Set up execution" }).click();
+  await page.getByRole("button", { name: "Prepare Robinhood deployment" }).click();
+  await expect(page.getByRole("button", { name: "Deploy with owner ETH" })).toBeVisible();
+  await page.getByRole("button", { name: "Deploy with owner ETH" }).click();
+  await expect(page.getByText("Robinhood request robinhood-request: linked", { exact: false })).toBeVisible();
+});
+
+test("deployment finality retry reuses the submitted transaction", async ({ page }) => {
+  await mockApplication(page, { withAgent: false });
+  let confirmations = 0;
+  await page.route("**/api/app/v1/agents/*/robinhood/confirm", async (route) => {
+    confirmations += 1;
+    if (confirmations === 1) {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "not_final", message: "Deployment is awaiting finality." }),
+      });
+      return;
+    }
+    await route.fallback();
+  });
+  await page.goto("/app/strategy");
+  await page.getByRole("button", { name: "Create mainnet agent" }).click();
+  await page.getByRole("button", { name: "Set up execution" }).click();
+  await page.getByRole("button", { name: "Prepare Robinhood deployment" }).click();
+  await page.getByRole("button", { name: "Deploy with owner ETH" }).click();
+  await expect(page.getByRole("button", { name: "Retry finality check" })).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("robin:mainnet-deployment:robinhood-request"))).toContain("0xcdcd");
+  await page.getByRole("button", { name: "Retry finality check" }).click();
+  await expect(page.getByText("Robinhood request robinhood-request: linked", { exact: false })).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("robin:mainnet-deployment:robinhood-request"))).toBeNull();
+  expect(confirmations).toBe(2);
+});

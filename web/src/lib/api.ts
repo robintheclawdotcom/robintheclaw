@@ -104,8 +104,6 @@ export class AppApi {
 
   confirmRobinhood(agentId: string, input: {
     requestId: string;
-    ownerAddress: string;
-    vaultAddress: string;
     transactionHash: string;
   }): Promise<ExecutionBindingRecord> {
     return this.request(`/v1/agents/${encodeURIComponent(agentId)}/robinhood/confirm`, {

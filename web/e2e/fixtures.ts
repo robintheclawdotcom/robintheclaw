@@ -37,6 +37,9 @@ export const liveAgent = {
 
 export const readiness = {
   executionAccountId: "execution-account-id",
+  robinhoodOwnerAddress: embedded,
+  robinhoodVaultAddress: "0x8888888888888888888888888888888888888888",
+  coordinatorRegistered: false,
   lighterLinked: false,
   lighterFunded: false,
   robinhoodDeployed: false,
@@ -93,7 +96,39 @@ async function respond(route: Route, withVault: boolean, state: { agent: object 
   }
   if (path.endsWith("/readiness")) return json(route, readiness);
   if (path.endsWith("/lighter/link-request")) return json(route, { bindingRef: "lighter-binding", requestId: "lighter-request", venue: "lighter", ownerAddress: embedded, publicIdentifier: null, publicKey: null, associationPayload: null, proofTransactionHash: null, status: "provisioning", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt }, 202);
-  if (path.endsWith("/robinhood/prepare")) return json(route, { bindingRef: "robinhood-binding", requestId: "robinhood-request", venue: "robinhood", ownerAddress: embedded, publicIdentifier: null, publicKey: null, associationPayload: null, proofTransactionHash: null, status: "provisioning", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt }, 202);
+  if (path.endsWith("/robinhood/prepare")) return json(route, {
+    bindingRef: "robinhood-binding", requestId: "robinhood-request", providerRequestId: "execution-account-id",
+    venue: "robinhood", ownerAddress: embedded, lighterAccountIndex: null, lighterApiKeyIndex: null,
+    robinhoodVaultAddress: "0x8888888888888888888888888888888888888888",
+    robinhoodSignerAddress: "0x9999999999999999999999999999999999999999", robinhoodKeyVersion: 1,
+    robinhoodFactoryAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    robinhoodRegistryAddress: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    robinhoodPolicyDigest: `0x${"12".repeat(32)}`,
+    robinhoodRiskManagerAddress: "0xcccccccccccccccccccccccccccccccccccccccc",
+    robinhoodSpotAdapterAddress: "0xdddddddddddddddddddddddddddddddddddddddd",
+    robinhoodDeploymentBlock: null,
+    robinhoodDeploymentAction: {
+      kind: "deploy_user_graph", chainId: "4663", to: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      data: `0x4c96a389${"0".repeat(24)}${embedded.slice(2)}`, value: "0",
+    },
+    publicIdentifier: null, publicKey: null, associationPayload: null, proofTransactionHash: null,
+    status: "awaiting_signature", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt,
+  }, 202);
+  if (path.endsWith("/robinhood/confirm")) return json(route, {
+    bindingRef: "robinhood-binding", requestId: "robinhood-request", providerRequestId: "execution-account-id",
+    venue: "robinhood", ownerAddress: embedded, lighterAccountIndex: null, lighterApiKeyIndex: null,
+    robinhoodVaultAddress: "0x8888888888888888888888888888888888888888",
+    robinhoodSignerAddress: "0x9999999999999999999999999999999999999999", robinhoodKeyVersion: 1,
+    robinhoodFactoryAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    robinhoodRegistryAddress: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    robinhoodPolicyDigest: `0x${"12".repeat(32)}`,
+    robinhoodRiskManagerAddress: "0xcccccccccccccccccccccccccccccccccccccccc",
+    robinhoodSpotAdapterAddress: "0xdddddddddddddddddddddddddddddddddddddddd",
+    robinhoodDeploymentBlock: 123, robinhoodDeploymentAction: null,
+    publicIdentifier: null, publicKey: null, associationPayload: null,
+    proofTransactionHash: `0x${"cd".repeat(32)}`, status: "linked",
+    createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt,
+  });
   if (path.includes("/agents/") && request.method() === "PUT") return json(route, agent);
   if (path.endsWith("/activity")) return json(route, { items: [], nextCursor: null });
   if (path.endsWith("/preferences")) return json(route, me(withVault).preferences);

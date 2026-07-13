@@ -56,4 +56,26 @@ describe("mainnet agent API", () => {
     const second = fetch.mock.calls[1][1]?.headers as Record<string, string>;
     expect(first["Idempotency-Key"]).toBe(second["Idempotency-Key"]);
   });
+
+  it("confirms Robinhood deployment without accepting graph addresses", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "linked" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetch);
+    const api = new AppApi(async () => "access-token");
+
+    await api.confirmRobinhood("agent-id", {
+      requestId: "request-id",
+      transactionHash: `0x${"ab".repeat(32)}`,
+    });
+
+    expect(fetch).toHaveBeenCalledWith("/api/app/v1/agents/agent-id/robinhood/confirm", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({
+        requestId: "request-id",
+        transactionHash: `0x${"ab".repeat(32)}`,
+      }),
+    }));
+  });
 });

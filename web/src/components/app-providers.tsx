@@ -22,9 +22,10 @@ import {
   useRef,
   useState,
 } from "react";
-import type { Hex } from "viem";
+import { createPublicClient, createWalletClient, custom, type Address, type Hex } from "viem";
 import { AppApi } from "../lib/api";
 import type { TransactionCall } from "../lib/app-types";
+import { robinhoodMainnet, robinhoodMainnetChainId } from "../lib/chain";
 
 export type ConnectedAccount = {
   address: `0x${string}`;
@@ -59,6 +60,11 @@ type SmartWalletContextValue = {
     signerAddress?: string,
     onSubmitted?: (callId: Hex) => void,
   ) => Promise<Hex>;
+  executeMainnetCall: (
+    call: TransactionCall,
+    signerAddress: string,
+    onSubmitted?: (transactionHash: Hex) => void,
+  ) => Promise<Hex>;
 };
 
 type GasStatus = {
@@ -88,7 +94,7 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
         appId={appId}
         config={{
           loginMethods: ["email", "passkey", "google", "apple", "wallet"],
-          supportedChains: [robinhoodTestnet],
+          supportedChains: [robinhoodTestnet, robinhoodMainnet],
           defaultChain: robinhoodTestnet,
           embeddedWallets: { ethereum: { createOnLogin: "all-users" } },
           appearance: {
@@ -216,6 +222,55 @@ function LiveSession({ children }: { children: React.ReactNode }) {
     }
   }, [embeddedWallet, wallets]);
 
+  const executeMainnetCall = useCallback(async (
+    call: TransactionCall,
+    signerAddress: string,
+    onSubmitted?: (transactionHash: Hex) => void,
+  ) => {
+    const wallet = wallets.find((candidate) =>
+      candidate.address.toLowerCase() === signerAddress.toLowerCase(),
+    );
+    if (!wallet) throw new Error("The vault owner wallet is not connected in this browser.");
+    if (!/^0x[0-9a-fA-F]{40}$/.test(call.to) || !/^0x(?:[0-9a-fA-F]{2})*$/.test(call.data)) {
+      throw new Error("The prepared mainnet transaction is invalid.");
+    }
+    let value: bigint;
+    try {
+      value = BigInt(call.value);
+    } catch {
+      throw new Error("The prepared mainnet transaction has an invalid value.");
+    }
+
+    setPending(true);
+    try {
+      await wallet.switchChain(robinhoodMainnetChainId);
+      const provider = await wallet.getEthereumProvider();
+      const account = wallet.address as Address;
+      const walletClient = createWalletClient({
+        account,
+        chain: robinhoodMainnet,
+        transport: custom(provider),
+      });
+      const hash = await walletClient.sendTransaction({
+        account,
+        chain: robinhoodMainnet,
+        to: call.to,
+        data: call.data,
+        value,
+      });
+      onSubmitted?.(hash);
+      const publicClient = createPublicClient({
+        chain: robinhoodMainnet,
+        transport: custom(provider),
+      });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations: 1 });
+      if (receipt.status !== "success") throw new Error("The mainnet transaction reverted.");
+      return hash;
+    } finally {
+      setPending(false);
+    }
+  }, [wallets]);
+
   const signMessage = useCallback(async (message: string, signerAddress?: string) => {
     const wallet = signerAddress
       ? wallets.find((candidate) => candidate.address.toLowerCase() === signerAddress.toLowerCase())
@@ -244,7 +299,7 @@ function LiveSession({ children }: { children: React.ReactNode }) {
   }), [accounts, embeddedWallet?.address, getAccessToken, hasRecovery, privy, signMessage, walletsReady]);
 
   return (
-    <SessionContexts auth={auth} smartWallet={{ pending, gasStatus, refreshGasStatus, executeCalls }}>
+    <SessionContexts auth={auth} smartWallet={{ pending, gasStatus, refreshGasStatus, executeCalls, executeMainnetCall }}>
       {children}
     </SessionContexts>
   );
@@ -290,6 +345,11 @@ function MockSession({ children }: { children: React.ReactNode }) {
       onSubmitted?.(callId);
       return callId;
     },
+    executeMainnetCall: async (_call, _signerAddress, onSubmitted) => {
+      const hash = `0x${"cd".repeat(32)}` as Hex;
+      onSubmitted?.(hash);
+      return hash;
+    },
   }), []);
   return <SessionContexts auth={auth} smartWallet={smartWallet}>{children}</SessionContexts>;
 }
@@ -317,6 +377,7 @@ function UnconfiguredSession({ children }: { children: React.ReactNode }) {
     gasStatus: null,
     refreshGasStatus: async () => { throw new Error("Application authentication is not configured."); },
     executeCalls: async () => { throw new Error("Application authentication is not configured."); },
+    executeMainnetCall: async () => { throw new Error("Application authentication is not configured."); },
   }), []);
   return <SessionContexts auth={auth} smartWallet={smartWallet}>{children}</SessionContexts>;
 }

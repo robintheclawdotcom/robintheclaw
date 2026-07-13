@@ -145,6 +145,15 @@ export type ExecutionBindingRecord = {
   lighterAccountIndex: number | null;
   lighterApiKeyIndex: number | null;
   robinhoodVaultAddress: string | null;
+  robinhoodSignerAddress: string | null;
+  robinhoodKeyVersion: number | null;
+  robinhoodFactoryAddress: string | null;
+  robinhoodRegistryAddress: string | null;
+  robinhoodPolicyDigest: string | null;
+  robinhoodRiskManagerAddress: string | null;
+  robinhoodSpotAdapterAddress: string | null;
+  robinhoodDeploymentBlock: number | null;
+  robinhoodDeploymentAction: RobinhoodDeploymentAction | null;
   publicIdentifier: string | null;
   publicKey: string | null;
   associationPayload: string | null;
@@ -156,6 +165,9 @@ export type ExecutionBindingRecord = {
 
 export type AgentReadiness = {
   executionAccountId: string;
+  robinhoodOwnerAddress: string | null;
+  robinhoodVaultAddress: string | null;
+  coordinatorRegistered: boolean;
   lighterLinked: boolean;
   lighterFunded: boolean;
   robinhoodDeployed: boolean;
@@ -182,9 +194,26 @@ export type AgentCommandRecord = {
   targetAgentStatus: AgentStatus;
   errorReason: string | null;
   resultEvidenceDigest: string | null;
+  ownerActions: OwnerAction[];
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type RobinhoodDeploymentAction = {
+  kind: "deploy_user_graph";
+  chainId: "4663";
+  to: `0x${string}`;
+  data: `0x${string}`;
+  value: "0";
+};
+
+export type OwnerAction = {
+  chain_id: 4663;
+  from: `0x${string}`;
+  to: `0x${string}`;
+  data: `0x${string}`;
+  value: "0";
 };
 
 export type DashboardSnapshot = {
