@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { isSameOriginRequest } from "../../../../lib/server-origin";
 import { requestSubject, takeRateLimit } from "../../../../lib/server-rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -8,7 +9,7 @@ type RouteContext = { params: Promise<{ path: string[] }> };
 
 async function proxy(request: NextRequest, context: RouteContext) {
   const requestId = request.headers.get("x-request-id") ?? randomUUID();
-  if (!sameOrigin(request)) {
+  if (!isSameOriginRequest(request)) {
     return NextResponse.json({ error: "invalid_origin", message: "Request origin is not allowed." }, { status: 403 });
   }
   const auth = request.headers.get("authorization");
@@ -68,12 +69,6 @@ async function proxy(request: NextRequest, context: RouteContext) {
     if (value) outputHeaders.set(name, value);
   }
   return new NextResponse(response.body, { status: response.status, headers: outputHeaders });
-}
-
-function sameOrigin(request: NextRequest) {
-  if (request.method === "GET" || request.method === "HEAD") return true;
-  const origin = request.headers.get("origin");
-  return !origin || origin === request.nextUrl.origin;
 }
 
 export const GET = proxy;

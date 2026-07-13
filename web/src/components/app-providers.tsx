@@ -19,6 +19,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { Hex } from "viem";
@@ -102,10 +103,13 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
 
 function LiveSession({ children }: { children: React.ReactNode }) {
   const privy = usePrivy();
+  const privyRef = useRef(privy);
+  privyRef.current = privy;
   const { wallets, ready: walletsReady } = useWallets();
   const [pending, setPending] = useState(false);
   const embeddedWallet = wallets.find((wallet) => wallet.walletClientType === "privy") ?? null;
-  const getAccessToken = useCallback(() => privy.getAccessToken(), [privy]);
+  const getAccessToken = useCallback(() => privyRef.current.getAccessToken(), []);
+  const syncedAuthentication = useRef<boolean | null>(null);
 
   const accounts = useMemo(() => wallets.map((wallet) => ({
     address: wallet.address as `0x${string}`,
@@ -117,6 +121,8 @@ function LiveSession({ children }: { children: React.ReactNode }) {
   ));
 
   useEffect(() => {
+    if (!privy.ready || syncedAuthentication.current === privy.authenticated) return;
+    syncedAuthentication.current = privy.authenticated;
     if (!privy.authenticated) {
       void fetch("/api/auth/session", { method: "DELETE" });
       return;
@@ -129,7 +135,7 @@ function LiveSession({ children }: { children: React.ReactNode }) {
         body: JSON.stringify({ token }),
       });
     });
-  }, [getAccessToken, privy.authenticated]);
+  }, [getAccessToken, privy.authenticated, privy.ready]);
 
   useEffect(() => {
     const expire = () => { void privy.logout(); };

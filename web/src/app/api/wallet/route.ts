@@ -5,6 +5,7 @@ import {
   SessionValidationError,
   verifyPrivySession,
 } from "../../../lib/server-auth";
+import { isSameOriginRequest } from "../../../lib/server-origin";
 import { takeRateLimit } from "../../../lib/server-rate-limit";
 import {
   authorizePreparedCalls,
@@ -21,7 +22,7 @@ const maxBodyBytes = 256 * 1_024;
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") ?? randomUUID();
   try {
-    if (!sameOrigin(request)) throw new WalletProxyError(403, "invalid_origin", "Request origin is not allowed.");
+    if (!isSameOriginRequest(request)) throw new WalletProxyError(403, "invalid_origin", "Request origin is not allowed.");
     if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
       throw new WalletProxyError(415, "unsupported_media_type", "JSON is required.");
     }
@@ -85,9 +86,4 @@ function jsonError(status: number, code: string, message: string, requestId: str
   const response = NextResponse.json({ error: code, message }, { status, headers: { "X-Request-Id": requestId, "Cache-Control": "no-store" } });
   if (retryAfter) response.headers.set("Retry-After", String(retryAfter));
   return response;
-}
-
-function sameOrigin(request: NextRequest) {
-  const origin = request.headers.get("origin");
-  return !origin || origin === request.nextUrl.origin;
 }

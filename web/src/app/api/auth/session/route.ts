@@ -4,12 +4,13 @@ import {
   SessionValidationError,
   verifyPrivySession,
 } from "../../../../lib/server-auth";
+import { isSameOriginRequest } from "../../../../lib/server-origin";
 import { requestSubject, takeRateLimit } from "../../../../lib/server-rate-limit";
 
 const COOKIE = "privy-token";
 
 export async function POST(request: NextRequest) {
-  if (!sameOrigin(request)) return NextResponse.json({ error: "invalid_origin" }, { status: 403 });
+  if (!isSameOriginRequest(request)) return NextResponse.json({ error: "invalid_origin" }, { status: 403 });
   const limit = takeRateLimit("session", requestSubject(request.headers), 20, 60_000);
   if (!limit.allowed) {
     return NextResponse.json(
@@ -47,7 +48,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  if (!sameOrigin(request)) return NextResponse.json({ error: "invalid_origin" }, { status: 403 });
+  if (!isSameOriginRequest(request)) return NextResponse.json({ error: "invalid_origin" }, { status: 403 });
   const response = NextResponse.json({ ok: true });
   response.cookies.set(COOKIE, "", {
     httpOnly: true,
@@ -57,9 +58,4 @@ export async function DELETE(request: NextRequest) {
     maxAge: 0,
   });
   return response;
-}
-
-function sameOrigin(request: NextRequest) {
-  const origin = request.headers.get("origin");
-  return !origin || origin === request.nextUrl.origin;
 }
