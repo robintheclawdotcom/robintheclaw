@@ -10,6 +10,8 @@ capture layer verbatim.
 - WebSocket: `wss://mainnet.zklighter.elliot.ai/stream` (supplied by config; `?readonly=true` is
   available for restricted regions).
 - REST metadata: `GET {api}/api/v1/orderBookDetails`.
+- Protocol reference: [WebSocket API](https://apidocs.lighter.xyz/docs/websocket-reference).
+- Connection limits: [rate limits](https://apidocs.lighter.xyz/docs/rate-limits).
 
 ## Subscriptions
 
@@ -32,7 +34,8 @@ unknown fields are ignored so additive protocol changes do not break decoding.
 | Trade | `update/trade` | `trades` and `liquidation_trades` arrays. |
 | Market stats | `update/market_stats` | Funding, open interest, mark/index, best bid/ask. |
 | Height | `update/height` | Chain block height. |
-| Acknowledgement | `subscribed/*` | Must carry a non-empty `channel`. |
+| Acknowledgement | `subscribed/*` | Must match a requested channel and its channel type. |
+| Server error | `error`, `error/*`, `*/error` | Captured as source health, then forces reconnect. |
 
 ### Timestamps
 
@@ -48,11 +51,21 @@ and a typed continuity error is returned, which drops the connection so the next
 a fresh snapshot. The `offset` field is not used for continuity: it increases but is documented as
 not guaranteed continuous across servers.
 
+Prices and sizes remain decimal strings. The connector validates their exact syntax without binary
+floating-point conversion. A zero size removes a level; negative, exponent, non-finite, empty, or
+otherwise malformed values invalidate the book and force a fresh snapshot.
+
 ### Keepalive and reconnect
 
 The server closes idle connections after two minutes. The connector sends a WebSocket ping every 60
-seconds. Transient disconnects, gaps, and failed acknowledgements reconnect with capped exponential
-backoff and equal jitter (500 ms base, 30 s ceiling).
+seconds. Malformed required fields, unexpected channels, duplicate acknowledgements, server errors,
+disconnects, and continuity gaps reconnect with capped exponential backoff and equal jitter (500 ms
+base, 30 s ceiling).
+
+Every text frame receives a connection-scoped session ID and monotonically increasing local event
+ID. Venue nonces, heights, and timestamps remain independent source sequences. Acknowledgements,
+unknown additive frame types, and server errors are retained as source-health events so protocol
+changes are visible in the archive.
 
 ## Documented schema ambiguities
 
@@ -62,9 +75,10 @@ backoff and equal jitter (500 ms base, 30 s ceiling).
 - **Precision, minimum size, margin fractions, and fees are not in the feed.** They do not appear in
   any WebSocket frame. They are read from the REST `orderBookDetails` metadata (parsed strictly,
   without lossy defaults, for the markets actually traded) and, for fills, from trade objects.
-- **No documented error frame.** The reference does not define an error frame shape, so the
-  connector does not model one; unrecognized frame types are ignored rather than treated as errors.
+- **No documented error-frame schema.** The reference does not define a stable error payload. The
+  connector accepts the conservative `error`, `error/*`, and `*/error` envelope family, retains the
+  raw frame, and reconnects. The optional code remains untyped JSON to avoid a lossy assumption.
 - **Acknowledgement shape varies by channel.** The reference shows `subscribed/*` acknowledgements
   for some channels but describes the order-book channel's first message as the snapshot itself. The
-  connector validates any `subscribed/*` frame it receives (requiring a non-empty `channel`) and
-  otherwise relies on the snapshot as the effective acknowledgement.
+  connector validates any acknowledgement against the requested channel and treats the first valid
+  data frame as implicit activation when no acknowledgement is sent.

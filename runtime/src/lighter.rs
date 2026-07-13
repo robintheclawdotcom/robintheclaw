@@ -1,35 +1,22 @@
-//! Read-only connector for the zkLighter public WebSocket feed.
-//!
-//! Hardened against documented production protocol behavior: every frame is deserialized through
-//! typed structures, the order book is reconstructed from its snapshot and validated against each
-//! delta's nonce chain, malformed required fields are rejected, the subscription budget is
-//! enforced before connecting, and disconnects reconnect with capped exponential backoff and
-//! jitter. It carries no authentication, signing, or write path.
-//!
-//! Protocol reference: zkLighter WebSocket reference (frames `update/order_book`, `update/ticker`,
-//! `update/trade`, `update/market_stats`, `update/height`, `subscribed/*`). Per-market precision,
-//! minimum size, margin fractions, and fees are not present in any WebSocket frame; they are read
-//! from the REST `orderBookDetails` metadata and parsed by [`MarketMetadata`]. See
-//! `docs/venue-lighter.md`.
+//! Read-only Lighter public market-data connector.
 
-use crate::{Finality, MarketEventKind, RawMarketEvent};
+use crate::{Finality, MarketEventKind, RawMarketEvent, SourceIdentity};
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::{interval, sleep, timeout, MissedTickBehavior};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 const CONNECTOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Channels subscribed per market: order book, ticker, trade, market stats.
 pub const CHANNELS_PER_MARKET: usize = 4;
-/// Server-side ceiling on concurrent subscriptions for a single connection.
 pub const MAX_SUBSCRIPTIONS: usize = 100;
 
 const KEEPALIVE: Duration = Duration::from_secs(60);
@@ -37,33 +24,29 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const BASE_BACKOFF_MS: u64 = 500;
 const MAX_BACKOFF_MS: u64 = 30_000;
 
-/// Typed failure modes of the public feed. Variants for which [`LighterError::requires_reconnect`]
-/// is true invalidate connection state (including any reconstructed book) and trigger a backoff.
 #[derive(Debug)]
 pub enum LighterError {
-    /// A frame could not be decoded into its typed structure, or a required field was absent.
     Decode(String),
-    /// An order-book delta did not chain onto the previous nonce.
     ContinuityGap {
         channel: String,
         expected: u64,
         received: u64,
     },
-    /// A subscription acknowledgement was missing or malformed.
     Acknowledgement(String),
-    /// The requested subscription count exceeds what one connection may hold.
-    SubscriptionBudget { requested: usize, limit: usize },
+    SubscriptionBudget {
+        requested: usize,
+        limit: usize,
+    },
+    Protocol(String),
+    Server {
+        code: Option<String>,
+        message: String,
+    },
 }
 
 impl LighterError {
-    /// Whether encountering this error should drop the connection and reconnect. A continuity gap
-    /// or a failed acknowledgement means local state can no longer be trusted; a budget violation
-    /// is a configuration fault that reconnecting cannot fix.
     pub fn requires_reconnect(&self) -> bool {
-        matches!(
-            self,
-            LighterError::ContinuityGap { .. } | LighterError::Acknowledgement(_)
-        )
+        !matches!(self, LighterError::SubscriptionBudget { .. })
     }
 }
 
@@ -86,17 +69,16 @@ impl fmt::Display for LighterError {
                 f,
                 "subscription budget exceeded: {requested} requested, {limit} allowed"
             ),
+            LighterError::Protocol(detail) => write!(f, "invalid Lighter protocol state: {detail}"),
+            LighterError::Server { code, message } => match code {
+                Some(code) => write!(f, "Lighter server error {code}: {message}"),
+                None => write!(f, "Lighter server error: {message}"),
+            },
         }
     }
 }
 
 impl std::error::Error for LighterError {}
-
-// ---------------------------------------------------------------------------
-// Typed frames. Required fields are non-optional so a missing one is rejected rather than
-// silently defaulted; optional/omitempty fields are `Option`. Prices and sizes stay as strings to
-// avoid any lossy float conversion. Unknown fields are ignored so additive protocol changes do
-// not break decoding.
 
 #[derive(Debug, Deserialize)]
 struct Envelope {
@@ -113,12 +95,10 @@ pub struct Level {
 #[derive(Debug, Deserialize)]
 pub struct OrderBookFrame {
     pub channel: String,
-    /// Top-level microsecond publish time; distinct from the millisecond `timestamp`.
     #[serde(rename = "last_updated_at")]
     pub last_updated_us: u64,
     pub offset: u64,
     pub order_book: OrderBookData,
-    /// Top-level millisecond timestamp.
     #[serde(rename = "timestamp")]
     pub timestamp_ms: i64,
 }
@@ -130,7 +110,6 @@ pub struct OrderBookData {
     pub bids: Vec<Level>,
     pub offset: u64,
     pub nonce: u64,
-    /// Inner microsecond update time.
     #[serde(rename = "last_updated_at")]
     pub last_updated_us: u64,
     pub begin_nonce: u64,
@@ -184,7 +163,6 @@ pub struct Trade {
     pub is_maker_ask: Option<bool>,
     #[serde(default)]
     pub block_height: Option<i64>,
-    /// Present only when non-zero (omitempty on the wire).
     #[serde(default)]
     pub taker_fee: Option<i64>,
     #[serde(default)]
@@ -208,9 +186,7 @@ pub struct MarketStats {
     pub best_bid_price: String,
     pub best_ask_price: String,
     pub open_interest: String,
-    /// Estimate of the upcoming funding payment.
     pub current_funding_rate: String,
-    /// Last settled funding payment, applied at `funding_timestamp`.
     pub funding_rate: String,
     pub funding_timestamp: i64,
     #[serde(default)]
@@ -237,11 +213,22 @@ pub struct HeightFrame {
 
 #[derive(Debug, Deserialize)]
 pub struct AckFrame {
+    #[serde(rename = "type")]
+    pub frame_type: String,
     pub channel: String,
+    pub timestamp: i64,
 }
 
-/// A decoded public frame. `Other` carries the raw type string for frames the connector does not
-/// act on (they are still captured verbatim upstream).
+#[derive(Debug, Deserialize)]
+pub struct ErrorFrame {
+    #[serde(rename = "type")]
+    pub frame_type: String,
+    #[serde(default)]
+    pub code: Option<serde_json::Value>,
+    #[serde(alias = "error")]
+    pub message: String,
+}
+
 #[derive(Debug)]
 pub enum Frame {
     OrderBook(Box<OrderBookFrame>),
@@ -250,6 +237,7 @@ pub enum Frame {
     MarketStats(Box<MarketStatsFrame>),
     Height(HeightFrame),
     Ack(AckFrame),
+    Error(ErrorFrame),
     Other(String),
 }
 
@@ -257,8 +245,6 @@ fn decode<T: DeserializeOwned>(text: &str) -> Result<T, LighterError> {
     serde_json::from_str(text).map_err(|err| LighterError::Decode(err.to_string()))
 }
 
-/// Decode a public frame from its wire text, rejecting any frame whose required fields are absent
-/// or mistyped.
 pub fn parse_frame(text: &str) -> Result<Frame, LighterError> {
     let envelope: Envelope = decode(text)?;
     let frame = match envelope.frame_type.as_str() {
@@ -268,23 +254,29 @@ pub fn parse_frame(text: &str) -> Result<Frame, LighterError> {
         "update/market_stats" => Frame::MarketStats(Box::new(decode(text)?)),
         "update/height" => Frame::Height(decode(text)?),
         kind if kind.starts_with("subscribed/") => Frame::Ack(validate_ack(text)?),
+        kind if kind == "error" || kind.starts_with("error/") || kind.ends_with("/error") => {
+            Frame::Error(decode(text)?)
+        }
         other => Frame::Other(other.to_string()),
     };
     Ok(frame)
 }
 
-/// Validate a subscription acknowledgement, rejecting a missing or empty channel.
 pub fn validate_ack(text: &str) -> Result<AckFrame, LighterError> {
     let ack: AckFrame =
         serde_json::from_str(text).map_err(|err| LighterError::Acknowledgement(err.to_string()))?;
     if ack.channel.trim().is_empty() {
         return Err(LighterError::Acknowledgement("empty channel".to_string()));
     }
+    let channel_kind = ack.channel.split(':').next().unwrap_or_default();
+    if ack.frame_type.strip_prefix("subscribed/") != Some(channel_kind) {
+        return Err(LighterError::Acknowledgement(
+            "type does not match channel".to_string(),
+        ));
+    }
     Ok(ack)
 }
 
-/// Total subscriptions for `market_count` markets (`4 * market_count + 1`, the `+1` being the
-/// shared height channel), rejecting anything a single connection cannot hold.
 pub fn subscription_budget(market_count: usize) -> Result<usize, LighterError> {
     let total = CHANNELS_PER_MARKET
         .checked_mul(market_count)
@@ -299,13 +291,75 @@ pub fn subscription_budget(market_count: usize) -> Result<usize, LighterError> {
     Ok(total)
 }
 
-// ---------------------------------------------------------------------------
-// Order book reconstruction. The first frame on a channel is the full snapshot; each later frame
-// is a delta whose `begin_nonce` must equal the book's current `nonce`. A gap invalidates the
-// book and demands a reconnect.
+#[derive(Debug)]
+pub struct SubscriptionState {
+    requested: HashSet<String>,
+    active: HashSet<String>,
+}
 
-/// A reconstructed order book for one market. Levels are held by price string; a delta level whose
-/// size is numerically zero removes the price.
+impl SubscriptionState {
+    pub fn new(market_ids: impl IntoIterator<Item = u64>) -> Self {
+        let mut requested = HashSet::from(["height".to_string()]);
+        for market_id in market_ids {
+            for channel in ["order_book", "ticker", "trade", "market_stats"] {
+                requested.insert(format!("{channel}:{market_id}"));
+            }
+        }
+        Self {
+            requested,
+            active: HashSet::new(),
+        }
+    }
+
+    pub fn observe(&mut self, frame: &Frame) -> Result<(), LighterError> {
+        let Some((channel, expected_kind)) = frame_channel(frame) else {
+            return Ok(());
+        };
+        if channel.split(':').next() != Some(expected_kind) {
+            return Err(LighterError::Protocol(format!(
+                "{expected_kind} frame carried channel {channel}"
+            )));
+        }
+        if !self.requested.contains(channel) {
+            return Err(LighterError::Acknowledgement(format!(
+                "unexpected channel {channel}"
+            )));
+        }
+        if matches!(frame, Frame::Ack(_)) {
+            if !self.active.insert(channel.to_string()) {
+                return Err(LighterError::Acknowledgement(format!(
+                    "duplicate acknowledgement for {channel}"
+                )));
+            }
+        } else {
+            self.active.insert(channel.to_string());
+        }
+        Ok(())
+    }
+
+    pub fn is_active(&self, channel: &str) -> bool {
+        self.active.contains(channel)
+    }
+}
+
+fn frame_channel(frame: &Frame) -> Option<(&str, &str)> {
+    match frame {
+        Frame::OrderBook(frame) => Some((&frame.channel, "order_book")),
+        Frame::Ticker(frame) => Some((&frame.channel, "ticker")),
+        Frame::Trade(frame) => Some((&frame.channel, "trade")),
+        Frame::MarketStats(frame) => Some((&frame.channel, "market_stats")),
+        Frame::Height(frame) => Some((&frame.channel, "height")),
+        Frame::Ack(frame) => Some((
+            &frame.channel,
+            frame
+                .frame_type
+                .strip_prefix("subscribed/")
+                .unwrap_or_default(),
+        )),
+        Frame::Error(_) | Frame::Other(_) => None,
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct OrderBook {
     nonce: Option<u64>,
@@ -326,30 +380,45 @@ impl OrderBook {
         self.bids.len() + self.asks.len()
     }
 
-    /// Apply a frame: the first is taken as a snapshot, later frames as deltas with a nonce-chain
-    /// check. On a gap the book is left invalidated and a typed [`LighterError::ContinuityGap`] is
-    /// returned.
     pub fn apply(&mut self, channel: &str, data: &OrderBookData) -> Result<(), LighterError> {
+        let result = self.apply_validated(channel, data);
+        if result.is_err() {
+            self.invalidate();
+        }
+        result
+    }
+
+    fn apply_validated(&mut self, channel: &str, data: &OrderBookData) -> Result<(), LighterError> {
+        if data.code != 0 {
+            return Err(LighterError::Protocol(format!(
+                "order book {channel} returned code {}",
+                data.code
+            )));
+        }
+        validate_levels(&data.bids)?;
+        validate_levels(&data.asks)?;
+
         match self.nonce {
             None => {
+                validate_nonce_range(channel, data)?;
                 self.bids.clear();
                 self.asks.clear();
-                write_levels(&mut self.bids, &data.bids);
-                write_levels(&mut self.asks, &data.asks);
+                write_levels(&mut self.bids, &data.bids)?;
+                write_levels(&mut self.asks, &data.asks)?;
                 self.nonce = Some(data.nonce);
                 Ok(())
             }
             Some(current) => {
                 if data.begin_nonce != current {
-                    self.invalidate();
                     return Err(LighterError::ContinuityGap {
                         channel: channel.to_string(),
                         expected: current,
                         received: data.begin_nonce,
                     });
                 }
-                write_levels(&mut self.bids, &data.bids);
-                write_levels(&mut self.asks, &data.asks);
+                validate_nonce_range(channel, data)?;
+                write_levels(&mut self.bids, &data.bids)?;
+                write_levels(&mut self.asks, &data.asks)?;
                 self.nonce = Some(data.nonce);
                 Ok(())
             }
@@ -363,20 +432,66 @@ impl OrderBook {
     }
 }
 
-fn write_levels(book: &mut HashMap<String, String>, levels: &[Level]) {
+fn validate_nonce_range(channel: &str, data: &OrderBookData) -> Result<(), LighterError> {
+    if data.nonce < data.begin_nonce {
+        return Err(LighterError::Protocol(format!(
+            "order book {channel} nonce {} precedes begin_nonce {}",
+            data.nonce, data.begin_nonce
+        )));
+    }
+    Ok(())
+}
+
+fn validate_levels(levels: &[Level]) -> Result<(), LighterError> {
     for level in levels {
-        let removed = level.size.parse::<f64>().is_ok_and(|size| size <= 0.0);
-        if removed {
+        if decimal_is_zero(&level.price)? {
+            return Err(LighterError::Protocol(
+                "order book price must be positive".to_string(),
+            ));
+        }
+        decimal_is_zero(&level.size)?;
+    }
+    Ok(())
+}
+
+fn write_levels(book: &mut HashMap<String, String>, levels: &[Level]) -> Result<(), LighterError> {
+    for level in levels {
+        if decimal_is_zero(&level.size)? {
             book.remove(&level.price);
         } else {
             book.insert(level.price.clone(), level.size.clone());
         }
     }
+    Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Reconnect timing: equal-jitter capped exponential backoff. The ceiling is deterministic and the
-// jitter is supplied explicitly so both are unit-testable.
+fn decimal_is_zero(value: &str) -> Result<bool, LighterError> {
+    let mut digits = 0usize;
+    let mut dots = 0usize;
+    let mut zero = true;
+
+    for byte in value.bytes() {
+        match byte {
+            b'0' => digits += 1,
+            b'1'..=b'9' => {
+                digits += 1;
+                zero = false;
+            }
+            b'.' if dots == 0 && digits > 0 => dots += 1,
+            _ => {
+                return Err(LighterError::Protocol(format!(
+                    "invalid decimal value {value}"
+                )))
+            }
+        }
+    }
+    if digits == 0 || value.ends_with('.') {
+        return Err(LighterError::Protocol(format!(
+            "invalid decimal value {value}"
+        )));
+    }
+    Ok(zero)
+}
 
 fn backoff_ceiling_ms(attempt: u32) -> u64 {
     let factor = 1u64.checked_shl(attempt.min(20)).unwrap_or(u64::MAX);
@@ -395,10 +510,6 @@ fn jitter_source() -> u64 {
         .map(|elapsed| elapsed.subsec_nanos() as u64)
         .unwrap_or(0)
 }
-
-// ---------------------------------------------------------------------------
-// Market metadata (REST). Precision, minimum size, margin fractions, and fees are absent from the
-// WebSocket feed and are read here without lossy defaults for the markets actually traded.
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MarketMetadata {
@@ -437,8 +548,6 @@ struct MarketMetadataResponse {
     order_book_details: Vec<serde_json::Value>,
 }
 
-/// Parse the `orderBookDetails` response, returning strict typed metadata for every active perp
-/// market among `wanted`. A wanted market whose metadata is malformed is an error, not a default.
 pub fn parse_market_metadata(
     body: &[u8],
     wanted: &std::collections::HashSet<&str>,
@@ -475,8 +584,6 @@ pub fn parse_market_metadata(
 fn channel_market_id(channel: &str) -> Option<u64> {
     channel.rsplit(':').next()?.parse().ok()
 }
-
-// ---------------------------------------------------------------------------
 
 pub struct LighterFeed {
     websocket_url: String,
@@ -523,9 +630,6 @@ impl LighterFeed {
         parse_market_metadata(&body, &wanted)
     }
 
-    /// Run the feed until an unrecoverable error, reconnecting on any transient failure with
-    /// capped exponential backoff and jitter. A reconnect starts from a fresh snapshot, so no
-    /// stale book survives a gap.
     pub async fn run<F, Fut>(&self, mut handle: F) -> anyhow::Result<()>
     where
         F: FnMut(RawMarketEvent) -> Fut,
@@ -597,6 +701,9 @@ impl LighterFeed {
         keepalive.set_missed_tick_behavior(MissedTickBehavior::Skip);
         keepalive.tick().await;
         let mut books: HashMap<String, OrderBook> = HashMap::new();
+        let mut subscriptions = SubscriptionState::new(market_ids.keys().copied());
+        let source_session = Uuid::new_v4().to_string();
+        let mut wire_sequence = 0u64;
 
         loop {
             let message = tokio::select! {
@@ -616,104 +723,194 @@ impl LighterFeed {
                 continue;
             };
             let text = text.as_str();
+            wire_sequence = wire_sequence
+                .checked_add(1)
+                .ok_or_else(|| LighterError::Protocol("frame sequence overflow".to_string()))?;
 
             let frame = match parse_frame(text) {
                 Ok(frame) => frame,
                 Err(err) => {
-                    // A malformed non-order-book frame is dropped; the stream continues. Order-book
-                    // integrity is load-bearing, so a bad book frame surfaces to force a reconnect.
-                    warn!(%err, "dropping malformed Lighter frame");
-                    continue;
+                    if let Ok(identity) = SourceIdentity::new(
+                        source_session.clone(),
+                        format!("frame:{wire_sequence}"),
+                        None,
+                    ) {
+                        if let Ok(event) = RawMarketEvent::from_source(
+                            "lighter",
+                            CONNECTOR_VERSION,
+                            identity,
+                            MarketEventKind::SourceHealth,
+                            text.as_bytes().to_vec(),
+                        ) {
+                            handle(event).await?;
+                        }
+                    }
+                    return Err(err.into());
                 }
             };
 
-            let Some((kind, symbol, source_timestamp_ms, source_sequence, block_number)) =
-                self.route(&frame, &market_ids, &mut books)?
-            else {
-                continue;
-            };
+            if let Err(err) = subscriptions.observe(&frame) {
+                let identity = SourceIdentity::new(
+                    source_session.clone(),
+                    format!("frame:{wire_sequence}"),
+                    None,
+                )?;
+                let event = RawMarketEvent::from_source(
+                    "lighter",
+                    CONNECTOR_VERSION,
+                    identity,
+                    MarketEventKind::SourceHealth,
+                    text.as_bytes().to_vec(),
+                )?;
+                handle(event).await?;
+                return Err(err.into());
+            }
 
-            let mut event = RawMarketEvent::from_wire(
+            let routed = match self.route(&frame, &market_ids, &mut books) {
+                Ok(routed) => routed,
+                Err(err) => {
+                    let identity = SourceIdentity::new(
+                        source_session.clone(),
+                        format!("frame:{wire_sequence}"),
+                        None,
+                    )?;
+                    let event = RawMarketEvent::from_source(
+                        "lighter",
+                        CONNECTOR_VERSION,
+                        identity,
+                        MarketEventKind::SourceHealth,
+                        text.as_bytes().to_vec(),
+                    )?;
+                    handle(event).await?;
+                    return Err(err);
+                }
+            };
+            let identity = SourceIdentity::new(
+                source_session.clone(),
+                format!("frame:{wire_sequence}"),
+                routed.source_sequence.clone(),
+            )?;
+            let mut event = RawMarketEvent::from_source(
                 "lighter",
                 CONNECTOR_VERSION,
-                kind,
+                identity,
+                routed.kind,
                 text.as_bytes().to_vec(),
             )?;
-            event.symbol = symbol;
-            event.source_timestamp_ms = source_timestamp_ms;
-            event.source_sequence = source_sequence;
-            if kind == MarketEventKind::ChainBlock {
-                event.block_number = block_number;
+            event.symbol = routed.symbol;
+            event.source_timestamp_ms = routed.source_timestamp_ms;
+            if routed.kind == MarketEventKind::ChainBlock {
+                event.block_number = routed.block_number;
                 event.finality = Finality::Confirmed;
             }
             handle(event).await?;
+
+            if let Frame::Error(frame) = frame {
+                return Err(LighterError::Server {
+                    code: frame.code.map(|code| match code {
+                        serde_json::Value::String(value) => value,
+                        value => value.to_string(),
+                    }),
+                    message: frame.message,
+                }
+                .into());
+            }
         }
     }
 
-    /// Resolve a decoded frame to the event metadata to emit, advancing book state. Returns `None`
-    /// for frames that are validated but not persisted (acknowledgements, unknown types).
-    #[allow(clippy::type_complexity)]
     fn route(
         &self,
         frame: &Frame,
         market_ids: &HashMap<u64, String>,
         books: &mut HashMap<String, OrderBook>,
-    ) -> anyhow::Result<
-        Option<(
-            MarketEventKind,
-            Option<String>,
-            Option<i64>,
-            Option<String>,
-            Option<i64>,
-        )>,
-    > {
+    ) -> anyhow::Result<RoutedFrame> {
         let resolved = match frame {
             Frame::OrderBook(frame) => {
                 let book = books.entry(frame.channel.clone()).or_default();
                 book.apply(&frame.channel, &frame.order_book)?;
-                (
-                    MarketEventKind::OrderBook,
-                    channel_market_id(&frame.channel).and_then(|id| market_ids.get(&id).cloned()),
-                    Some(frame.timestamp_ms),
-                    Some(frame.order_book.nonce.to_string()),
-                    None,
-                )
+                RoutedFrame::new(MarketEventKind::OrderBook)
+                    .symbol(
+                        channel_market_id(&frame.channel)
+                            .and_then(|id| market_ids.get(&id).cloned()),
+                    )
+                    .timestamp(frame.timestamp_ms)
+                    .sequence(frame.order_book.nonce)
             }
-            Frame::Ticker(frame) => (
-                MarketEventKind::Ticker,
-                Some(frame.ticker.symbol.clone()),
-                Some(frame.timestamp_ms),
-                Some(frame.nonce.to_string()),
-                None,
-            ),
-            Frame::Trade(frame) => (
-                MarketEventKind::Trade,
-                channel_market_id(&frame.channel).and_then(|id| market_ids.get(&id).cloned()),
-                frame
-                    .trades
-                    .first()
-                    .or_else(|| frame.liquidation_trades.first())
-                    .map(|trade| trade.timestamp),
-                Some(frame.nonce.to_string()),
-                None,
-            ),
-            Frame::MarketStats(frame) => (
-                MarketEventKind::MarketStats,
-                Some(frame.market_stats.symbol.clone()),
-                Some(frame.timestamp_ms),
-                None,
-                None,
-            ),
-            Frame::Height(frame) => (
-                MarketEventKind::ChainBlock,
-                None,
-                Some(frame.timestamp_ms),
-                None,
-                Some(frame.height),
-            ),
-            Frame::Ack(_) | Frame::Other(_) => return Ok(None),
+            Frame::Ticker(frame) => RoutedFrame::new(MarketEventKind::Ticker)
+                .symbol(Some(frame.ticker.symbol.clone()))
+                .timestamp(frame.timestamp_ms)
+                .sequence(frame.nonce),
+            Frame::Trade(frame) => RoutedFrame::new(MarketEventKind::Trade)
+                .symbol(
+                    channel_market_id(&frame.channel).and_then(|id| market_ids.get(&id).cloned()),
+                )
+                .optional_timestamp(
+                    frame
+                        .trades
+                        .first()
+                        .or_else(|| frame.liquidation_trades.first())
+                        .map(|trade| trade.timestamp),
+                )
+                .sequence(frame.nonce),
+            Frame::MarketStats(frame) => RoutedFrame::new(MarketEventKind::MarketStats)
+                .symbol(Some(frame.market_stats.symbol.clone()))
+                .timestamp(frame.timestamp_ms)
+                .sequence(frame.timestamp_ms),
+            Frame::Height(frame) => RoutedFrame::new(MarketEventKind::ChainBlock)
+                .timestamp(frame.timestamp_ms)
+                .sequence(frame.height)
+                .block(frame.height),
+            Frame::Ack(frame) => RoutedFrame::new(MarketEventKind::SourceHealth)
+                .timestamp(frame.timestamp)
+                .sequence(frame.timestamp),
+            Frame::Error(_) | Frame::Other(_) => RoutedFrame::new(MarketEventKind::SourceHealth),
         };
-        Ok(Some(resolved))
+        Ok(resolved)
+    }
+}
+
+struct RoutedFrame {
+    kind: MarketEventKind,
+    symbol: Option<String>,
+    source_timestamp_ms: Option<i64>,
+    source_sequence: Option<String>,
+    block_number: Option<i64>,
+}
+
+impl RoutedFrame {
+    fn new(kind: MarketEventKind) -> Self {
+        Self {
+            kind,
+            symbol: None,
+            source_timestamp_ms: None,
+            source_sequence: None,
+            block_number: None,
+        }
+    }
+
+    fn symbol(mut self, symbol: Option<String>) -> Self {
+        self.symbol = symbol;
+        self
+    }
+
+    fn timestamp(mut self, timestamp: i64) -> Self {
+        self.source_timestamp_ms = Some(timestamp);
+        self
+    }
+
+    fn optional_timestamp(mut self, timestamp: Option<i64>) -> Self {
+        self.source_timestamp_ms = timestamp;
+        self
+    }
+
+    fn sequence(mut self, sequence: impl ToString) -> Self {
+        self.source_sequence = Some(sequence.to_string());
+        self
+    }
+
+    fn block(mut self, block: i64) -> Self {
+        self.block_number = Some(block);
+        self
     }
 }
 

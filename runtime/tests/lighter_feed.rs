@@ -1,9 +1,8 @@
-//! Golden tests for the read-only Lighter public connector. Every case runs against a stored
-//! example payload; none touch the network.
+//! Offline protocol tests for the Lighter public connector.
 
 use robin_runtime::lighter::{
     parse_frame, parse_market_metadata, subscription_budget, validate_ack, Frame, LighterError,
-    OrderBook, OrderBookFrame,
+    OrderBook, OrderBookFrame, SubscriptionState,
 };
 use std::collections::HashSet;
 
@@ -17,6 +16,7 @@ const MARKET_STATS: &str = include_str!("../fixtures/lighter/market_stats.json")
 const HEIGHT: &str = include_str!("../fixtures/lighter/height.json");
 const ACK: &str = include_str!("../fixtures/lighter/subscribed_ack.json");
 const ACK_MALFORMED: &str = include_str!("../fixtures/lighter/subscribed_ack_malformed.json");
+const ERROR: &str = include_str!("../fixtures/lighter/error.json");
 const METADATA: &[u8] = include_bytes!("../fixtures/lighter/market_metadata.json");
 
 fn order_book_frame(text: &str) -> OrderBookFrame {
@@ -46,7 +46,6 @@ fn snapshot_initializes_then_a_valid_delta_advances_the_book() {
     book.apply(&delta.channel, &delta.order_book)
         .expect("delta applies");
     assert_eq!(book.nonce(), Some(9182390040));
-    // the delta removed one ask (size "0") and added another, so the level count is unchanged.
     assert_eq!(book.level_count(), before);
     assert!(book.is_initialized());
 }
@@ -130,10 +129,9 @@ fn parses_height() {
 
 #[test]
 fn rejects_a_frame_missing_a_required_field() {
-    assert!(matches!(
-        parse_frame(MALFORMED),
-        Err(LighterError::Decode(_))
-    ));
+    let err = parse_frame(MALFORMED).unwrap_err();
+    assert!(matches!(err, LighterError::Decode(_)));
+    assert!(err.requires_reconnect());
 }
 
 #[test]
@@ -151,6 +149,118 @@ fn rejects_an_acknowledgement_without_a_channel() {
     assert!(matches!(
         parse_frame(ACK_MALFORMED),
         Err(LighterError::Acknowledgement(_))
+    ));
+}
+
+#[test]
+fn validates_acknowledgements_against_requested_channels() {
+    let mut subscriptions = SubscriptionState::new([0]);
+    let ack = parse_frame(ACK).unwrap();
+    subscriptions.observe(&ack).unwrap();
+    assert!(subscriptions.is_active("order_book:0"));
+
+    let duplicate = subscriptions.observe(&ack).unwrap_err();
+    assert!(matches!(duplicate, LighterError::Acknowledgement(_)));
+
+    let unexpected =
+        parse_frame(r#"{"type":"subscribed/order_book","channel":"order_book:1","timestamp":1}"#)
+            .unwrap();
+    assert!(matches!(
+        subscriptions.observe(&unexpected),
+        Err(LighterError::Acknowledgement(_))
+    ));
+}
+
+#[test]
+fn first_data_frame_activates_a_channel_without_an_acknowledgement() {
+    let mut subscriptions = SubscriptionState::new([0]);
+    let snapshot = parse_frame(SNAPSHOT).unwrap();
+    subscriptions.observe(&snapshot).unwrap();
+    assert!(subscriptions.is_active("order_book:0"));
+}
+
+#[test]
+fn rejects_a_data_frame_with_the_wrong_channel_type() {
+    let text = TICKER.replace("ticker:0", "trade:0");
+    let frame = parse_frame(&text).unwrap();
+    let mut subscriptions = SubscriptionState::new([0]);
+    assert!(matches!(
+        subscriptions.observe(&frame),
+        Err(LighterError::Protocol(_))
+    ));
+}
+
+#[test]
+fn rejects_an_acknowledgement_with_a_mismatched_type() {
+    let text = r#"{"type":"subscribed/trade","channel":"ticker:0","timestamp":1}"#;
+    assert!(matches!(
+        parse_frame(text),
+        Err(LighterError::Acknowledgement(_))
+    ));
+}
+
+#[test]
+fn parses_a_server_error_frame() {
+    match parse_frame(ERROR).unwrap() {
+        Frame::Error(frame) => {
+            assert_eq!(frame.code, Some(serde_json::json!(429)));
+            assert_eq!(frame.message, "subscription rejected");
+        }
+        other => panic!("expected server error, got {other:?}"),
+    }
+}
+
+#[test]
+fn exact_decimal_zero_removes_levels() {
+    let snapshot = order_book_frame(SNAPSHOT);
+    let mut delta = order_book_frame(DELTA);
+    delta.order_book.asks[0].size = "0.0000".to_string();
+    let mut book = OrderBook::default();
+    book.apply(&snapshot.channel, &snapshot.order_book).unwrap();
+    let before = book.level_count();
+    book.apply(&delta.channel, &delta.order_book).unwrap();
+    assert_eq!(book.level_count(), before);
+}
+
+#[test]
+fn preserves_nonzero_decimal_sizes_without_float_conversion() {
+    let mut snapshot = order_book_frame(SNAPSHOT);
+    snapshot.order_book.asks[0].size = "0.0000000000000000000000000001".to_string();
+    let mut book = OrderBook::default();
+    book.apply(&snapshot.channel, &snapshot.order_book).unwrap();
+    assert!(book.is_initialized());
+    assert_eq!(book.level_count(), 3);
+}
+
+#[test]
+fn rejects_unsupported_or_negative_decimal_syntax() {
+    for size in ["1e-30", "-1", "NaN", ".5", "5."] {
+        let mut snapshot = order_book_frame(SNAPSHOT);
+        snapshot.order_book.asks[0].size = size.to_string();
+        let mut book = OrderBook::default();
+        let err = book
+            .apply(&snapshot.channel, &snapshot.order_book)
+            .unwrap_err();
+        assert!(matches!(err, LighterError::Protocol(_)), "{size}");
+        assert!(!book.is_initialized());
+    }
+}
+
+#[test]
+fn rejects_invalid_order_book_status_and_nonce_ranges() {
+    let mut status = order_book_frame(SNAPSHOT);
+    status.order_book.code = 1;
+    let mut book = OrderBook::default();
+    assert!(matches!(
+        book.apply(&status.channel, &status.order_book),
+        Err(LighterError::Protocol(_))
+    ));
+
+    let mut nonce = order_book_frame(SNAPSHOT);
+    nonce.order_book.begin_nonce = nonce.order_book.nonce + 1;
+    assert!(matches!(
+        book.apply(&nonce.channel, &nonce.order_book),
+        Err(LighterError::Protocol(_))
     ));
 }
 
