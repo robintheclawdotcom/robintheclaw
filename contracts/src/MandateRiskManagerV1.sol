@@ -228,6 +228,11 @@ contract MandateRiskManagerV1 {
         emit ModeSet(mode_, msg.sender);
     }
 
+    function haltFromExecutor() external onlyExecutor {
+        mode = Mode.Halted;
+        emit ModeSet(Mode.Halted, msg.sender);
+    }
+
     function setGuardian(address guardian_) external onlyConfigAdmin {
         if (guardian_ == address(0)) revert InvalidAddress();
         if (guardian_ == configAdmin || guardian_ == treasury) revert InvalidConfiguration();

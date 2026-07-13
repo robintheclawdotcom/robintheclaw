@@ -23,10 +23,13 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
     AttestationAnchor public immutable attestationAnchor;
     address public immutable owner;
     address public agent;
+    bool public agentEnabled;
     bool public recoveryFinalized;
 
     event AgentSet(address indexed agent);
+    event AgentEnabled(address indexed owner, address indexed agent);
     event AgentRevoked(address indexed caller);
+    event EmergencyHalted(address indexed owner);
     event Deposited(address indexed token, uint256 amount);
     event SettlementWithdrawn(uint256 amount);
     event VaultRecoveryFinalized(address indexed owner);
@@ -47,6 +50,7 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
     error NotRegistry();
     error NotOwner();
     error NotAgent();
+    error AgentNotEnabled();
     error InvalidAddress();
     error InvalidAmount();
     error RecoveryRequiresHalt();
@@ -109,12 +113,30 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
                 || agent_ == registry.guardian()
         ) revert InvalidAddress();
         agent = agent_;
+        agentEnabled = false;
         emit AgentSet(agent_);
+    }
+
+    function enableAgent() external onlyOwner {
+        if (recoveryFinalized) revert RecoveryFinalized();
+        address agent_ = agent;
+        if (agent_ == address(0)) revert InvalidAddress();
+        agentEnabled = true;
+        emit AgentEnabled(owner, agent_);
     }
 
     function revokeAgent() external onlyOwner {
         agent = address(0);
+        agentEnabled = false;
         emit AgentRevoked(msg.sender);
+    }
+
+    function emergencyHalt() external onlyOwner {
+        riskManager.haltFromExecutor();
+        agent = address(0);
+        agentEnabled = false;
+        emit AgentRevoked(msg.sender);
+        emit EmergencyHalted(owner);
     }
 
     function deposit(uint256 amount) external onlyOwner nonReentrant {
@@ -160,6 +182,7 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
         if (recoveryFinalized) revert RecoveryFinalized();
         recoveryFinalized = true;
         agent = address(0);
+        agentEnabled = false;
         emit AgentRevoked(msg.sender);
         emit VaultRecoveryFinalized(owner);
     }
@@ -186,6 +209,7 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
         returns (uint256 amountOut)
     {
         if (msg.sender != agent) revert NotAgent();
+        if (!agentEnabled) revert AgentNotEnabled();
         if (recoveryFinalized) revert RecoveryFinalized();
         _checkSettlementCode();
         _checkGlobalMode(intent.side);
@@ -221,6 +245,7 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
 
     function anchorBatch(bytes32 root, uint64 sequence, uint64 tradeCount) external {
         if (msg.sender != agent) revert NotAgent();
+        if (!agentEnabled) revert AgentNotEnabled();
         attestationAnchor.anchor(root, sequence, tradeCount);
         emit BatchAnchored(root, sequence, tradeCount);
     }

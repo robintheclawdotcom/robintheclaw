@@ -271,8 +271,9 @@ contract MainnetExecutionRegistry is IMainnetExecutionRegistry {
                 || address(vault.settlementAsset()) != factoryPolicy.settlementAsset
                 || address(vault.riskManager()) != riskAddress
                 || address(vault.spotAdapter()) != adapterAddress || vault.agent() != address(0)
-                || risk.configAdmin() != address(this) || risk.guardian() != guardian
-                || risk.treasury() != owner || risk.executor() != vaultAddress
+                || vault.agentEnabled() || risk.configAdmin() != address(this)
+                || risk.guardian() != guardian || risk.treasury() != owner
+                || risk.executor() != vaultAddress
                 || address(risk.settlementAsset()) != factoryPolicy.settlementAsset
                 || risk.settlementAssetCodeHash() != factoryPolicy.settlementAssetCodeHash
                 || address(risk.sequencerFeed()) != factoryPolicy.sequencerFeed

@@ -130,6 +130,7 @@ contract RwaUserVaultFactoryV1Test is Test {
         assertEq(vault.owner(), owner);
         assertEq(address(vault.registry()), address(registry));
         assertEq(vault.agent(), address(0));
+        assertFalse(vault.agentEnabled());
         assertEq(risk.treasury(), owner);
         assertEq(risk.executor(), graph.vault);
         assertEq(risk.grossNotionalLimit(), 25e6);
@@ -176,6 +177,8 @@ contract RwaUserVaultFactoryV1Test is Test {
         registry.setVaultAgent(graph.vault, agent);
         registry.setVaultMode(graph.vault, IMainnetExecutionRegistry.Mode.Active);
         vm.stopPrank();
+        vm.prank(owner);
+        vault.enableAgent();
 
         ISpotExecution.SpotIntent memory intent = ISpotExecution.SpotIntent({
             id: keccak256("global-mode"),
@@ -198,6 +201,68 @@ contract RwaUserVaultFactoryV1Test is Test {
         vm.prank(agent);
         vm.expectRevert(RwaUserStrategyVaultV1.GlobalReduceOnly.selector);
         vault.executeSpot(intent);
+    }
+
+    function testTimelockAgentReplacementCannotBypassOwnerRevoke() public {
+        IRwaUserVaultFactoryV1.Graph memory graph = factory.deploy(owner);
+        RwaUserStrategyVaultV1 vault = RwaUserStrategyVaultV1(graph.vault);
+        address firstAgent = makeAddr("first-agent");
+        address replacement = makeAddr("replacement-agent");
+
+        vm.prank(address(admin));
+        registry.setVaultAgent(graph.vault, firstAgent);
+        assertFalse(vault.agentEnabled());
+        vm.prank(owner);
+        vault.enableAgent();
+        vm.prank(firstAgent);
+        vault.anchorBatch(keccak256("first"), 1, 1);
+
+        vm.prank(owner);
+        vault.revokeAgent();
+        vm.prank(address(admin));
+        registry.setVaultAgent(graph.vault, replacement);
+        assertEq(vault.agent(), replacement);
+        assertFalse(vault.agentEnabled());
+
+        vm.prank(replacement);
+        vm.expectRevert(RwaUserStrategyVaultV1.AgentNotEnabled.selector);
+        vault.executeSpot(_intent(keccak256("replacement-blocked")));
+
+        vm.prank(owner);
+        vault.enableAgent();
+        vm.prank(replacement);
+        vault.anchorBatch(keccak256("replacement"), 2, 1);
+        assertTrue(vault.agentEnabled());
+    }
+
+    function testOwnerEmergencyHaltAtomicallyRevokesExecution() public {
+        IRwaUserVaultFactoryV1.Graph memory graph = factory.deploy(owner);
+        RwaUserStrategyVaultV1 vault = RwaUserStrategyVaultV1(graph.vault);
+        MandateRiskManagerV1 risk = MandateRiskManagerV1(graph.riskManager);
+        address agent = makeAddr("agent");
+
+        vm.startPrank(address(admin));
+        registry.setVaultAgent(graph.vault, agent);
+        registry.setVaultMode(graph.vault, IMainnetExecutionRegistry.Mode.Active);
+        vm.stopPrank();
+        vm.prank(owner);
+        vault.enableAgent();
+
+        vm.expectRevert(RwaUserStrategyVaultV1.NotOwner.selector);
+        vault.emergencyHalt();
+        vm.prank(address(admin));
+        vm.expectRevert(MandateRiskManagerV1.NotExecutor.selector);
+        risk.haltFromExecutor();
+
+        vm.prank(owner);
+        vault.emergencyHalt();
+        assertEq(uint8(risk.mode()), uint8(MandateRiskManagerV1.Mode.Halted));
+        assertEq(vault.agent(), address(0));
+        assertFalse(vault.agentEnabled());
+
+        vm.prank(agent);
+        vm.expectRevert(RwaUserStrategyVaultV1.NotAgent.selector);
+        vault.anchorBatch(keccak256("blocked"), 1, 1);
     }
 
     function testOwnerCanLowerCapsHaltAndRevokeButCannotRaiseCaps() public {
@@ -229,6 +294,15 @@ contract RwaUserVaultFactoryV1Test is Test {
         vm.prank(owner);
         vm.expectRevert(MandateRiskManagerV1.InvalidModeTransition.selector);
         risk.restrictMode(MandateRiskManagerV1.Mode.Active);
+    }
+
+    function testOwnerCannotEnableMissingAgent() public {
+        IRwaUserVaultFactoryV1.Graph memory graph = factory.deploy(owner);
+        RwaUserStrategyVaultV1 vault = RwaUserStrategyVaultV1(graph.vault);
+
+        vm.prank(owner);
+        vm.expectRevert(RwaUserStrategyVaultV1.InvalidAddress.selector);
+        vault.enableAgent();
     }
 
     function testFuzzOwnerCanLowerCapsWithinFixedCeilings(uint32 gross, uint32 turnover) public {
@@ -289,6 +363,10 @@ contract RwaUserVaultFactoryV1Test is Test {
 
         vm.prank(address(admin));
         registry.setVaultMode(graph.vault, IMainnetExecutionRegistry.Mode.Active);
+        vm.prank(address(admin));
+        registry.setVaultAgent(graph.vault, makeAddr("recovery-agent"));
+        vm.prank(owner);
+        vault.enableAgent();
         ISpotExecution.SpotIntent memory intent = ISpotExecution.SpotIntent({
             id: keccak256("pending"),
             stockToken: AAPL,
@@ -312,6 +390,8 @@ contract RwaUserVaultFactoryV1Test is Test {
         CanonicalUsdgMock(USDG).mint(graph.vault, 1e6);
         vm.prank(owner);
         vault.finalizeRecovery();
+        assertEq(vault.agent(), address(0));
+        assertFalse(vault.agentEnabled());
         vm.prank(owner);
         vault.recover(CanonicalUsdgMock(USDG), 1e6);
         assertEq(CanonicalUsdgMock(USDG).balanceOf(owner), 1e6);
@@ -428,5 +508,19 @@ contract RwaUserVaultFactoryV1Test is Test {
         sequencer.report(1, true, uint64(block.timestamp - 1 hours));
         vm.prank(publisher2);
         sequencer.report(1, true, uint64(block.timestamp - 1 hours));
+    }
+
+    function _intent(bytes32 id) private view returns (ISpotExecution.SpotIntent memory) {
+        return ISpotExecution.SpotIntent({
+            id: id,
+            stockToken: AAPL,
+            side: ISpotExecution.Side.BuySpot,
+            amountIn: 1e6,
+            minAmountOut: 1e16,
+            expectedUIMultiplier: 1e18,
+            minOracleRoundId: 1,
+            deadline: uint64(block.timestamp + 1 minutes),
+            configVersion: 1
+        });
     }
 }
