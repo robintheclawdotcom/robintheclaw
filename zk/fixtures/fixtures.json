@@ -1,0 +1,18 @@
+{
+  "positive.json": {
+    "agentId": "0xabcd",
+    "thresholdBps": "100",
+    "tradeCount": 3,
+    "netReturnBps": "150",
+    "commitment": "0x04100d11c9c3baa9fa2815c0a0e48aaeefc840fa308bacba3a40354d42ad1340",
+    "blinding": "0x1234"
+  },
+  "negative.json": {
+    "agentId": "0xabcd",
+    "thresholdBps": "-100",
+    "tradeCount": 2,
+    "netReturnBps": "-40",
+    "commitment": "0x2ff012ea397786cf652a7b010699353218f4f6d4f56036bb611d3ed027175f84",
+    "blinding": "0x1234"
+  }
+}

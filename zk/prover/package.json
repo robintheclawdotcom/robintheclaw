@@ -1,0 +1,16 @@
+{
+  "name": "@robin/pnl-prover",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Generate zero-knowledge proofs that an agent's net return cleared a threshold, without revealing trades.",
+  "bin": {
+    "prove-pnl": "src/prove.mjs"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

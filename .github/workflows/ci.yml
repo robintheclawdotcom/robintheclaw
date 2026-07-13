@@ -205,3 +205,37 @@ jobs:
             sbom.spdx.json
           if-no-files-found: error
           retention-days: 90
+
+  zk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install Noir
+        run: |
+          curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash
+          echo "$HOME/.nargo/bin" >> "$GITHUB_PATH"
+      - name: Select Noir version
+        run: noirup --version 1.0.0-beta.22
+      - name: Install Barretenberg
+        run: |
+          curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/master/barretenberg/bbup/install | bash
+          echo "$HOME/.bb" >> "$GITHUB_PATH"
+      - name: Select bb version
+        run: bbup --version 2.0.0 || bbup
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Circuit tests
+        working-directory: zk/circuits/proof-of-pnl
+        run: nargo test
+      - name: Prover encoding tests
+        working-directory: zk/prover
+        run: node --test
+      - name: Install forge-std
+        working-directory: zk/contracts
+        run: forge install foundry-rs/forge-std --no-git
+      - name: On-chain verifier tests
+        working-directory: zk/contracts
+        run: forge test
+

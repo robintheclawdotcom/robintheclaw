@@ -1,0 +1,10 @@
+# noir / bb build output
+circuits/*/target/
+# foundry build output
+contracts/out/
+contracts/cache/
+# prover run output
+prover/proof-output/
+proof-output/
+node_modules/
+lib/
