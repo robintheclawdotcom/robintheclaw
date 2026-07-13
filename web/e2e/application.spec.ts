@@ -21,7 +21,7 @@ test("multi-wallet funding preference never changes the vault owner", async ({ p
   await expect(page.getByText("Vault owner", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Funding wallet" })).toBeDisabled();
   await page.getByRole("button", { name: "Link wallet" }).click();
-  await expect(page.getByText("WalletConnect", { exact: true })).toBeVisible();
+  await expect(page.getByText("Phantom", { exact: true })).toBeVisible();
   await expect(page.getByText("Vault ownership stays stable")).toBeVisible();
   await expect(page.getByText("0x1111…1111").last()).toBeVisible();
 });

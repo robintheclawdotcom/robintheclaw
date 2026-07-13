@@ -69,8 +69,8 @@ main { min-height: 100vh; background: var(--bg); padding: clamp(18px, 2vw, 32px)
 .drawer-header button { width: 32px; height: 32px; border: 1px solid var(--border-strong); border-radius: 6px; color: var(--text-secondary); background: transparent; font-size: 22px; line-height: 1; }
 .drawer-links { display: grid; gap: 6px; padding: 18px 0; }
 .drawer-links button, .drawer-links a, .drawer-socials a { display: flex; align-items: center; width: 100%; min-height: 42px; padding: 10px 12px; border: 1px solid transparent; border-radius: 7px; color: var(--text-secondary); background: transparent; text-align: left; text-decoration: none; }
-.drawer-links button:hover, .drawer-links button.active { border-color: var(--border-strong); background: var(--panel); color: var(--text); }
-.drawer-links button.active::before { width: 3px; height: 16px; margin-right: 9px; border-radius: 999px; background: var(--accent); content: ""; }
+.drawer-links button:hover, .drawer-links button.active, .drawer-links a:hover, .drawer-links a.active { border-color: var(--border-strong); background: var(--panel); color: var(--text); }
+.drawer-links button.active::before, .drawer-links a.active::before { width: 3px; height: 16px; margin-right: 9px; border-radius: 999px; background: var(--accent); content: ""; }
 .drawer-links .drawer-theme { gap: 9px; border-color: var(--border); color: var(--muted); }
 .drawer-links .drawer-app-link { justify-content: center; color: #1f1e1d; background: var(--accent); font-weight: 700; }
 .drawer-docs { margin-top: 2px; padding-top: 18px; border-top: 1px solid var(--border); }
@@ -122,6 +122,8 @@ small { color: var(--muted); font-size: 12px; line-height: 1.6; }
 .docs-cta-actions { display: flex; align-items: center; gap: 10px; }
 .docs-cta-actions a { border-radius: 7px; padding: 9px 14px; color: #1f1e1d; background: var(--accent); font-weight: 700; font-size: 12px; text-decoration: none; }
 .docs-cta-actions button { color: var(--text-secondary); background: transparent; border: 1px solid var(--border-strong); }
+.docs-cta-actions .docs-link { border: 1px solid var(--border-strong); color: var(--text-secondary); background: transparent; }
+.docs-cta-actions .docs-link:hover { color: var(--text); background: var(--panel); }
 .docs-view { display: flex; align-items: flex-start; gap: 34px; max-width: 920px; margin: 0 auto; }
 .docs-view aside { width: 230px; flex: none; }
 .tree-root { margin-bottom: 12px; color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }

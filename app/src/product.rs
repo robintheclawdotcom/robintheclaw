@@ -173,7 +173,6 @@ pub struct DashboardSnapshot {
     pub environment: String,
     pub as_of: DateTime<Utc>,
     pub infrastructure_ready: bool,
-    pub policy_id: Option<String>,
     pub total_value: Amount,
     pub available_balance: Amount,
     pub deployed_capital: Amount,
@@ -200,7 +199,6 @@ pub struct TransactionPlan {
     pub chain_id: u64,
     pub smart_account: String,
     pub expected_vault: String,
-    pub policy_id: String,
     pub calls: Vec<TransactionCall>,
 }
 

@@ -30,6 +30,8 @@ of unobserved market data.
 - Private worker-only R2 credentials and a no-public-IP research database.
 - Runtime contains no signer, wallet material, or venue write client.
 - ES256 validation on every authenticated API request and an HTTP-only same-origin session cookie.
+- Server-side Alchemy credential injection with an authenticated method allowlist and call-plan checks.
+- Same-origin enforcement, bounded request bodies, per-session throttling, CSP, HSTS, and structured error events.
 - Privy server-side wallet resolution, cross-user address uniqueness, and no automatic account merge.
 - Stable smart-account vault ownership independent of the active funding wallet.
 - Idempotent receipt verification against the exact factory event and deployed contract state.

@@ -20,10 +20,11 @@
     "@solana-program/token": "0.14.0",
     "@solana/kit": "6.10.0",
     "@tanstack/react-query": "5.101.2",
+    "jose": "6.2.0",
     "next": "16.2.10",
     "react": "19.2.7",
     "react-dom": "19.2.7",
-    "viem": "2.52.0"
+    "viem": "2.55.1"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",
@@ -36,6 +37,10 @@
     "vitest": "4.1.10"
   },
   "overrides": {
-    "postcss": "8.5.10"
+    "postcss": "8.5.10",
+    "@privy-io/react-auth": {
+      "viem": "2.55.1"
+    },
+    "ws": "8.21.0"
   }
 }

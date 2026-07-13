@@ -52,7 +52,6 @@ type SmartWalletContextValue = {
   pending: boolean;
   executeCalls: (
     calls: TransactionCall[],
-    policyId: string,
     signerAddress?: string,
     onSubmitted?: (callId: Hex) => void,
   ) => Promise<Hex>;
@@ -82,13 +81,12 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
           loginMethods: ["email", "passkey", "google", "apple", "wallet"],
           supportedChains: [robinhoodTestnet],
           defaultChain: robinhoodTestnet,
-          walletConnectCloudProjectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID,
           embeddedWallets: { ethereum: { createOnLogin: "all-users" } },
           appearance: {
             theme: "dark",
             accentColor: "#ccff00",
             logo: "/brand/icon-192.png",
-            walletList: ["detected_wallets", "metamask", "phantom", "wallet_connect"],
+            walletList: ["detected_wallets", "metamask", "phantom"],
           },
         }}
       >
@@ -141,7 +139,6 @@ function LiveSession({ children }: { children: React.ReactNode }) {
 
   const executeCalls = useCallback(async (
     calls: TransactionCall[],
-    policyId: string,
     signerAddress?: string,
     onSubmitted?: (callId: Hex) => void,
   ) => {
@@ -149,16 +146,13 @@ function LiveSession({ children }: { children: React.ReactNode }) {
       ? wallets.find((candidate) => candidate.address.toLowerCase() === signerAddress.toLowerCase())
       : embeddedWallet;
     if (!wallet) throw new Error("The selected wallet is not connected in this browser.");
-    const apiKey = process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
-    if (!apiKey) throw new Error("Alchemy Wallet APIs are not configured.");
     setPending(true);
     try {
       const signer = await toViemAccount({ wallet });
       const client = createSmartWalletClient({
         signer,
         chain: robinhoodTestnet,
-        transport: alchemyWalletTransport({ apiKey }),
-        paymaster: { policyId },
+        transport: alchemyWalletTransport({ url: "/api/wallet" }),
       });
       const result = await client.sendCalls({
         calls: calls.map((call) => ({
@@ -224,7 +218,7 @@ function MockSession({ children }: { children: React.ReactNode }) {
     embeddedAddress: "0x1111111111111111111111111111111111111111",
     login: () => { window.localStorage.removeItem("robin:e2e-auth"); setAuthenticated(true); },
     logout: async () => { window.localStorage.setItem("robin:e2e-auth", "logged-out"); setAuthenticated(false); },
-    linkWallet: () => setAccounts((current) => current.some((wallet) => wallet.address === "0x3333333333333333333333333333333333333333") ? current : current.concat({ address: "0x3333333333333333333333333333333333333333", label: "WalletConnect", embedded: false })),
+    linkWallet: () => setAccounts((current) => current.some((wallet) => wallet.address === "0x3333333333333333333333333333333333333333") ? current : current.concat({ address: "0x3333333333333333333333333333333333333333", label: "Phantom", embedded: false })),
     unlinkWallet: async (address) => setAccounts((current) => current.filter((wallet) => wallet.address.toLowerCase() !== address.toLowerCase())),
     linkEmail: () => undefined,
     linkPasskey: () => undefined,
@@ -232,7 +226,7 @@ function MockSession({ children }: { children: React.ReactNode }) {
   }), [accounts, authenticated]);
   const smartWallet = useMemo<SmartWalletContextValue>(() => ({
     pending: false,
-    executeCalls: async (_calls, _policyId, _signerAddress, onSubmitted) => {
+    executeCalls: async (_calls, _signerAddress, onSubmitted) => {
       const callId = `0x${"ab".repeat(32)}` as Hex;
       onSubmitted?.(callId);
       return callId;

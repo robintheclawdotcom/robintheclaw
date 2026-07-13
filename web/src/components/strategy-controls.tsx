@@ -14,8 +14,8 @@ export function MandateButton({ dashboard }: { dashboard: DashboardSnapshot }) {
   const vault = dashboard.vault;
   const mutation = useMutation({
     mutationFn: async () => {
-      if (!vault || !dashboard.policyId) throw new Error("Strategy controls are not configured.");
-      return smartWallet.executeCalls([mandateCall(vault.record.guardAddress, !vault.halted)], dashboard.policyId);
+      if (!vault) throw new Error("Strategy controls are not configured.");
+      return smartWallet.executeCalls([mandateCall(vault.record.guardAddress, !vault.halted)]);
     },
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
   });
@@ -39,12 +39,12 @@ export function WithdrawForm({ dashboard }: { dashboard: DashboardSnapshot }) {
   const vault = dashboard.vault;
   const mutation = useMutation({
     mutationFn: async () => {
-      if (!vault || !dashboard.policyId || !auth.embeddedAddress) throw new Error("Withdrawal is not available.");
+      if (!vault || !auth.embeddedAddress) throw new Error("Withdrawal is not available.");
       const raw = parseTokenAmount(amount, vault.balance.decimals);
       if (raw > BigInt(vault.balance.raw)) throw new Error("Amount exceeds the vault balance.");
       return smartWallet.executeCalls([
         withdrawalCall(vault.record.vaultAddress, auth.embeddedAddress, raw),
-      ], dashboard.policyId);
+      ]);
     },
     onSuccess: () => {
       setAmount("");
@@ -82,11 +82,10 @@ export function AddFundsForm({ dashboard }: { dashboard: DashboardSnapshot }) {
 
   const mutation = useMutation({
     mutationFn: async () => {
-      if (!vault || !dashboard.policyId || !wallet) throw new Error("Choose a connected funding wallet.");
+      if (!vault || !wallet) throw new Error("Choose a connected funding wallet.");
       const raw = parseTokenAmount(amount, vault.balance.decimals);
       return smartWallet.executeCalls(
         depositCalls(vault.record.assetAddress, vault.record.vaultAddress, raw),
-        dashboard.policyId,
         wallet,
       );
     },

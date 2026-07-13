@@ -62,7 +62,7 @@ export default function OnboardingPage() {
       setPhase("preparing");
       const plan = await api.prepareVault();
       setPhase("signing");
-      const callId = await smartWallet.executeCalls(plan.calls, plan.policyId, undefined, (submittedId) => {
+      const callId = await smartWallet.executeCalls(plan.calls, undefined, (submittedId) => {
         window.localStorage.setItem(PENDING_KEY, submittedId);
         setPhase("confirming");
       });
@@ -127,7 +127,7 @@ export default function OnboardingPage() {
           {recoveryReady ? <p>Email or passkey recovery is connected.</p> : <><p>Add a durable way to recover your account before funding the vault.</p><div className="button-row"><button className="button button-secondary" onClick={auth.linkEmail}>Add email</button><button className="button button-secondary" onClick={auth.linkPasskey}>Add passkey</button><button className="button button-quiet" disabled={sync.isPending} onClick={() => sync.mutate()}>I’ve added it</button></div></>}
         </Step>
         <Step number="3" title="Linked wallets" complete={me.wallets.length > 0} optional>
-          <p>{me.wallets.length} wallet{me.wallets.length === 1 ? "" : "s"} linked. Add MetaMask, Phantom, Robinhood Wallet, or WalletConnect now or later.</p>
+          <p>{me.wallets.length} wallet{me.wallets.length === 1 ? "" : "s"} linked. Add MetaMask, Phantom, or another detected browser wallet now or later.</p>
           <div className="button-row"><button className="button button-secondary" onClick={auth.linkWallet}>Link wallet</button><button className="button button-quiet" disabled={sync.isPending} onClick={() => sync.mutate()}>Refresh</button></div>
         </Step>
         <Step number="4" title="Personal vault" complete={false}>
