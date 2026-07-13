@@ -375,7 +375,7 @@ export default function Home() {
 
               <section className="docs-cta">
                 <div><h2>Explore the methodology</h2><p>Research standards, execution controls, and the path from market evidence to live capital.</p></div>
-                <button onClick={openDocs}>robin docs →</button>
+                <button onClick={openDocs}>docs →</button>
               </section>
             </div>
           ) : (
