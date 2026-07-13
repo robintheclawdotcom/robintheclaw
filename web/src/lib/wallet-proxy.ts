@@ -1,5 +1,5 @@
 import { decodeFunctionData, getAddress, parseAbi, type Address, type Hex } from "viem";
-import { robinhoodMainnetChainId } from "./chain";
+import { robinhoodAppChainId } from "./chain";
 
 const controlAbi = parseAbi([
   "function approve(address spender,uint256 amount) returns (bool)",
@@ -82,13 +82,13 @@ export async function authorizePreparedCalls(request: WalletRpcRequest, token: s
   const input = request.params[0] as Record<string, unknown> | undefined;
   const from = address(input?.from);
   if (!from || !isRobinhoodChain(input?.chainId)) {
-    throw new WalletProxyError(400, "invalid_call", "The wallet request must target Robinhood Chain mainnet.");
+    throw new WalletProxyError(400, "invalid_call", "The wallet request must target the Robinhood application network.");
   }
   const calls = rpcCalls(input?.calls);
   const dashboard = await appRequest<Dashboard>("/api/v1/dashboard", "GET", token, requestId);
   if (!dashboard.vault) {
     const plan = await appRequest<TransactionPlan>("/api/v1/vaults/prepare", "POST", token, requestId);
-    if (plan.chainId !== robinhoodMainnetChainId || !sameAddress(plan.smartAccount, from) || !sameCalls(calls, plan.calls)) {
+    if (plan.chainId !== robinhoodAppChainId || !sameAddress(plan.smartAccount, from) || !sameCalls(calls, plan.calls)) {
       throw new WalletProxyError(403, "call_not_authorized", "The onboarding batch does not match the verified vault plan.");
     }
     return;
@@ -209,8 +209,8 @@ function sameCalls(actual: RpcCall[], expected: TransactionPlan["calls"]) {
 function isRobinhoodChain(value: unknown) {
   try {
     return typeof value === "string"
-      ? Number(BigInt(value)) === robinhoodMainnetChainId
-      : value === robinhoodMainnetChainId;
+      ? Number(BigInt(value)) === robinhoodAppChainId
+      : value === robinhoodAppChainId;
   } catch {
     return false;
   }

@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ErrorNotice, LoadingPanel, PageHeader } from "../../../components/app-ui";
 import { useAppApi, useRobinAuth, useSmartWallet } from "../../../components/app-providers";
-import { robinhoodMainnetChainId } from "../../../lib/chain";
+import { robinhoodAppChainId } from "../../../lib/chain";
 import { formatAddress } from "../../../lib/format";
 
 const PENDING_KEY = "robin:onboarding-call-id";
@@ -25,6 +25,10 @@ export default function OnboardingPage() {
   const query = useQuery({ queryKey: ["me"], queryFn: () => api.syncWallets() });
   const sync = useMutation({
     mutationFn: () => api.syncWallets(),
+    onSuccess: (data) => queryClient.setQueryData(["me"], data),
+  });
+  const linkWallet = useMutation({
+    mutationFn: async () => { await auth.linkWallet(); return api.syncWallets(); },
     onSuccess: (data) => queryClient.setQueryData(["me"], data),
   });
 
@@ -62,8 +66,8 @@ export default function OnboardingPage() {
     try {
       setPhase("preparing");
       const plan = await api.prepareVault();
-      if (plan.chainId !== robinhoodMainnetChainId) {
-        throw new Error("The vault plan does not target Robinhood Chain mainnet.");
+      if (plan.chainId !== robinhoodAppChainId) {
+        throw new Error("The vault plan targets the wrong network.");
       }
       setPhase("signing");
       const callId = await smartWallet.executeCalls(plan.calls, undefined, (submittedId) => {
@@ -114,7 +118,7 @@ export default function OnboardingPage() {
       <section className="onboarding-complete">
         <span className="success-mark">✓</span><span className="eyebrow">Setup complete</span>
         <h1>Strategy vault active</h1>
-        <p>Your vault is funded and ready for strategy control on Robinhood Chain mainnet.</p>
+        <p>Your vault is funded and ready for strategy control.</p>
         <Link className="button button-primary" href="/app">Open dashboard</Link>
       </section>
     );
@@ -132,10 +136,10 @@ export default function OnboardingPage() {
         </Step>
         <Step number="3" title="Funding wallets" complete={me.wallets.length > 0} optional>
           <p>{me.wallets.length} wallet{me.wallets.length === 1 ? "" : "s"} linked. Connect a supported wallet now or after setup.</p>
-          <div className="button-row"><button className="button button-secondary" onClick={auth.linkWallet}>Link wallet</button><button className="button button-quiet" disabled={sync.isPending} onClick={() => sync.mutate()}>Refresh</button></div>
+          <div className="button-row"><button className="button button-secondary" disabled={linkWallet.isPending} onClick={() => linkWallet.mutate()}>{linkWallet.isPending ? "Linking…" : "Link wallet"}</button><button className="button button-quiet" disabled={sync.isPending} onClick={() => sync.mutate()}>Refresh</button></div>
         </Step>
         <Step number="4" title="Personal vault" complete={false}>
-          <p>A sponsored batch creates your mainnet vault and funds its initial balance.</p>
+          <p>A sponsored batch creates your vault and funds its initial test balance.</p>
         </Step>
       </ol>
       {phase === "delayed" ? (
@@ -150,6 +154,7 @@ export default function OnboardingPage() {
         </section>
       )}
       {error && phase !== "delayed" && <ErrorNotice error={error} />}
+      {linkWallet.error && <ErrorNotice error={linkWallet.error} />}
     </>
   );
 }

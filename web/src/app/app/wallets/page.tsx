@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ErrorNotice, LoadingPanel, PageHeader } from "../../../components/app-ui";
 import { useAppApi, useRobinAuth } from "../../../components/app-providers";
+import { AppApiError } from "../../../lib/api";
 import { formatAddress, formatDate } from "../../../lib/format";
 
 export default function WalletsPage() {
@@ -11,12 +12,22 @@ export default function WalletsPage() {
   const auth = useRobinAuth();
   const queryClient = useQueryClient();
   const [conflict, setConflict] = useState<Error>();
+  const [linkError, setLinkError] = useState<unknown>();
   const accountCount = useRef(auth.accounts.length);
   const query = useQuery({ queryKey: ["me"], queryFn: () => api.me() });
   const sync = useMutation({
     mutationFn: () => api.syncWallets(),
     onSuccess: (data) => { setConflict(undefined); queryClient.setQueryData(["me"], data); void api.metric("wallet_sync", undefined, "success").catch(() => undefined); },
     onError: (error) => { setConflict(error); void api.metric("wallet_sync", undefined, "conflict").catch(() => undefined); },
+  });
+  const link = useMutation({
+    mutationFn: async () => { await auth.linkWallet(); return api.syncWallets(); },
+    onSuccess: (data) => { setConflict(undefined); setLinkError(undefined); queryClient.setQueryData(["me"], data); void api.metric("wallet_link", undefined, "success").catch(() => undefined); },
+    onError: (error) => {
+      setLinkError(error);
+      setConflict(error instanceof AppApiError && error.status === 409 ? error : undefined);
+      void api.metric("wallet_link", undefined, "failed").catch(() => undefined);
+    },
   });
   const preferences = useMutation({
     mutationFn: (address: string) => {
@@ -46,7 +57,7 @@ export default function WalletsPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Capital" title="Wallets" description="Manage verified funding sources and portfolio connections. Vault ownership remains unchanged." action={<button className="button button-primary" onClick={auth.linkWallet}>Link wallet</button>} />
+      <PageHeader eyebrow="Capital" title="Wallets" description="Manage verified funding sources and portfolio connections. Vault ownership remains unchanged." action={<button className="button button-primary" disabled={link.isPending} onClick={() => link.mutate()}>{link.isPending ? "Linking…" : "Link wallet"}</button>} />
       {conflict && (
         <div className="notice notice-error account-conflict" role="alert"><div><strong>Wallet already linked</strong><p>This address is linked to another Robin account. Sign in to that account to manage it.</p></div><button className="button button-secondary" onClick={() => void auth.logout()}>Sign in to other account</button></div>
       )}
@@ -69,6 +80,7 @@ export default function WalletsPage() {
         </div>
       </section>
       {(sync.error && !conflict) && <ErrorNotice error={sync.error} />}
+      {(linkError && !conflict) && <ErrorNotice error={linkError} />}
       {preferences.error && <ErrorNotice error={preferences.error} />}
       {unlink.error && <ErrorNotice error={unlink.error} />}
       <section className="panel ownership-note"><span className="lock-mark">⌁</span><div><h2>Vault ownership</h2><p>The smart account remains the sole vault owner. Funding-wallet changes cannot rotate ownership or alter withdrawal authorization.</p><strong>{formatAddress(me.smartAccount?.address)}</strong></div></section>

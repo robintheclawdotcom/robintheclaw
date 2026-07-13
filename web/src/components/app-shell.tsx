@@ -40,8 +40,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <main className="app-auth">
         <AuthPanel
           eyebrow="Strategy operations"
-          title="Autonomous strategy. Direct control."
-          body="Monitor capital, exposure, execution, and performance. Sign in with email, passkey, or a connected wallet."
+          title="Run Robin from one account."
+          body="Sign in to monitor the strategy, manage linked wallets, and activate your personal vault."
           action={<button className="button button-primary" onClick={auth.login}>Sign in</button>}
         />
       </main>
@@ -66,7 +66,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           })}
         </nav>
         <div className="app-sidebar-footer">
-          <span className="network-status"><i /> Robinhood mainnet</span>
+          <span className="network-status"><i /> Robinhood testnet</span>
           <Link href="/">Public site ↗</Link>
         </div>
       </aside>
@@ -105,7 +105,7 @@ function AuthPanel({
       <p>{body}</p>
       {action}
       <div className="auth-benefits" aria-label="Account benefits">
-        <span>Unified capital</span><span>Sponsored mainnet gas</span><span>Self-custodied vault</span>
+        <span>Email or wallet sign-in</span><span>Gasless activation</span><span>Self-custodied vault</span>
       </div>
     </section>
   );
