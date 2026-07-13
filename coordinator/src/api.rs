@@ -1,6 +1,7 @@
 use crate::{
     store::{
-        ExitRequest, NewAccountSnapshot, NewMarketQuote, NewVenueEvent, RecoveryRequest, StoreError,
+        AccountCommandRequest, AccountCommandStatusRequest, ExitRequest, NewAccountSnapshot,
+        NewMarketQuote, NewVenueEvent, RecoveryRequest, StoreError,
     },
     AppState,
 };
@@ -27,9 +28,84 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/v1/recoveries", post(request_recovery))
         .route("/v1/venue-events", post(record_venue_event))
         .route("/v1/account-snapshots", post(record_account_snapshot))
+        .route("/v1/account-commands", post(submit_account_command))
+        .route("/v1/account-command-status", post(account_command_status))
         .route("/v1/market-quotes", post(record_market_quote))
         .layer(axum::extract::DefaultBodyLimit::max(64 << 10))
         .with_state(state)
+}
+
+async fn submit_account_command(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err((status, message)) = authorize(
+        &state,
+        AuthScope::AccountCommand,
+        "/v1/account-commands",
+        &headers,
+        &body,
+    )
+    .await
+    {
+        return error(status, message);
+    }
+    let Some(store) = &state.store else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled");
+    };
+    let request: AccountCommandRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid request"),
+    };
+    let now_ms = match current_time_ms() {
+        Ok(value) => value,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "clock unavailable"),
+    };
+    match store.submit_account_command(&request, now_ms).await {
+        Ok(response) => {
+            let status = if response.status == "completed" {
+                StatusCode::OK
+            } else {
+                StatusCode::ACCEPTED
+            };
+            (status, Json(serde_json::json!(response))).into_response()
+        }
+        Err(error) => store_error_response(error),
+    }
+}
+
+async fn account_command_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err((status, message)) = authorize(
+        &state,
+        AuthScope::AccountCommand,
+        "/v1/account-command-status",
+        &headers,
+        &body,
+    )
+    .await
+    {
+        return error(status, message);
+    }
+    let Some(store) = &state.store else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled");
+    };
+    let request: AccountCommandStatusRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid request"),
+    };
+    let now_ms = match current_time_ms() {
+        Ok(value) => value,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "clock unavailable"),
+    };
+    match store.account_command_status(&request, now_ms).await {
+        Ok(response) => (StatusCode::OK, Json(serde_json::json!(response))).into_response(),
+        Err(error) => store_error_response(error),
+    }
 }
 
 async fn record_account_snapshot(
@@ -309,6 +385,7 @@ enum AuthScope {
     VenueEvent,
     AccountSnapshot,
     MarketQuote,
+    AccountCommand,
 }
 
 impl AuthScope {
@@ -320,6 +397,7 @@ impl AuthScope {
             Self::VenueEvent => "venue_event",
             Self::AccountSnapshot => "account_snapshot",
             Self::MarketQuote => "market_quote",
+            Self::AccountCommand => "account_command",
         }
     }
 }
@@ -357,6 +435,10 @@ async fn authorize(
         AuthScope::MarketQuote => (
             state.config.market_hmac_key.as_ref(),
             state.config.market_caller_id.as_deref(),
+        ),
+        AuthScope::AccountCommand => (
+            state.config.control_hmac_key.as_ref(),
+            state.config.control_caller_id.as_deref(),
         ),
     };
     let (Some(key), Some(caller)) = (key, caller) else {
@@ -467,6 +549,7 @@ fn store_error_response(error: StoreError) -> axum::response::Response {
         StoreError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
         StoreError::InvalidAction | StoreError::InvalidIntent(_) => StatusCode::BAD_REQUEST,
         StoreError::CoordinatorHalted => StatusCode::SERVICE_UNAVAILABLE,
+        StoreError::AccountCommandBlocked => StatusCode::CONFLICT,
         _ => StatusCode::CONFLICT,
     };
     error_response(status, &error.to_string())

@@ -18,6 +18,8 @@ fn disabled_config() -> Config {
         account_caller_id: None,
         market_hmac_key: None,
         market_caller_id: None,
+        control_hmac_key: None,
+        control_caller_id: None,
         lighter_signer_url: None,
         robinhood_signer_url: None,
         signer_caller_id: None,

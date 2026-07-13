@@ -6,6 +6,7 @@ use research::PromotionEvidence;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use sha3::Keccak256;
 use sqlx::{postgres::PgPoolOptions, types::Json, PgPool, Postgres, Transaction};
 use std::time::Duration;
 use thiserror::Error;
@@ -13,6 +14,7 @@ use uuid::Uuid;
 
 const MAX_EXIT_SUBMISSION_WINDOW_MS: u64 = 15 * 60 * 1_000;
 const MAX_EXIT_RECONCILIATION_WINDOW_MS: u64 = 24 * 60 * 60 * 1_000;
+const ROBINHOOD_CHAIN_ID: u64 = 4663;
 
 #[derive(Clone)]
 pub struct Store {
@@ -187,6 +189,8 @@ struct LighterAccountSnapshot {
     no_unknown_positions: bool,
     collateral_ready: bool,
     maintenance_margin_ratio_micros: u64,
+    #[serde(default)]
+    flat: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -197,6 +201,40 @@ struct RobinhoodAccountSnapshot {
     funding_ready: bool,
     wiring_verified: bool,
     finality_healthy: bool,
+    #[serde(default)]
+    flat: Option<bool>,
+    #[serde(default)]
+    owner_address: Option<String>,
+    #[serde(default)]
+    agent_enabled: Option<bool>,
+    #[serde(default)]
+    risk_mode: Option<String>,
+    #[serde(default)]
+    settlement_balance_raw: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ExecutionAccountAdmission {
+    agent_id: String,
+    strategy_version: String,
+    risk_version: String,
+    status: String,
+    lighter_account_index: Option<i64>,
+    lighter_api_key_index: Option<i16>,
+    robinhood_vault: Option<String>,
+    robinhood_signer: Option<String>,
+    account_mode: String,
+    account_manifest_sha256: Option<String>,
+    strategy_manifest_sha256: Option<String>,
+    strategy_mode: String,
+    owner_address: Option<String>,
+    venue_approved: bool,
+    oracle_healthy: bool,
+    sequencer_healthy: bool,
+    reconciliation_ready: bool,
+    exit_authority_ready: bool,
+    alerting_ready: bool,
+    safe_rotation_ready: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +275,44 @@ pub struct RecoveryRequest {
     pub intent_id: String,
     pub requested_at_ms: u64,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountCommandRequest {
+    pub command_id: String,
+    pub execution_account_id: String,
+    pub agent_id: String,
+    pub command: String,
+    pub requested_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountCommandStatusRequest {
+    pub command_id: String,
+    pub execution_account_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnerAction {
+    pub chain_id: u64,
+    pub from: String,
+    pub to: String,
+    pub data: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountCommandResponse {
+    pub command_id: String,
+    pub execution_account_id: String,
+    pub command: String,
+    pub status: String,
+    pub control_mode: String,
+    pub reconciled_flat: bool,
+    pub evidence_sha256: Option<String>,
+    pub owner_actions: Vec<OwnerAction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,6 +459,10 @@ pub enum StoreError {
     DailyTurnoverExceeded,
     #[error("execution identity or active episode already exists")]
     Conflict,
+    #[error("account command identity conflicts with stored evidence")]
+    AccountCommandConflict,
+    #[error("account command is blocked by execution controls or reconciliation")]
+    AccountCommandBlocked,
 }
 
 impl Store {
@@ -426,6 +506,9 @@ impl Store {
             "public.execution_account_readiness",
             "public.execution_account_snapshots",
             "public.execution_account_daily_turnover",
+            "public.execution_strategy_control",
+            "public.execution_account_commands",
+            "public.execution_account_command_events",
         ] {
             let exists = sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
                 .bind(table)
@@ -457,7 +540,13 @@ impl Store {
     ) -> Result<(), StoreError> {
         if !matches!(
             scope,
-            "intent" | "exit" | "recovery" | "venue_event" | "market_quote" | "account_snapshot"
+            "intent"
+                | "exit"
+                | "recovery"
+                | "venue_event"
+                | "market_quote"
+                | "account_snapshot"
+                | "account_command"
         ) || nonce.len() < 32
             || nonce.len() > 128
             || expires_at_unix <= 0
@@ -487,6 +576,191 @@ impl Store {
         Ok(())
     }
 
+    pub async fn submit_account_command(
+        &self,
+        request: &AccountCommandRequest,
+        now_ms: u64,
+    ) -> Result<AccountCommandResponse, StoreError> {
+        if !valid_control_id(&request.command_id)
+            || !valid_control_id(&request.execution_account_id)
+            || !valid_control_id(&request.agent_id)
+            || !matches!(
+                request.command.as_str(),
+                "launch" | "pause" | "resume" | "close" | "withdraw"
+            )
+            || request.requested_at_ms.abs_diff(now_ms) > 30_000
+        {
+            return Err(StoreError::InvalidAction);
+        }
+        let request_sha256 = account_command_digest(request);
+        let mut transaction = self.pool.begin().await?;
+        let existing = sqlx::query_as::<_, (String, String, String, String)>(
+            r#"
+            SELECT execution_account_id, agent_id, command, request_sha256
+            FROM execution_account_commands
+            WHERE command_id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(&request.command_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(existing) = existing {
+            if existing
+                != (
+                    request.execution_account_id.clone(),
+                    request.agent_id.clone(),
+                    request.command.clone(),
+                    request_sha256,
+                )
+            {
+                halt_account(
+                    &mut transaction,
+                    &existing.0,
+                    "account_command_identity_conflict",
+                )
+                .await?;
+                halt_account(
+                    &mut transaction,
+                    &request.execution_account_id,
+                    "account_command_identity_conflict",
+                )
+                .await?;
+                halt_execution(&mut transaction, "account_command_identity_conflict").await?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO execution_incidents
+                        (execution_account_id, severity, kind, details)
+                    VALUES ($1, 'critical', 'account_command_identity_conflict', $2)
+                    "#,
+                )
+                .bind(&request.execution_account_id)
+                .bind(Json(serde_json::json!({"command_id": request.command_id})))
+                .execute(&mut *transaction)
+                .await?;
+                transaction.commit().await?;
+                return Err(StoreError::AccountCommandConflict);
+            }
+            advance_account_command(&mut transaction, &request.command_id, now_ms).await?;
+            let response = load_account_command_response(
+                &mut transaction,
+                &request.command_id,
+                &request.execution_account_id,
+            )
+            .await?;
+            transaction.commit().await?;
+            return Ok(response);
+        }
+        let binding = sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT agent_id, status
+            FROM execution_accounts
+            WHERE execution_account_id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(&request.execution_account_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StoreError::ExecutionAccountUnavailable)?;
+        if binding.0 != request.agent_id
+            || !matches!(binding.1.as_str(), "active" | "blocked" | "closed")
+        {
+            return Err(StoreError::ExecutionAccountUnavailable);
+        }
+        let inflight = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM execution_account_commands
+                WHERE execution_account_id = $1
+                  AND status IN ('processing', 'reducing', 'awaiting_owner_signature')
+            )
+            "#,
+        )
+        .bind(&request.execution_account_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if inflight {
+            return Err(StoreError::Conflict);
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO execution_account_commands
+                (command_id, execution_account_id, agent_id, command, request_sha256, status)
+            VALUES ($1, $2, $3, $4, $5, 'processing')
+            "#,
+        )
+        .bind(&request.command_id)
+        .bind(&request.execution_account_id)
+        .bind(&request.agent_id)
+        .bind(&request.command)
+        .bind(&request_sha256)
+        .execute(&mut *transaction)
+        .await?;
+        append_account_command_event(
+            &mut transaction,
+            &request.command_id,
+            "processing",
+            serde_json::json!({"requested_at_ms": request.requested_at_ms}),
+        )
+        .await?;
+        advance_account_command(&mut transaction, &request.command_id, now_ms).await?;
+        let response = load_account_command_response(
+            &mut transaction,
+            &request.command_id,
+            &request.execution_account_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(response)
+    }
+
+    pub async fn account_command_status(
+        &self,
+        request: &AccountCommandStatusRequest,
+        now_ms: u64,
+    ) -> Result<AccountCommandResponse, StoreError> {
+        if !valid_control_id(&request.command_id)
+            || !valid_control_id(&request.execution_account_id)
+        {
+            return Err(StoreError::InvalidAction);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let stored_account_id = sqlx::query_scalar::<_, String>(
+            "SELECT execution_account_id FROM execution_account_commands WHERE command_id = $1 FOR UPDATE",
+        )
+        .bind(&request.command_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StoreError::InvalidAction)?;
+        if stored_account_id != request.execution_account_id {
+            halt_account(
+                &mut transaction,
+                &stored_account_id,
+                "account_command_status_identity_conflict",
+            )
+            .await?;
+            halt_account(
+                &mut transaction,
+                &request.execution_account_id,
+                "account_command_status_identity_conflict",
+            )
+            .await?;
+            halt_execution(&mut transaction, "account_command_status_identity_conflict").await?;
+            transaction.commit().await?;
+            return Err(StoreError::AccountCommandConflict);
+        }
+        advance_account_command(&mut transaction, &request.command_id, now_ms).await?;
+        let response = load_account_command_response(
+            &mut transaction,
+            &request.command_id,
+            &request.execution_account_id,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(response)
+    }
+
     pub async fn record_account_snapshot(
         &self,
         snapshot: &NewAccountSnapshot,
@@ -508,7 +782,7 @@ impl Store {
                    TIMESTAMPTZ 'epoch' + $8 * interval '1 millisecond',
                    TIMESTAMPTZ 'epoch' + $9 * interval '1 millisecond'
             FROM execution_accounts
-            WHERE execution_account_id = $1 AND status IN ('active', 'blocked')
+            WHERE execution_account_id = $1 AND status IN ('active', 'blocked', 'closed')
             ON CONFLICT (execution_account_id, source, source_session, source_sequence)
                 DO NOTHING
             "#,
@@ -1501,6 +1775,13 @@ impl Store {
                       JOIN execution_account_control account_control USING (execution_account_id)
                       WHERE intent.id = execution_actions.intent_id
                         AND account.status = 'active' AND account_control.mode = 'ACTIVE'
+                        AND EXISTS (
+                          SELECT 1 FROM execution_strategy_control strategy_control
+                          WHERE strategy_control.strategy_version = account.strategy_version
+                            AND strategy_control.mode = 'ACTIVE'
+                            AND strategy_control.strategy_manifest_sha256
+                                = account.strategy_manifest_sha256
+                        )
                     )
                   )
                 ORDER BY available_at, created_at
@@ -1661,6 +1942,25 @@ impl Store {
         .fetch_one(&mut *transaction)
         .await?;
         if account_mode != "ACTIVE" || account_control_version != claimed_account_control_version {
+            transaction.commit().await?;
+            return Err(StoreError::CoordinatorHalted);
+        }
+        let strategy_active = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT strategy.mode = 'ACTIVE'
+                   AND strategy.strategy_manifest_sha256 = account.strategy_manifest_sha256
+                   AND account.strategy_manifest_sha256 IS NOT NULL
+            FROM execution_accounts account
+            JOIN execution_strategy_control strategy USING (strategy_version)
+            WHERE account.execution_account_id = $1
+            FOR SHARE OF account, strategy
+            "#,
+        )
+        .bind(&eligible.1)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .unwrap_or(false);
+        if !strategy_active {
             transaction.commit().await?;
             return Err(StoreError::CoordinatorHalted);
         }
@@ -3493,6 +3793,629 @@ async fn append_action_event(
     Ok(())
 }
 
+struct FlatEvidence {
+    digest: String,
+    robinhood: RobinhoodAccountSnapshot,
+}
+
+async fn advance_account_command(
+    transaction: &mut Transaction<'_, Postgres>,
+    command_id: &str,
+    now_ms: u64,
+) -> Result<(), StoreError> {
+    let (execution_account_id, command, status) = sqlx::query_as::<_, (String, String, String)>(
+        r#"
+        SELECT execution_account_id, command, status
+        FROM execution_account_commands
+        WHERE command_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(command_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StoreError::InvalidAction)?;
+    if matches!(status.as_str(), "completed" | "blocked") {
+        return Ok(());
+    }
+    match command.as_str() {
+        "launch" | "resume" => {
+            let evidence = activation_evidence(transaction, &execution_account_id, now_ms).await?;
+            sqlx::query(
+                r#"
+                UPDATE execution_account_control
+                SET mode = 'ACTIVE', reason = $2, version = version + 1, updated_at = now()
+                WHERE execution_account_id = $1 AND mode <> 'HALTED'
+                "#,
+            )
+            .bind(&execution_account_id)
+            .bind(format!("{command} command {command_id}"))
+            .execute(&mut **transaction)
+            .await?;
+            set_account_command_status(
+                transaction,
+                command_id,
+                "completed",
+                serde_json::json!({
+                    "control_mode": "ACTIVE",
+                    "reconciled_flat": true,
+                    "evidence_sha256": evidence.digest,
+                    "owner_actions": [],
+                }),
+            )
+            .await?;
+        }
+        "pause" | "close" => {
+            restrict_account(transaction, &execution_account_id, command_id, &command).await?;
+            if !request_account_unwind(transaction, &execution_account_id, command_id, now_ms)
+                .await?
+            {
+                let blocked = sqlx::query_scalar::<_, bool>(
+                    "SELECT status = 'blocked' FROM execution_account_commands WHERE command_id = $1",
+                )
+                .bind(command_id)
+                .fetch_one(&mut **transaction)
+                .await?;
+                if blocked {
+                    return Ok(());
+                }
+                set_account_command_status(
+                    transaction,
+                    command_id,
+                    "reducing",
+                    serde_json::json!({
+                        "control_mode": "REDUCE_ONLY",
+                        "reconciled_flat": false,
+                        "owner_actions": [],
+                    }),
+                )
+                .await?;
+                return Ok(());
+            }
+            let evidence =
+                match account_flat_evidence(transaction, &execution_account_id, now_ms).await {
+                    Ok(evidence) => evidence,
+                    Err(StoreError::AccountReadinessUnavailable) => {
+                        set_account_command_status(
+                            transaction,
+                            command_id,
+                            "reducing",
+                            serde_json::json!({
+                                "control_mode": "REDUCE_ONLY",
+                                "reconciled_flat": false,
+                                "owner_actions": [],
+                            }),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+            if command == "close" {
+                sqlx::query(
+                    r#"
+                    UPDATE execution_account_control
+                    SET mode = 'HALTED', reason = $2, version = version + 1, updated_at = now()
+                    WHERE execution_account_id = $1
+                    "#,
+                )
+                .bind(&execution_account_id)
+                .bind(format!("close command {command_id} reconciled flat"))
+                .execute(&mut **transaction)
+                .await?;
+                sqlx::query(
+                    "UPDATE execution_accounts SET status = 'closed', updated_at = now() WHERE execution_account_id = $1",
+                )
+                .bind(&execution_account_id)
+                .execute(&mut **transaction)
+                .await?;
+            }
+            set_account_command_status(
+                transaction,
+                command_id,
+                "completed",
+                serde_json::json!({
+                    "control_mode": if command == "close" { "HALTED" } else { "REDUCE_ONLY" },
+                    "reconciled_flat": true,
+                    "evidence_sha256": evidence.digest,
+                    "owner_actions": [],
+                }),
+            )
+            .await?;
+        }
+        "withdraw" => {
+            let evidence =
+                account_flat_evidence(transaction, &execution_account_id, now_ms).await?;
+            let (status, owner, vault) =
+                sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                    r#"
+                SELECT status, owner_address, robinhood_vault
+                FROM execution_accounts
+                WHERE execution_account_id = $1
+                FOR SHARE
+                "#,
+                )
+                .bind(&execution_account_id)
+                .fetch_one(&mut **transaction)
+                .await?;
+            let (Some(owner), Some(vault)) = (owner, vault) else {
+                return Err(StoreError::ExecutionAccountUnavailable);
+            };
+            if status != "closed"
+                || evidence.robinhood.owner_address.as_deref() != Some(owner.as_str())
+            {
+                return Err(StoreError::AccountCommandBlocked);
+            }
+            let balance = evidence
+                .robinhood
+                .settlement_balance_raw
+                .as_deref()
+                .and_then(parse_u128_string)
+                .ok_or(StoreError::AccountReadinessUnavailable)?;
+            if balance == 0 {
+                set_account_command_status(
+                    transaction,
+                    command_id,
+                    "completed",
+                    serde_json::json!({
+                        "control_mode": "HALTED",
+                        "reconciled_flat": true,
+                        "evidence_sha256": evidence.digest,
+                        "owner_actions": [],
+                    }),
+                )
+                .await?;
+                return Ok(());
+            }
+            let mut actions = Vec::with_capacity(2);
+            if evidence.robinhood.risk_mode.as_deref() != Some("HALTED")
+                || evidence.robinhood.agent_enabled != Some(false)
+            {
+                actions.push(owner_action(
+                    &owner,
+                    &vault,
+                    encode_call("emergencyHalt()", None),
+                ));
+            }
+            actions.push(owner_action(
+                &owner,
+                &vault,
+                encode_call("withdrawSettlement(uint256)", Some(balance)),
+            ));
+            set_account_command_status(
+                transaction,
+                command_id,
+                "awaiting_owner_signature",
+                serde_json::json!({
+                    "control_mode": "HALTED",
+                    "reconciled_flat": true,
+                    "evidence_sha256": evidence.digest,
+                    "owner_actions": actions,
+                }),
+            )
+            .await?;
+        }
+        _ => return Err(StoreError::InvalidAction),
+    }
+    Ok(())
+}
+
+async fn activation_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    execution_account_id: &str,
+    now_ms: u64,
+) -> Result<FlatEvidence, StoreError> {
+    type ActivationRow = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        Option<String>,
+        String,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    );
+    let row = sqlx::query_as::<_, ActivationRow>(
+        r#"
+        SELECT account.status, account.strategy_version, account.strategy_manifest_sha256,
+               strategy.strategy_manifest_sha256, global.mode, strategy.mode,
+               account.owner_address, account_control.mode,
+               readiness.venue_approved, readiness.oracle_healthy,
+               readiness.sequencer_healthy, readiness.reconciliation_ready,
+               readiness.exit_authority_ready, readiness.alerting_ready,
+               readiness.safe_rotation_ready
+        FROM execution_accounts account
+        JOIN execution_account_control account_control USING (execution_account_id)
+        JOIN execution_account_readiness readiness USING (execution_account_id)
+        JOIN execution_strategy_control strategy USING (strategy_version)
+        CROSS JOIN execution_control global
+        WHERE account.execution_account_id = $1 AND global.singleton
+        FOR SHARE OF account, account_control, readiness, strategy, global
+        "#,
+    )
+    .bind(execution_account_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StoreError::ExecutionAccountUnavailable)?;
+    let manifest_matches = row.2.is_some() && row.2 == row.3;
+    if row.0 != "active"
+        || row.4 != "ACTIVE"
+        || row.5 != "ACTIVE"
+        || row.7 == "HALTED"
+        || row.6.is_none()
+        || !manifest_matches
+        || ![row.8, row.9, row.10, row.11, row.12, row.13, row.14]
+            .into_iter()
+            .all(|ready| ready)
+    {
+        return Err(StoreError::AccountCommandBlocked);
+    }
+    let evidence = account_flat_evidence(transaction, execution_account_id, now_ms).await?;
+    if evidence.robinhood.owner_address != row.6 || evidence.robinhood.agent_enabled != Some(true) {
+        return Err(StoreError::AccountReadinessUnavailable);
+    }
+    Ok(evidence)
+}
+
+async fn account_flat_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    execution_account_id: &str,
+    now_ms: u64,
+) -> Result<FlatEvidence, StoreError> {
+    let now = i64::try_from(now_ms).map_err(|_| StoreError::AccountReadinessUnavailable)?;
+    let rows = sqlx::query_as::<_, (String, Value, String)>(
+        r#"
+        SELECT DISTINCT ON (source) source, payload, payload_sha256
+        FROM execution_account_snapshots
+        WHERE execution_account_id = $1
+          AND observed_at <= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+          AND received_at <= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+          AND expires_at >= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+        ORDER BY source, received_at DESC, id DESC
+        "#,
+    )
+    .bind(execution_account_id)
+    .bind(now)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != 2 {
+        return Err(StoreError::AccountReadinessUnavailable);
+    }
+    let mut lighter_flat = false;
+    let mut robinhood = None;
+    let mut digests = Vec::with_capacity(2);
+    for (source, payload, digest) in rows {
+        digests.push(format!("{source}:{digest}"));
+        match source.as_str() {
+            "lighter-auth" => {
+                let snapshot: LighterAccountSnapshot = serde_json::from_value(payload)
+                    .map_err(|_| StoreError::AccountReadinessUnavailable)?;
+                lighter_flat = snapshot.flat == Some(true)
+                    && snapshot.nonce_aligned
+                    && snapshot.no_unknown_orders
+                    && snapshot.no_unknown_positions;
+            }
+            "robinhood-chain" => {
+                let snapshot: RobinhoodAccountSnapshot = serde_json::from_value(payload)
+                    .map_err(|_| StoreError::AccountReadinessUnavailable)?;
+                if snapshot.flat == Some(true)
+                    && snapshot.wiring_verified
+                    && snapshot.finality_healthy
+                {
+                    robinhood = Some(snapshot);
+                }
+            }
+            _ => return Err(StoreError::AccountReadinessUnavailable),
+        }
+    }
+    let robinhood = robinhood.ok_or(StoreError::AccountReadinessUnavailable)?;
+    if !lighter_flat {
+        return Err(StoreError::AccountReadinessUnavailable);
+    }
+    digests.sort();
+    Ok(FlatEvidence {
+        digest: hex::encode(Sha256::digest(digests.join("\n"))),
+        robinhood,
+    })
+}
+
+async fn restrict_account(
+    transaction: &mut Transaction<'_, Postgres>,
+    execution_account_id: &str,
+    command_id: &str,
+    command: &str,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        r#"
+        UPDATE execution_account_control
+        SET mode = CASE WHEN mode = 'HALTED' THEN mode ELSE 'REDUCE_ONLY' END,
+            reason = $2, version = version + 1, updated_at = now()
+        WHERE execution_account_id = $1
+        "#,
+    )
+    .bind(execution_account_id)
+    .bind(format!("{command} command {command_id}"))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn request_account_unwind(
+    transaction: &mut Transaction<'_, Postgres>,
+    execution_account_id: &str,
+    command_id: &str,
+    now_ms: u64,
+) -> Result<bool, StoreError> {
+    let row = sqlx::query_as::<_, (String, Value)>(
+        r#"
+        SELECT id, saga
+        FROM execution_intents
+        WHERE execution_account_id = $1 AND active
+        FOR UPDATE
+        "#,
+    )
+    .bind(execution_account_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some((intent_id, saga_value)) = row else {
+        return Ok(true);
+    };
+    let live_action = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM execution_actions
+            WHERE intent_id = $1 AND status IN ('pending', 'leased')
+        )
+        "#,
+    )
+    .bind(&intent_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if live_action {
+        return Ok(false);
+    }
+    let saga: ExecutionSaga =
+        serde_json::from_value(saga_value).map_err(|_| StoreError::InvalidSaga)?;
+    let (saga, next) = match saga.state {
+        ExecutionState::Created | ExecutionState::Prechecked | ExecutionState::PerpSubmitted => {
+            if account_flat_evidence(transaction, execution_account_id, now_ms)
+                .await
+                .is_err()
+            {
+                return Ok(false);
+            }
+            transition_saga(transaction, &intent_id, ExecutionEvent::Cancelled).await?;
+            return Ok(true);
+        }
+        ExecutionState::PerpPartial | ExecutionState::PerpFilled => {
+            let saga =
+                transition_saga(transaction, &intent_id, ExecutionEvent::UnwindStarted).await?;
+            let remaining = saga.perp_filled_base.saturating_sub(saga.perp_unwound_base);
+            (saga, control_unwind_perp(command_id, remaining, 0, false))
+        }
+        ExecutionState::Hedged => {
+            transition_saga(transaction, &intent_id, ExecutionEvent::ExitStarted).await?;
+            let saga =
+                transition_saga(transaction, &intent_id, ExecutionEvent::UnwindStarted).await?;
+            let remaining = saga.perp_filled_base.saturating_sub(saga.perp_unwound_base);
+            (saga, control_unwind_perp(command_id, remaining, 0, false))
+        }
+        ExecutionState::Unhedged => {
+            let saga =
+                transition_saga(transaction, &intent_id, ExecutionEvent::UnwindStarted).await?;
+            let remaining = saga.perp_filled_base.saturating_sub(saga.perp_unwound_base);
+            let unwound_before = saga.perp_unwound_base;
+            (
+                saga,
+                control_unwind_perp(command_id, remaining, unwound_before, true),
+            )
+        }
+        ExecutionState::Unwinding => {
+            let remaining = saga.perp_filled_base.saturating_sub(saga.perp_unwound_base);
+            let next = if remaining > 0 {
+                control_unwind_perp(command_id, remaining, saga.perp_unwound_base, true)
+            } else {
+                NextAction {
+                    kind: ActionKind::UnwindSpot,
+                    key: format!("control-{command_id}-unwind-spot"),
+                    payload: serde_json::json!({
+                        "spot_amount": saga.spot_received_raw.to_string(),
+                        "exit_reason": "operator_exit",
+                        "control_command_id": command_id,
+                    }),
+                }
+            };
+            (saga, next)
+        }
+        ExecutionState::Closed | ExecutionState::Cancelled | ExecutionState::Expired => {
+            return Ok(true)
+        }
+        ExecutionState::SpotSubmitted | ExecutionState::Exiting | ExecutionState::FailedSafe => {
+            halt_account(
+                transaction,
+                execution_account_id,
+                "control_unwind_ambiguity",
+            )
+            .await?;
+            halt_execution(transaction, "control_unwind_ambiguity").await?;
+            set_account_command_status(
+                transaction,
+                command_id,
+                "blocked",
+                serde_json::json!({
+                    "control_mode": "HALTED",
+                    "reconciled_flat": false,
+                    "owner_actions": [],
+                    "reason": "control_unwind_ambiguity",
+                }),
+            )
+            .await?;
+            return Ok(false);
+        }
+    };
+    if saga.perp_filled_base == 0 {
+        return Err(StoreError::InvalidSaga);
+    }
+    enqueue_action(transaction, &intent_id, &next).await?;
+    Ok(false)
+}
+
+fn control_unwind_perp(
+    command_id: &str,
+    filled_base: u64,
+    unwound_before: u64,
+    operator_recovery: bool,
+) -> NextAction {
+    NextAction {
+        kind: ActionKind::UnwindPerp,
+        key: format!("control-{command_id}-unwind-perp"),
+        payload: serde_json::json!({
+            "filled_base": filled_base,
+            "unwound_before": unwound_before,
+            "exit_reason": "operator_exit",
+            "operator_recovery": operator_recovery,
+            "control_command_id": command_id,
+        }),
+    }
+}
+
+async fn set_account_command_status(
+    transaction: &mut Transaction<'_, Postgres>,
+    command_id: &str,
+    status: &str,
+    result: Value,
+) -> Result<(), StoreError> {
+    let current = sqlx::query_as::<_, (String, Value)>(
+        "SELECT status, result FROM execution_account_commands WHERE command_id = $1 FOR UPDATE",
+    )
+    .bind(command_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if current.0 == status && current.1 == result {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE execution_account_commands SET status = $2, result = $3, updated_at = now() WHERE command_id = $1",
+    )
+    .bind(command_id)
+    .bind(status)
+    .bind(Json(&result))
+    .execute(&mut **transaction)
+    .await?;
+    append_account_command_event(transaction, command_id, status, result).await
+}
+
+async fn append_account_command_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    command_id: &str,
+    status: &str,
+    details: Value,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO execution_account_command_events (command_id, status, details) VALUES ($1, $2, $3)",
+    )
+    .bind(command_id)
+    .bind(status)
+    .bind(Json(details))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn load_account_command_response(
+    transaction: &mut Transaction<'_, Postgres>,
+    command_id: &str,
+    execution_account_id: &str,
+) -> Result<AccountCommandResponse, StoreError> {
+    let (stored_account_id, command, status, result, control_mode) =
+        sqlx::query_as::<_, (String, String, String, Value, String)>(
+            r#"
+            SELECT command.execution_account_id, command.command, command.status,
+                   command.result, control.mode
+            FROM execution_account_commands command
+            JOIN execution_account_control control USING (execution_account_id)
+            WHERE command.command_id = $1
+            FOR SHARE OF command, control
+            "#,
+        )
+        .bind(command_id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(StoreError::InvalidAction)?;
+    if stored_account_id != execution_account_id {
+        return Err(StoreError::AccountCommandConflict);
+    }
+    let owner_actions = result
+        .get("owner_actions")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| StoreError::InvalidAction)?
+        .unwrap_or_default();
+    Ok(AccountCommandResponse {
+        command_id: command_id.into(),
+        execution_account_id: stored_account_id,
+        command,
+        status,
+        control_mode,
+        reconciled_flat: result
+            .get("reconciled_flat")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        evidence_sha256: result
+            .get("evidence_sha256")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        owner_actions,
+    })
+}
+
+fn account_command_digest(request: &AccountCommandRequest) -> String {
+    hex::encode(Sha256::digest(format!(
+        "robin.account-command.v1\n{}\n{}\n{}\n{}\n{}",
+        request.command_id,
+        request.execution_account_id,
+        request.agent_id,
+        request.command,
+        request.requested_at_ms,
+    )))
+}
+
+fn valid_control_id(value: &str) -> bool {
+    (8..=64).contains(&value.len())
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || (byte == b'-' && index > 0)
+        })
+}
+
+fn owner_action(owner: &str, vault: &str, data: String) -> OwnerAction {
+    OwnerAction {
+        chain_id: ROBINHOOD_CHAIN_ID,
+        from: owner.into(),
+        to: vault.into(),
+        data,
+        value: "0".into(),
+    }
+}
+
+fn encode_call(signature: &str, amount: Option<u128>) -> String {
+    let selector = Keccak256::digest(signature.as_bytes());
+    let mut data = Vec::with_capacity(if amount.is_some() { 36 } else { 4 });
+    data.extend_from_slice(&selector[..4]);
+    if let Some(amount) = amount {
+        data.extend_from_slice(&[0; 16]);
+        data.extend_from_slice(&amount.to_be_bytes());
+    }
+    format!("0x{}", hex::encode(data))
+}
+
 async fn halt_execution(
     transaction: &mut Transaction<'_, Postgres>,
     reason: &str,
@@ -3805,29 +4728,15 @@ async fn verify_execution_account(
     intent: &PairIntent,
     now_ms: u64,
 ) -> Result<(), StoreError> {
-    type AccountRow = (
-        String,
-        String,
-        String,
-        String,
-        Option<i64>,
-        Option<i16>,
-        Option<String>,
-        Option<String>,
-        String,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-    );
-    let account = sqlx::query_as::<_, AccountRow>(
+    let account = sqlx::query_as::<_, ExecutionAccountAdmission>(
         r#"
         SELECT account.agent_id, account.strategy_version, account.risk_version,
                account.status, account.lighter_account_index, account.lighter_api_key_index,
-               account.robinhood_vault, account.robinhood_signer, control.mode,
+               account.robinhood_vault, account.robinhood_signer,
+               control.mode AS account_mode,
+               account.strategy_manifest_sha256 AS account_manifest_sha256,
+               strategy.strategy_manifest_sha256, strategy.mode AS strategy_mode,
+               account.owner_address,
                readiness.venue_approved, readiness.oracle_healthy,
                readiness.sequencer_healthy, readiness.reconciliation_ready,
                readiness.exit_authority_ready, readiness.alerting_ready,
@@ -3835,8 +4744,9 @@ async fn verify_execution_account(
         FROM execution_accounts account
         JOIN execution_account_control control USING (execution_account_id)
         JOIN execution_account_readiness readiness USING (execution_account_id)
+        JOIN execution_strategy_control strategy USING (strategy_version)
         WHERE account.execution_account_id = $1
-        FOR SHARE OF account, control, readiness
+        FOR SHARE OF account, control, readiness, strategy
         "#,
     )
     .bind(&intent.execution_account_id)
@@ -3845,20 +4755,30 @@ async fn verify_execution_account(
     .ok_or(StoreError::ExecutionAccountUnavailable)?;
     let account_index = i64::try_from(intent.lighter_account_index)
         .map_err(|_| StoreError::ExecutionAccountUnavailable)?;
-    if account.0 != intent.agent_id
-        || account.1 != intent.evidence.strategy_version
-        || account.2 != intent.risk_version
-        || account.3 != "active"
-        || account.4 != Some(account_index)
-        || account.5 != Some(i16::from(intent.lighter_api_key_index))
-        || account.6.as_deref() != Some(intent.robinhood_vault.as_str())
-        || account.7.as_deref() != Some(intent.robinhood_signer.as_str())
-        || account.8 != "ACTIVE"
+    if account.agent_id != intent.agent_id
+        || account.strategy_version != intent.evidence.strategy_version
+        || account.risk_version != intent.risk_version
+        || account.status != "active"
+        || account.lighter_account_index != Some(account_index)
+        || account.lighter_api_key_index != Some(i16::from(intent.lighter_api_key_index))
+        || account.robinhood_vault.as_deref() != Some(intent.robinhood_vault.as_str())
+        || account.robinhood_signer.as_deref() != Some(intent.robinhood_signer.as_str())
+        || account.account_mode != "ACTIVE"
+        || account.account_manifest_sha256.is_none()
+        || account.account_manifest_sha256 != account.strategy_manifest_sha256
+        || account.strategy_mode != "ACTIVE"
+        || account.owner_address.is_none()
     {
         return Err(StoreError::ExecutionAccountUnavailable);
     }
     if ![
-        account.9, account.10, account.11, account.12, account.13, account.14, account.15,
+        account.venue_approved,
+        account.oracle_healthy,
+        account.sequencer_healthy,
+        account.reconciliation_ready,
+        account.exit_authority_ready,
+        account.alerting_ready,
+        account.safe_rotation_ready,
     ]
     .into_iter()
     .all(|ready| ready)
@@ -3903,6 +4823,8 @@ async fn verify_execution_account(
                     .map_err(|_| StoreError::AccountReadinessUnavailable)?;
                 robinhood_ready = snapshot.vault_address == intent.robinhood_vault
                     && snapshot.signer_address == intent.robinhood_signer
+                    && snapshot.owner_address == account.owner_address
+                    && snapshot.agent_enabled == Some(true)
                     && snapshot.funding_ready
                     && snapshot.wiring_verified
                     && snapshot.finality_healthy;
@@ -4040,5 +4962,39 @@ mod tests {
             decode_claimed_saga(&encoded, "intent-1", 1),
             Err(ClaimPoison::Saga)
         );
+    }
+
+    #[test]
+    fn owner_withdrawal_calls_are_unsigned_and_abi_encoded() {
+        assert_eq!(encode_call("emergencyHalt()", None), "0x51755334");
+        assert_eq!(
+            encode_call("withdrawSettlement(uint256)", Some(25_000_000)),
+            "0x142834dd00000000000000000000000000000000000000000000000000000000017d7840"
+        );
+        let action = owner_action(
+            "0x0000000000000000000000000000000000000004",
+            "0x0000000000000000000000000000000000000002",
+            encode_call("emergencyHalt()", None),
+        );
+        assert_eq!(action.chain_id, ROBINHOOD_CHAIN_ID);
+        assert_eq!(action.value, "0");
+    }
+
+    #[test]
+    fn command_identity_is_domain_separated_and_bounded() {
+        let command = AccountCommandRequest {
+            command_id: "command-launch-canary-1".into(),
+            execution_account_id: "account-canary-1".into(),
+            agent_id: "agent-canary-1".into(),
+            command: "launch".into(),
+            requested_at_ms: 1_200,
+        };
+        let first = account_command_digest(&command);
+        let mut changed = command.clone();
+        changed.execution_account_id = "account-canary-2".into();
+        assert_eq!(first.len(), 64);
+        assert_ne!(first, account_command_digest(&changed));
+        assert!(valid_control_id(&command.command_id));
+        assert!(!valid_control_id("invalid_command"));
     }
 }

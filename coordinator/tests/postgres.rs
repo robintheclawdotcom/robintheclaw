@@ -1,6 +1,7 @@
 use coordinator::store::{
-    ActionKind, ExitRequest, NewAccountSnapshot, NewMarketQuote, NewVenueEvent, NextAction,
-    ObservationOutcome, RecoveryRequest, Store, StoreError,
+    AccountCommandRequest, AccountCommandStatusRequest, ActionKind, ExitRequest,
+    NewAccountSnapshot, NewMarketQuote, NewVenueEvent, NextAction, ObservationOutcome,
+    RecoveryRequest, Store, StoreError,
 };
 use execution::{
     ExecutionEvent, ExecutionSaga, ExecutionState, FrozenEvidence, PairIntent, PerpSide, SpotSide,
@@ -41,6 +42,10 @@ async fn migration_and_promotion_gate_are_enforced() {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0007_account_commands.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
     let legacy = sqlx::query_as::<_, (String, bool)>(
         "SELECT execution_account_id, active FROM execution_intents WHERE id = $1",
     )
@@ -82,8 +87,25 @@ async fn migration_and_promotion_gate_are_enforced() {
             lighter_account_index = 7, lighter_api_key_index = 2,
             robinhood_vault = '0x0000000000000000000000000000000000000002',
             robinhood_signer = '0x0000000000000000000000000000000000000003',
+            owner_address = '0x0000000000000000000000000000000000000004',
+            strategy_manifest_sha256 = repeat('c', 64),
             binding_sha256 = repeat('a', 64)
         WHERE execution_account_id = 'singleton-mainnet-canary'
+        "#,
+    )
+    .bind(CANARY_RISK_VERSION)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_strategy_control
+            (strategy_version, strategy_manifest_sha256, mode, reason)
+        VALUES ($1, repeat('c', 64), 'ACTIVE', 'integration test')
+        ON CONFLICT (strategy_version) DO UPDATE SET
+            strategy_manifest_sha256 = EXCLUDED.strategy_manifest_sha256,
+            mode = EXCLUDED.mode,
+            reason = EXCLUDED.reason
         "#,
     )
     .bind(CANARY_RISK_VERSION)
@@ -149,6 +171,21 @@ async fn migration_and_promotion_gate_are_enforced() {
     for snapshot in account_snapshots() {
         assert!(store.record_account_snapshot(&snapshot).await.unwrap());
     }
+    let launch = store
+        .submit_account_command(
+            &AccountCommandRequest {
+                command_id: "command-launch-canary-1".into(),
+                execution_account_id: "singleton-mainnet-canary".into(),
+                agent_id: "singleton-mainnet-canary".into(),
+                command: "launch".into(),
+                requested_at_ms: 1_200,
+            },
+            1_200,
+        )
+        .await
+        .unwrap();
+    assert_eq!(launch.status, "completed");
+    assert!(launch.reconciled_flat);
     let mut mismatched_market = intent();
     mismatched_market.symbol = "AMD".into();
     mismatched_market.derive_identifiers().unwrap();
@@ -822,6 +859,94 @@ async fn migration_and_promotion_gate_are_enforced() {
     .await
     .unwrap();
     assert_eq!(owner, intent().id);
+
+    register_account(
+        &pool,
+        "account-control-test",
+        "agent-control-test",
+        11,
+        "0x0000000000000000000000000000000000000012",
+        "0x0000000000000000000000000000000000000013",
+    )
+    .await;
+    let mut snapshots = account_snapshots_for(
+        "account-control-test",
+        11,
+        "0x0000000000000000000000000000000000000012",
+        "0x0000000000000000000000000000000000000013",
+    );
+    for snapshot in &mut snapshots {
+        snapshot.observed_at_ms = 4_998;
+        snapshot.received_at_ms = 4_999;
+        snapshot.expires_at_ms = 8_000;
+        store.record_account_snapshot(snapshot).await.unwrap();
+    }
+    let command = |command_id: &str, command: &str, requested_at_ms| AccountCommandRequest {
+        command_id: command_id.into(),
+        execution_account_id: "account-control-test".into(),
+        agent_id: "agent-control-test".into(),
+        command: command.into(),
+        requested_at_ms,
+    };
+    let paused = store
+        .submit_account_command(&command("command-pause-control", "pause", 5_000), 5_000)
+        .await
+        .unwrap();
+    assert_eq!(paused.status, "completed");
+    assert_eq!(paused.control_mode, "REDUCE_ONLY");
+    let closed = store
+        .submit_account_command(&command("command-close-control", "close", 5_100), 5_100)
+        .await
+        .unwrap();
+    assert_eq!(closed.status, "completed");
+    assert_eq!(closed.control_mode, "HALTED");
+
+    for snapshot in &mut snapshots {
+        snapshot.source_sequence = 2;
+        snapshot.observed_at_ms = 5_198;
+        snapshot.received_at_ms = 5_199;
+        if snapshot.source == "robinhood-chain" {
+            snapshot.payload["agent_enabled"] = serde_json::json!(false);
+            snapshot.payload["risk_mode"] = serde_json::json!("HALTED");
+        }
+        store.record_account_snapshot(snapshot).await.unwrap();
+    }
+    let withdrawal = store
+        .submit_account_command(
+            &command("command-withdraw-control", "withdraw", 5_300),
+            5_300,
+        )
+        .await
+        .unwrap();
+    assert_eq!(withdrawal.status, "awaiting_owner_signature");
+    assert_eq!(withdrawal.owner_actions.len(), 1);
+    assert_eq!(
+        withdrawal.owner_actions[0].from,
+        "0x0000000000000000000000000000000000000004"
+    );
+    assert!(withdrawal.owner_actions[0].data.starts_with("0x142834dd"));
+
+    for snapshot in &mut snapshots {
+        snapshot.source_sequence = 3;
+        snapshot.observed_at_ms = 5_398;
+        snapshot.received_at_ms = 5_399;
+        if snapshot.source == "robinhood-chain" {
+            snapshot.payload["settlement_balance_raw"] = serde_json::json!("0");
+        }
+        store.record_account_snapshot(snapshot).await.unwrap();
+    }
+    let withdrawal = store
+        .account_command_status(
+            &AccountCommandStatusRequest {
+                command_id: "command-withdraw-control".into(),
+                execution_account_id: "account-control-test".into(),
+            },
+            5_400,
+        )
+        .await
+        .unwrap();
+    assert_eq!(withdrawal.status, "completed");
+    assert!(withdrawal.owner_actions.is_empty());
 }
 
 async fn insert_transition(
@@ -957,6 +1082,7 @@ fn account_snapshots_for(
                 "no_unknown_positions": true,
                 "collateral_ready": true,
                 "maintenance_margin_ratio_micros": 2_000_000,
+                "flat": true,
             }),
             observed_at_ms: 1_198,
             received_at_ms: 1_199,
@@ -973,6 +1099,11 @@ fn account_snapshots_for(
                 "funding_ready": true,
                 "wiring_verified": true,
                 "finality_healthy": true,
+                "flat": true,
+                "owner_address": "0x0000000000000000000000000000000000000004",
+                "agent_enabled": true,
+                "risk_mode": "ACTIVE",
+                "settlement_balance_raw": "25000000",
             }),
             observed_at_ms: 1_198,
             received_at_ms: 1_199,
@@ -994,8 +1125,9 @@ async fn register_account(
         INSERT INTO execution_accounts
             (execution_account_id, agent_id, strategy_version, risk_version, status,
              lighter_account_index, lighter_api_key_index, robinhood_vault,
-             robinhood_signer, binding_sha256)
-        VALUES ($1, $2, $3, $3, 'active', $4, 2, $5, $6, repeat('b', 64))
+             robinhood_signer, owner_address, strategy_manifest_sha256, binding_sha256)
+        VALUES ($1, $2, $3, $3, 'active', $4, 2, $5, $6,
+                '0x0000000000000000000000000000000000000004', repeat('c', 64), repeat('b', 64))
         "#,
     )
     .bind(execution_account_id)
