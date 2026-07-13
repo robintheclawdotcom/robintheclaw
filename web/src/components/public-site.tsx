@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { testnetProof } from "../lib/testnet-proof";
 
-type DocId = "overview" | "experience" | "signal" | "contracts" | "verifier" | "engine" | "testnet" | "methodology" | "readiness" | "architecture" | "developer" | "operations" | "security" | "venues";
+type DocId = "overview" | "experience" | "signal" | "contracts" | "verifier" | "engine" | "testnet" | "application" | "methodology" | "readiness" | "architecture" | "developer" | "operations" | "security" | "venues";
 
 const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }> = {
   overview: {
@@ -109,6 +109,11 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
         <PublishedDoc file="testnet-proof.md" />
       </>
     ),
+  },
+  application: {
+    file: "docs/ux-testnet.md",
+    title: "Application testnet",
+    body: <PublishedDoc file="ux-testnet.md" />,
   },
   engine: {
     file: "engine/README.md",

@@ -49,7 +49,8 @@ product database is separate from `robin-research`.
 
 Before enabling onboarding:
 
-1. Deploy `DeployUxTestnet.s.sol` on chain ID 46630 and confirm the asset, faucet, and factory.
+1. Confirm the chain ID, runtime bytecode, factory/faucet wiring, and addresses in
+   `deployments/ux-testnet.json`.
 2. Create an Alchemy sponsorship policy limited to those contracts, child vaults and guards, the
    `claim`, `approve`, `createVault`, `deposit`, `withdraw`, and `setHalted` selectors, with
    per-account and global spend quotas.

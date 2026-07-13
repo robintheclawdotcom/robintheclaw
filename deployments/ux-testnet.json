@@ -1,0 +1,22 @@
+{
+  "network": "robinhood-testnet",
+  "chainId": 46630,
+  "purpose": "no-code personal vault onboarding and strategy controls",
+  "asset": "0x0fD95bD301b65f4F6Cc3354315793194941EeF77",
+  "testAssetFaucet": "0xc1609C2B1C1F0bb518Cb2a8B6e21116008351191",
+  "personalStrategyVaultFactory": "0x98afbbe4a9a0149d34A4A9dEeD8D3767D65d150E",
+  "defaultAgent": "0xB614B34D6102F60c402e2AeCca36c338975f9280",
+  "factoryVersion": 1,
+  "claimAmount": "1000000000",
+  "assetDecimals": 6,
+  "windowCap": "1000000000",
+  "windowSeconds": 86400,
+  "deployedAt": "2026-07-13",
+  "deploymentBlocks": [89934600, 89934601, 89934602],
+  "transactions": {
+    "asset": "0xd8b379848d54244b87654f21011d81c9045743c0bc9402c960c4977ab284330a",
+    "faucet": "0x3448a45ff155033d217adfd626f434df39a1810fa2425582e2d984941ef5cc78",
+    "factory": "0x6b01b81e956d194db99535d07ec213debf3f86ecd450beac52c86a5e9b16d03a",
+    "faucetFunding": "0xa1016534fabe30c552cb23accdfb0fe3f300d2cb7ed42ca29e569e19fe20c9a7"
+  }
+}

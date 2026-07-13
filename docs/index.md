@@ -12,6 +12,7 @@ onchain execution, continuous event capture, research models, and a no-code stra
 - [Operations](operations.md): roles, release procedure, and operational response.
 - [Security model](security-model.md): assets, trust boundaries, and controls.
 - [Testnet foundation](testnet-proof.md): the deployed onchain contract and record pipeline.
+- [Application testnet](ux-testnet.md): the deployed personal-vault factory, faucet, and no-code onboarding path.
 - [Venue integration](venue-gates.md): the path from market data to live venue support.
 - [Research runtime](research-runtime.md): high-frequency capture, raw evidence, and shadow execution.
 - [Edge research methodology](research-methodology.md): model hierarchy, RWA inputs, and implementation roadmap.

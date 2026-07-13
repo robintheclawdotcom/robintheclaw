@@ -69,6 +69,10 @@ The interface distinguishes account expiry, missing recovery, wallet conflicts, 
 funding signer, a pending operation, failed inclusion, and an included operation awaiting server
 confirmation. Each state offers a direct recovery action.
 
+The application asset, faucet, and version-one personal-vault factory are deployed on Robinhood
+Chain testnet. Addresses, configuration, and deployment transactions are recorded in
+`deployments/ux-testnet.json` and summarized in `docs/ux-testnet.md`.
+
 ## Dashboard data contract
 
 All dashboard values come from the authenticated API. The response includes `environment` and
