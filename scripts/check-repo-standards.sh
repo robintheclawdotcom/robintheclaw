@@ -22,6 +22,9 @@ req=(
   scripts/check-rust-crates.sh
   scripts/setup-git-hooks.sh
   scripts/validate-blueprint.rb
+  config/mainnet-live-policy.json
+  config/validate-live-policy.mjs
+  config/validate-live-policy.test.mjs
   runtime/Cargo.toml
   runtime/migrations/0001_capture.sql
   runtime/src/bin/collector.rs

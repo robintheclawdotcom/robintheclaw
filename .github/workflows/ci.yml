@@ -135,6 +135,10 @@ jobs:
         run: bash scripts/check-repo-standards.sh
       - name: Blueprint policy
         run: ruby scripts/validate-blueprint.rb
+      - name: Mainnet activation policy
+        run: |
+          node --test config/validate-live-policy.test.mjs
+          node config/validate-live-policy.mjs
       - name: Leak scan
         run: bash scripts/check-no-leaks.sh
         env:
