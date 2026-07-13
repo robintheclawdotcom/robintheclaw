@@ -1,8 +1,8 @@
 use crate::{
     store::{
         AccountCommandRequest, AccountCommandStatusRequest, AccountRegistrationRequest,
-        ExitRequest, NewAccountSnapshot, NewMarketQuote, NewVenueEvent, RecoveryRequest,
-        StoreError,
+        ExitRequest, IntentStatusRequest, NewAccountSnapshot, NewMarketQuote, NewVenueEvent,
+        RecoveryRequest, StoreError,
     },
     AppState,
 };
@@ -25,6 +25,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/livez", get(livez))
         .route("/readyz", get(readyz))
         .route("/v1/intents", post(create_intent))
+        .route("/v1/intent-status", post(intent_status))
         .route("/v1/exits", post(request_exit))
         .route("/v1/recoveries", post(request_recovery))
         .route("/v1/venue-events", post(record_venue_event))
@@ -396,7 +397,43 @@ async fn create_intent(
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "clock unavailable"),
     };
     match store.create_intent(&intent, now_ms).await {
-        Ok(saga) => (StatusCode::CREATED, Json(serde_json::json!(saga))).into_response(),
+        Ok(outcome) => {
+            let status = if outcome.created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            };
+            (status, Json(serde_json::json!(outcome.saga))).into_response()
+        }
+        Err(error) => store_error_response(error),
+    }
+}
+
+async fn intent_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err((status, message)) = authorize(
+        &state,
+        AuthScope::Intent,
+        "/v1/intent-status",
+        &headers,
+        &body,
+    )
+    .await
+    {
+        return error(status, message);
+    }
+    let Some(store) = &state.store else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled");
+    };
+    let request: IntentStatusRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid request"),
+    };
+    match store.intent_status(&request).await {
+        Ok(response) => (StatusCode::OK, Json(serde_json::json!(response))).into_response(),
         Err(error) => store_error_response(error),
     }
 }
@@ -647,7 +684,9 @@ fn store_error_response(error: StoreError) -> axum::response::Response {
         StoreError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
         StoreError::InvalidAction | StoreError::InvalidIntent(_) => StatusCode::BAD_REQUEST,
         StoreError::CoordinatorHalted => StatusCode::SERVICE_UNAVAILABLE,
-        StoreError::AccountCommandBlocked => StatusCode::CONFLICT,
+        StoreError::AccountCommandBlocked | StoreError::IntentPayloadConflict => {
+            StatusCode::CONFLICT
+        }
         StoreError::AccountRegistrationMissing => StatusCode::NOT_FOUND,
         _ => StatusCode::CONFLICT,
     };

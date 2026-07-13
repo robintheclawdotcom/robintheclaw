@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -110,37 +111,74 @@ func TestCoordinatorClientNeverFollowsRedirects(t *testing.T) {
 	}
 }
 
-func TestCoordinatorClientDoesNotRetryAmbiguousSend(t *testing.T) {
+func TestCoordinatorClientReconcilesCommitThenTimeoutWithoutResend(t *testing.T) {
 	intent := fixtureIntent(t)
 	key := bytes.Repeat([]byte{3}, 32)
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests.Add(1)
-		time.Sleep(100 * time.Millisecond)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
+	encoded, _ := json.Marshal(intent)
+	digest := sha256.Sum256(encoded)
+	payloadSHA256 := hex.EncodeToString(digest[:])
+	var submissions atomic.Int32
+	var statusQueries atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/intents":
+			submissions.Add(1)
+			time.Sleep(100 * time.Millisecond)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+		case "/v1/intent-status":
+			statusQueries.Add(1)
+			body, _ := io.ReadAll(request.Body)
+			var query intentStatusRequest
+			if err := json.Unmarshal(body, &query); err != nil || query.IntentID != intent.ID || query.PayloadSHA256 != payloadSHA256 {
+				t.Error("status query did not bind the exact payload digest")
+			}
+			wantMAC := coordinatorMAC(key, request.URL.Path, "strategy-runner", request.Header.Get("X-RTC-Timestamp"), request.Header.Get("X-RTC-Nonce"), body)
+			gotMAC, _ := hex.DecodeString(request.Header.Get("X-RTC-Signature"))
+			if !hmac.Equal(wantMAC, gotMAC) {
+				t.Error("status query authentication mismatch")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(intentStatusResponse{
+				IntentID: intent.ID, PayloadSHA256: payloadSHA256, Status: "persisted",
+				Saga: &coordinatorSaga{IntentID: intent.ID, State: "perp_submitted", Version: 2, SpotReceivedRaw: "0"},
+			})
+		default:
+			t.Errorf("unexpected path %s", request.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	defer server.Close()
 	client := coordinatorClient(t, server.URL, key)
 	client.client.Timeout = 25 * time.Millisecond
-	_, err := client.SubmitIntent(context.Background(), intent)
-	if !errors.Is(err, ErrCoordinatorAmbiguous) || requests.Load() != 1 {
-		t.Fatalf("ambiguous send was retried or misclassified: %v, requests=%d", err, requests.Load())
+	persistence, err := client.SubmitIntent(context.Background(), intent)
+	if err != nil || persistence.IntentID != intent.ID || persistence.CoordinatorState != "perp_submitted" ||
+		persistence.CoordinatorVersion != 2 || submissions.Load() != 1 || statusQueries.Load() != 1 {
+		t.Fatalf("commit timeout was not reconciled: persistence=%+v err=%v submissions=%d status=%d", persistence, err, submissions.Load(), statusQueries.Load())
 	}
 }
 
-func TestCoordinatorClientTreatsConflictAsAmbiguous(t *testing.T) {
+func TestCoordinatorClientRejectsPayloadCollision(t *testing.T) {
 	intent := fixtureIntent(t)
 	key := bytes.Repeat([]byte{3}, 32)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	encoded, _ := json.Marshal(intent)
+	digest := sha256.Sum256(encoded)
+	payloadSHA256 := hex.EncodeToString(digest[:])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"error":"database conflict"}`))
+		if request.URL.Path == "/v1/intents" {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"intent payload conflict"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(intentStatusResponse{
+			IntentID: intent.ID, PayloadSHA256: payloadSHA256, Status: "conflict",
+		})
 	}))
 	defer server.Close()
 	_, err := coordinatorClient(t, server.URL, key).SubmitIntent(context.Background(), intent)
-	if !errors.Is(err, ErrCoordinatorAmbiguous) {
-		t.Fatalf("coordinator conflict was not ambiguous: %v", err)
+	if !errors.Is(err, ErrCoordinatorPayloadConflict) {
+		t.Fatalf("coordinator payload collision was not rejected: %v", err)
 	}
 }
 

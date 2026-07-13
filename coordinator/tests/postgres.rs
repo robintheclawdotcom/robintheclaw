@@ -1,7 +1,7 @@
 use coordinator::store::{
     AccountCommandRequest, AccountCommandStatusRequest, AccountRegistrationRequest, ActionKind,
-    ExitRequest, NewAccountSnapshot, NewMarketQuote, NewVenueEvent, NextAction, ObservationOutcome,
-    RecoveryRequest, Store, StoreError,
+    ExitRequest, IntentStatusRequest, NewAccountSnapshot, NewMarketQuote, NewVenueEvent,
+    NextAction, ObservationOutcome, RecoveryRequest, Store, StoreError,
 };
 use execution::{
     ExecutionEvent, ExecutionSaga, ExecutionState, FrozenEvidence, PairIntent, PerpSide, SpotSide,
@@ -50,14 +50,18 @@ async fn migration_and_promotion_gate_are_enforced() {
         .execute(&pool)
         .await
         .unwrap();
-    let legacy = sqlx::query_as::<_, (String, bool)>(
-        "SELECT execution_account_id, active FROM execution_intents WHERE id = $1",
+    sqlx::raw_sql(include_str!("../migrations/0009_intent_idempotency.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let legacy = sqlx::query_as::<_, (String, bool, bool)>(
+        "SELECT execution_account_id, active, payload_digest_required FROM execution_intents WHERE id = $1",
     )
     .bind(legacy_id)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(legacy, ("singleton-mainnet-canary".into(), false));
+    assert_eq!(legacy, ("singleton-mainnet-canary".into(), false, false));
 
     let evidence = approved_evidence();
     let digest = evidence.calculate_hash();
@@ -220,8 +224,67 @@ async fn migration_and_promotion_gate_are_enforced() {
             .unwrap();
     }
 
-    let saga = store.create_intent(&intent(), 1_200).await.unwrap();
-    assert_eq!(saga.state, ExecutionState::Prechecked);
+    let admitted = store.create_intent(&intent(), 1_200).await.unwrap();
+    assert!(admitted.created);
+    assert_eq!(admitted.saga.state, ExecutionState::Prechecked);
+    let digest_required = sqlx::query_scalar::<_, bool>(
+        "SELECT payload_digest_required FROM execution_intents WHERE id = $1",
+    )
+    .bind(intent().id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(digest_required);
+    let mut admission_lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(intent().id)
+        .execute(&mut *admission_lock)
+        .await
+        .unwrap();
+    let status_store = store.clone();
+    let status_request = IntentStatusRequest {
+        intent_id: intent().id,
+        payload_sha256: admitted.payload_sha256.clone(),
+    };
+    let mut locked_status =
+        tokio::spawn(async move { status_store.intent_status(&status_request).await });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut locked_status)
+            .await
+            .is_err()
+    );
+    admission_lock.commit().await.unwrap();
+    assert_eq!(locked_status.await.unwrap().unwrap().status, "persisted");
+    let duplicate = store.create_intent(&intent(), 9_999_999).await.unwrap();
+    assert!(!duplicate.created);
+    assert_eq!(duplicate.saga, admitted.saga);
+    assert_eq!(duplicate.payload_sha256, admitted.payload_sha256);
+    let persisted = store
+        .intent_status(&IntentStatusRequest {
+            intent_id: intent().id,
+            payload_sha256: admitted.payload_sha256.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(persisted.status, "persisted");
+    assert_eq!(persisted.saga, Some(admitted.saga.clone()));
+    let collision = store
+        .intent_status(&IntentStatusRequest {
+            intent_id: intent().id,
+            payload_sha256: "f".repeat(64),
+        })
+        .await
+        .unwrap();
+    assert_eq!(collision.status, "conflict");
+    assert!(collision.saga.is_none());
+    let legacy_status = store
+        .intent_status(&IntentStatusRequest {
+            intent_id: legacy_id.into(),
+            payload_sha256: "e".repeat(64),
+        })
+        .await
+        .unwrap();
+    assert_eq!(legacy_status.status, "unverifiable");
     register_account(
         &pool,
         "account-canary-2",
@@ -1086,6 +1149,53 @@ async fn migration_and_promotion_gate_are_enforced() {
             .await,
         Err(StoreError::AccountRegistrationMissing)
     ));
+
+    sqlx::query("UPDATE execution_control SET mode = 'ACTIVE' WHERE singleton")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE execution_account_control SET mode = 'ACTIVE' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_accounts SET status = 'active' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE execution_intents SET payload_sha256 = repeat('f', 64) WHERE id = $1")
+        .bind(intent().id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.create_intent(&intent(), 9_999_999).await,
+        Err(StoreError::IntentPayloadConflict)
+    ));
+    let global_mode =
+        sqlx::query_scalar::<_, String>("SELECT mode FROM execution_control WHERE singleton")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(global_mode, "HALTED");
+    let account_mode = sqlx::query_scalar::<_, String>(
+        "SELECT mode FROM execution_account_control WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(account_mode, "HALTED");
+    let payload_incidents = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM execution_incidents WHERE kind = 'intent_payload_identity_conflict' AND intent_id = $1",
+    )
+    .bind(intent().id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(payload_incidents, 1);
 }
 
 async fn insert_transition(

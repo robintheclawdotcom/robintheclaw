@@ -63,7 +63,7 @@ func (s *Service) Run(ctx context.Context, input RunRequest) (RunOutput, error) 
 			return RunOutput{}, err
 		}
 		if persistence.Status != "persisted" || persistence.IntentID != intent.ID ||
-			persistence.CoordinatorState != "prechecked" || persistence.CoordinatorVersion != 1 {
+			!persistedSagaState(persistence.CoordinatorState) || persistence.CoordinatorVersion == 0 {
 			return RunOutput{}, fmt.Errorf("%w: invalid persistence receipt", ErrCoordinatorAmbiguous)
 		}
 		return RunOutput{Kind: protocol.ActionEntry, PairIntent: &intent, Persistence: &persistence}, nil

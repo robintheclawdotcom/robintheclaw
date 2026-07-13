@@ -24,8 +24,10 @@ import (
 const maximumCoordinatorResponseBytes = 64 << 10
 
 var (
-	ErrCoordinatorAmbiguous = errors.New("coordinator persistence is ambiguous")
-	ErrCoordinatorDeclined  = errors.New("coordinator declined intent")
+	ErrCoordinatorAmbiguous       = errors.New("coordinator persistence is ambiguous")
+	ErrCoordinatorDeclined        = errors.New("coordinator declined intent")
+	ErrCoordinatorNotPersisted    = errors.New("coordinator did not persist intent")
+	ErrCoordinatorPayloadConflict = errors.New("coordinator payload identity conflicts")
 )
 
 type IntentPersistence struct {
@@ -55,6 +57,18 @@ type coordinatorSaga struct {
 	PerpFilledBase  uint64 `json:"perp_filled_base"`
 	PerpUnwoundBase uint64 `json:"perp_unwound_base"`
 	SpotReceivedRaw string `json:"spot_received_raw"`
+}
+
+type intentStatusRequest struct {
+	IntentID      string `json:"intent_id"`
+	PayloadSHA256 string `json:"payload_sha256"`
+}
+
+type intentStatusResponse struct {
+	IntentID      string           `json:"intent_id"`
+	PayloadSHA256 string           `json:"payload_sha256"`
+	Status        string           `json:"status"`
+	Saga          *coordinatorSaga `json:"saga"`
 }
 
 func NewCoordinatorClient(baseURL, caller string, key []byte) (*CoordinatorClient, error) {
@@ -98,15 +112,84 @@ func (c *CoordinatorClient) SubmitIntent(ctx context.Context, intent PairIntent)
 	if err != nil {
 		return IntentPersistence{}, fmt.Errorf("encode coordinator intent: %w", err)
 	}
-	nonce, err := c.nonce()
-	if err != nil || !validNonce(nonce) {
-		return IntentPersistence{}, errors.New("coordinator nonce unavailable")
+	payloadDigest := sha256.Sum256(body)
+	payloadSHA256 := hex.EncodeToString(payloadDigest[:])
+	persistence, err := c.submitIntent(ctx, intent, body)
+	if err == nil || !errors.Is(err, ErrCoordinatorAmbiguous) {
+		return persistence, err
 	}
-	timestamp := strconv.FormatInt(c.now().Unix(), 10)
-	signature := coordinatorMAC(c.key, "/v1/intents", c.caller, timestamp, nonce, body)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	return c.resolveIntent(ctx, intent, payloadSHA256)
+}
+
+func (c *CoordinatorClient) submitIntent(ctx context.Context, intent PairIntent, body []byte) (IntentPersistence, error) {
+	response, responseBody, err := c.post(ctx, "/v1/intents", body)
 	if err != nil {
 		return IntentPersistence{}, err
+	}
+	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			return IntentPersistence{}, fmt.Errorf("%w with status %d", ErrCoordinatorDeclined, response.StatusCode)
+		}
+		return IntentPersistence{}, fmt.Errorf("%w: coordinator returned status %d", ErrCoordinatorAmbiguous, response.StatusCode)
+	}
+	var saga coordinatorSaga
+	if err := decodeStrict(response, responseBody, &saga); err != nil {
+		return IntentPersistence{}, err
+	}
+	return persistenceFromSaga(intent.ID, &saga, response.StatusCode == http.StatusCreated)
+}
+
+func (c *CoordinatorClient) resolveIntent(ctx context.Context, intent PairIntent, payloadSHA256 string) (IntentPersistence, error) {
+	body, err := json.Marshal(intentStatusRequest{IntentID: intent.ID, PayloadSHA256: payloadSHA256})
+	if err != nil {
+		return IntentPersistence{}, fmt.Errorf("encode intent status request: %w", err)
+	}
+	response, responseBody, err := c.post(ctx, "/v1/intent-status", body)
+	if err != nil {
+		return IntentPersistence{}, err
+	}
+	if response.StatusCode != http.StatusOK {
+		return IntentPersistence{}, fmt.Errorf("%w: intent status returned %d", ErrCoordinatorAmbiguous, response.StatusCode)
+	}
+	var status intentStatusResponse
+	if err := decodeStrict(response, responseBody, &status); err != nil {
+		return IntentPersistence{}, err
+	}
+	if status.IntentID != intent.ID || status.PayloadSHA256 != payloadSHA256 {
+		return IntentPersistence{}, fmt.Errorf("%w: intent status identity mismatch", ErrCoordinatorAmbiguous)
+	}
+	switch status.Status {
+	case "persisted":
+		if status.Saga == nil {
+			return IntentPersistence{}, fmt.Errorf("%w: persisted status has no saga", ErrCoordinatorAmbiguous)
+		}
+		return persistenceFromSaga(intent.ID, status.Saga, false)
+	case "absent":
+		if status.Saga != nil {
+			return IntentPersistence{}, fmt.Errorf("%w: absent status contains a saga", ErrCoordinatorAmbiguous)
+		}
+		return IntentPersistence{}, ErrCoordinatorNotPersisted
+	case "conflict", "unverifiable":
+		if status.Saga != nil {
+			return IntentPersistence{}, fmt.Errorf("%w: conflict status contains a saga", ErrCoordinatorAmbiguous)
+		}
+		return IntentPersistence{}, ErrCoordinatorPayloadConflict
+	default:
+		return IntentPersistence{}, fmt.Errorf("%w: unknown intent status", ErrCoordinatorAmbiguous)
+	}
+}
+
+func (c *CoordinatorClient) post(ctx context.Context, path string, body []byte) (*http.Response, []byte, error) {
+	nonce, err := c.nonce()
+	if err != nil || !validNonce(nonce) {
+		return nil, nil, errors.New("coordinator nonce unavailable")
+	}
+	timestamp := strconv.FormatInt(c.now().Unix(), 10)
+	signature := coordinatorMAC(c.key, path, c.caller, timestamp, nonce, body)
+	endpoint := strings.TrimSuffix(c.endpoint, "/v1/intents") + path
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
@@ -117,32 +200,36 @@ func (c *CoordinatorClient) SubmitIntent(ctx context.Context, intent PairIntent)
 
 	response, err := c.client.Do(request)
 	if err != nil {
-		return IntentPersistence{}, fmt.Errorf("%w: %v", ErrCoordinatorAmbiguous, err)
+		return nil, nil, fmt.Errorf("%w: %v", ErrCoordinatorAmbiguous, err)
 	}
 	defer response.Body.Close()
 	responseBody, err := readBounded(response.Body, maximumCoordinatorResponseBytes)
 	if err != nil {
-		return IntentPersistence{}, fmt.Errorf("%w: invalid response body", ErrCoordinatorAmbiguous)
+		return nil, nil, fmt.Errorf("%w: invalid response body", ErrCoordinatorAmbiguous)
 	}
-	if response.StatusCode != http.StatusCreated {
-		if response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-			return IntentPersistence{}, fmt.Errorf("%w with status %d", ErrCoordinatorDeclined, response.StatusCode)
-		}
-		return IntentPersistence{}, fmt.Errorf("%w: coordinator returned status %d", ErrCoordinatorAmbiguous, response.StatusCode)
-	}
+	return response, responseBody, nil
+}
+
+func decodeStrict(response *http.Response, responseBody []byte, target any) error {
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
-		return IntentPersistence{}, fmt.Errorf("%w: invalid response content type", ErrCoordinatorAmbiguous)
+		return fmt.Errorf("%w: invalid response content type", ErrCoordinatorAmbiguous)
 	}
-	var saga coordinatorSaga
 	decoder := json.NewDecoder(bytes.NewReader(responseBody))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&saga); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		return IntentPersistence{}, fmt.Errorf("%w: invalid response schema", ErrCoordinatorAmbiguous)
+	if err := decoder.Decode(target); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return fmt.Errorf("%w: invalid response schema", ErrCoordinatorAmbiguous)
 	}
-	if saga.IntentID != intent.ID || saga.State != "prechecked" || saga.Version != 1 || saga.PerpFilledBase != 0 ||
-		saga.PerpUnwoundBase != 0 || saga.SpotReceivedRaw != "0" {
+	return nil
+}
+
+func persistenceFromSaga(intentID string, saga *coordinatorSaga, requirePrechecked bool) (IntentPersistence, error) {
+	if saga.IntentID != intentID || saga.Version == 0 || !persistedSagaState(saga.State) {
 		return IntentPersistence{}, fmt.Errorf("%w: response does not prove intent persistence", ErrCoordinatorAmbiguous)
+	}
+	if requirePrechecked && (saga.State != "prechecked" || saga.Version != 1 || saga.PerpFilledBase != 0 ||
+		saga.PerpUnwoundBase != 0 || saga.SpotReceivedRaw != "0") {
+		return IntentPersistence{}, fmt.Errorf("%w: new intent response is not prechecked", ErrCoordinatorAmbiguous)
 	}
 	return IntentPersistence{
 		Status:             "persisted",
@@ -150,6 +237,16 @@ func (c *CoordinatorClient) SubmitIntent(ctx context.Context, intent PairIntent)
 		CoordinatorState:   saga.State,
 		CoordinatorVersion: saga.Version,
 	}, nil
+}
+
+func persistedSagaState(state string) bool {
+	switch state {
+	case "prechecked", "perp_submitted", "perp_partial", "perp_filled", "spot_submitted", "hedged",
+		"exiting", "unwinding", "closed", "cancelled", "expired", "unhedged", "failed_safe":
+		return true
+	default:
+		return false
+	}
 }
 
 func coordinatorEndpoint(baseURL string) (string, error) {

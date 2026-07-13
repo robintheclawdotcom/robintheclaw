@@ -294,6 +294,28 @@ pub struct AccountCommandStatusRequest {
     pub execution_account_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntentStatusRequest {
+    pub intent_id: String,
+    pub payload_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntentStatusResponse {
+    pub intent_id: String,
+    pub payload_sha256: String,
+    pub status: String,
+    pub saga: Option<ExecutionSaga>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentAdmissionOutcome {
+    pub created: bool,
+    pub saga: ExecutionSaga,
+    pub payload_sha256: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OwnerAction {
     pub chain_id: u64,
@@ -581,6 +603,8 @@ pub enum StoreError {
     DailyTurnoverExceeded,
     #[error("execution identity or active episode already exists")]
     Conflict,
+    #[error("intent identity conflicts with the stored payload digest")]
+    IntentPayloadConflict,
     #[error("account command identity conflicts with stored evidence")]
     AccountCommandConflict,
     #[error("account command is blocked by execution controls or reconciliation")]
@@ -647,7 +671,10 @@ impl Store {
                 return false;
             }
         }
-        true
+        sqlx::query("SELECT payload_sha256, payload_digest_required FROM execution_intents LIMIT 0")
+            .execute(&self.pool)
+            .await
+            .is_ok()
     }
 
     pub async fn halt(&self, reason: &str) -> Result<(), StoreError> {
@@ -1565,14 +1592,72 @@ impl Store {
         &self,
         intent: &PairIntent,
         now_ms: u64,
-    ) -> Result<ExecutionSaga, StoreError> {
+    ) -> Result<IntentAdmissionOutcome, StoreError> {
         intent
             .validate()
             .map_err(|error| StoreError::InvalidIntent(error.to_string()))?;
+        let payload_sha256 = calculate_intent_payload_sha256(intent)?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&intent.id)
+            .execute(&mut *transaction)
+            .await?;
+        let existing = sqlx::query_as::<_, (Option<String>, Json<Value>, String, bool)>(
+            r#"
+            SELECT payload_sha256, saga, execution_account_id, payload_digest_required
+            FROM execution_intents
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(&intent.id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some((stored_digest, Json(stored_saga), execution_account_id, digest_required)) =
+            existing
+        {
+            let exact_saga = (digest_required
+                && stored_digest.as_deref() == Some(payload_sha256.as_str()))
+            .then(|| serde_json::from_value::<ExecutionSaga>(stored_saga).ok())
+            .flatten()
+            .filter(|saga| saga.intent_id == intent.id);
+            if let Some(saga) = exact_saga {
+                transaction.commit().await?;
+                return Ok(IntentAdmissionOutcome {
+                    created: false,
+                    saga,
+                    payload_sha256,
+                });
+            }
+            halt_execution(&mut transaction, "intent_payload_identity_conflict").await?;
+            halt_account(
+                &mut transaction,
+                &execution_account_id,
+                "intent_payload_identity_conflict",
+            )
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO execution_incidents
+                    (intent_id, execution_account_id, severity, kind, details)
+                VALUES ($1, $2, 'critical', 'intent_payload_identity_conflict', $3)
+                "#,
+            )
+            .bind(&intent.id)
+            .bind(&execution_account_id)
+            .bind(Json(serde_json::json!({
+                "stored_payload_sha256": stored_digest,
+                "stored_payload_digest_required": digest_required,
+                "incoming_payload_sha256": payload_sha256,
+            })))
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Err(StoreError::IntentPayloadConflict);
+        }
         if now_ms < intent.created_at_ms || now_ms > intent.deadline_ms {
             return Err(StoreError::InvalidIntent("intent is not current".into()));
         }
-        let mut transaction = self.pool.begin().await?;
         let mode = sqlx::query_scalar::<_, String>(
             "SELECT mode FROM execution_control WHERE singleton FOR SHARE",
         )
@@ -1591,8 +1676,8 @@ impl Store {
             r#"
             INSERT INTO execution_intents
                 (id, execution_account_id, agent_id, source_evaluation_id, risk_version,
-                 strategy_version, symbol, direction, payload, saga, saga_version)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 'long_spot_short_perp', $8, $9, 1)
+                 strategy_version, symbol, direction, payload, payload_sha256, saga, saga_version)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'long_spot_short_perp', $8, $9, $10, 1)
             "#,
         )
         .bind(&intent.id)
@@ -1603,6 +1688,7 @@ impl Store {
         .bind(&intent.evidence.strategy_version)
         .bind(&intent.symbol)
         .bind(Json(intent))
+        .bind(&payload_sha256)
         .bind(Json(&saga))
         .execute(&mut *transaction)
         .await
@@ -1667,7 +1753,52 @@ impl Store {
         )
         .await?;
         transaction.commit().await?;
-        Ok(saga)
+        Ok(IntentAdmissionOutcome {
+            created: true,
+            saga,
+            payload_sha256,
+        })
+    }
+
+    pub async fn intent_status(
+        &self,
+        request: &IntentStatusRequest,
+    ) -> Result<IntentStatusResponse, StoreError> {
+        if !valid_hash(&request.intent_id) || !valid_digest(&request.payload_sha256) {
+            return Err(StoreError::InvalidAction);
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&request.intent_id)
+            .execute(&mut *transaction)
+            .await?;
+        let existing = sqlx::query_as::<_, (Option<String>, Json<Value>, bool)>(
+            "SELECT payload_sha256, saga, payload_digest_required FROM execution_intents WHERE id = $1",
+        )
+        .bind(&request.intent_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let (status, saga) = match existing {
+            None => ("absent", None),
+            Some((Some(stored_digest), Json(stored_saga), true))
+                if stored_digest == request.payload_sha256 =>
+            {
+                match serde_json::from_value::<ExecutionSaga>(stored_saga) {
+                    Ok(saga) if saga.intent_id == request.intent_id => ("persisted", Some(saga)),
+                    _ => ("conflict", None),
+                }
+            }
+            Some((_, _, false)) | Some((None, _, true)) => ("unverifiable", None),
+            Some(_) => ("conflict", None),
+        };
+        let response = IntentStatusResponse {
+            intent_id: request.intent_id.clone(),
+            payload_sha256: request.payload_sha256.clone(),
+            status: status.into(),
+            saga,
+        };
+        transaction.commit().await?;
+        Ok(response)
     }
 
     pub async fn request_exit(
@@ -4975,6 +5106,20 @@ fn valid_hash(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         && value[2..].bytes().any(|byte| byte != b'0')
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && value.bytes().any(|byte| byte != b'0')
+}
+
+pub fn calculate_intent_payload_sha256(intent: &PairIntent) -> Result<String, StoreError> {
+    let encoded = serde_json::to_vec(intent)
+        .map_err(|_| StoreError::InvalidIntent("intent cannot be encoded".into()))?;
+    Ok(hex::encode(Sha256::digest(encoded)))
 }
 
 fn parse_u64_string(value: &str) -> Option<u64> {

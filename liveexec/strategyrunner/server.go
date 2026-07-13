@@ -74,6 +74,14 @@ func (s *Server) run(w http.ResponseWriter, request *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "coordinator declined intent"})
 			return
 		}
+		if errors.Is(err, ErrCoordinatorNotPersisted) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "coordinator did not persist intent"})
+			return
+		}
+		if errors.Is(err, ErrCoordinatorPayloadConflict) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "coordinator payload identity conflicts"})
+			return
+		}
 		if errors.Is(err, ErrUnwindProtocolGap) {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "coordinator exit authority is unavailable"})
 			return
