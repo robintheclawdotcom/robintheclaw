@@ -6,6 +6,8 @@ license = "Apache-2.0"
 description = "Private event capture and shadow execution runtime for Robin the Claw."
 
 [dependencies]
+alloy-primitives = "1"
+alloy-sol-types = "1"
 anyhow = "1"
 base64 = "0.22"
 bytes = "1"
@@ -17,7 +19,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-sqlx = { version = "0.9", default-features = false, features = ["chrono", "json", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki", "uuid"] }
+sqlx = { version = "0.9", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki", "uuid"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"

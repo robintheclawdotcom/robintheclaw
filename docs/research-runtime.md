@@ -33,29 +33,36 @@ strategies, immutable dataset manifests, shadow intents, legs, reconciliation st
 snapshots. An object that reaches R2 before a database transaction may be orphaned after a database
 failure; it is never treated as an accepted event until its Postgres row exists.
 
-## Shadow execution
+## Paper execution
 
-The shadow model evaluates only on economically relevant events. It requires fresh executable
-quotes for both legs, records bid/ask depth, applies fees, gas, and a depth-based impact estimate,
-and produces `declined`, `proposed`, `partially_hedged`, `hedged`, `unhedged`, `cancelled`,
-`expired`, `unwound`, or `stale`.
+The production paper agent consumes durable Lighter ticker events and requests a block-pinned,
+size-specific Uniswap v4 exact-input quote for every configured market evaluation. It records the
+quote, Quoter gas estimate, block identity, token decimals, Stock Token multiplier state, perp bid,
+fees, and modeled costs before calculating net edge.
 
-Repeated event delivery cannot inflate a trade count: the database enforces one dedupe key per
-strategy, source event, and direction. The current collector persists perp features but does not
-create paired intents until a separately verified Uniswap quoting adapter supplies executable spot
-bid/ask and depth. Missing spot data is a decline, never a synthetic fill.
+Repeated event delivery cannot inflate activity: the database evaluates each source event once for
+a strategy version and permits one active opportunity episode per strategy and market. New ticks
+update or close that episode instead of creating independent trades. Missing or stale evidence is a
+decline, never a synthetic fill.
+
+The initial strategy supports long spot and short perpetual exposure only. The complete production
+runbook is in [Mainnet paper trading](paper-trading-operations.md).
 
 ## Environment
 
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Render Postgres private connection string. |
+| `DATABASE_MIGRATIONS_URL` | Direct private connection used only to apply migrations. |
 | `R2_BUCKET` | Private raw-event bucket name. |
 | `AWS_ENDPOINT_URL` | Account-scoped Cloudflare R2 S3 endpoint. |
 | `AWS_ACCESS_KEY_ID` | R2 token access key. |
 | `AWS_SECRET_ACCESS_KEY` | R2 token secret. |
+| `AWS_SESSION_TOKEN` | R2 session token when temporary credentials are used. |
 | `AWS_REGION` | `auto` for R2. |
 | `RUNTIME_CONFIG` | Checked-in, non-secret address configuration. |
+| `PAPER_AGENT_CONFIG` | Checked-in paper strategy registration. |
+| `ROBINHOOD_RPC_URL` | Authenticated Robinhood Chain mainnet RPC. |
 | `RUST_LOG` | Runtime logging filter. |
 
 No environment variable enables live trading. There is no execution mode setting and no signing

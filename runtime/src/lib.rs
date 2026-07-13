@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub mod archive;
 pub mod chain;
 pub mod lighter;
+pub mod paper;
 pub mod storage;
 
 pub const EVENT_SCHEMA_VERSION: &str = "1";

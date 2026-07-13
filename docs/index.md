@@ -16,6 +16,7 @@ onchain execution, continuous event capture, research models, and a no-code stra
 - [Application testnet](ux-testnet.md): the deployed personal-vault factory, faucet, and no-code onboarding path.
 - [Venue integration](venue-gates.md): the path from market data to live venue support.
 - [Research runtime](research-runtime.md): high-frequency capture, raw evidence, and shadow execution.
+- [Mainnet paper trading](paper-trading-operations.md): production workers, strategy evidence, launch verification, and recovery.
 - [Edge research methodology](research-methodology.md): model hierarchy, RWA inputs, and implementation roadmap.
 - [Mainnet readiness audit](production-audit-mainnet-readiness.md): the execution-readiness roadmap.
 

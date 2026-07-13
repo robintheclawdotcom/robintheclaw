@@ -1,18 +1,38 @@
 use crate::archive::{ArchiveSegment, DailyManifest, ManifestEntry};
+use crate::paper::{
+    ActivePaperPosition, PaperEntry, PaperEvaluation, PaperMark, PaperStatus, PaperTickerEvent,
+};
 use crate::{CanonicalState, Finality, MarketEventKind, RawMarketEvent, ShadowDecision};
+use alloy_primitives::U256;
 use anyhow::Context;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use object_store::{aws::AmazonS3Builder, path::Path, ObjectStore, ObjectStoreExt};
 use serde_json::json;
-use sqlx::{postgres::PgPoolOptions, PgPool, Row};
-use std::{env, sync::Arc, time::Duration};
+use sqlx::{migrate::Migrator, postgres::PgPoolOptions, PgPool, Row};
+use std::{env, str::FromStr, sync::Arc, time::Duration};
 use uuid::Uuid;
+
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
     objects: Arc<dyn ObjectStore>,
+}
+
+#[derive(Clone)]
+pub struct PaperStore {
+    pool: PgPool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PaperRecordOutcome {
+    pub inserted: bool,
+    pub episode_opened: bool,
+    pub episode_marked: bool,
+    pub episode_closed: bool,
+    pub superseded_events: u64,
 }
 
 pub struct MarketStatsFeature {
@@ -32,21 +52,12 @@ pub struct ArchiveReceipt {
 
 impl Store {
     pub async fn from_env() -> anyhow::Result<Self> {
-        let database_url = env::var("DATABASE_URL").context("DATABASE_URL is required")?;
         let bucket = env::var("R2_BUCKET").context("R2_BUCKET is required")?;
         let endpoint = env::var("AWS_ENDPOINT_URL").context("AWS_ENDPOINT_URL is required")?;
-        let pool = PgPoolOptions::new()
-            .max_connections(12)
-            .acquire_timeout(Duration::from_secs(10))
-            .connect(&database_url)
-            .await
-            .context("connect to Postgres")?;
-        sqlx::migrate::Migrator::new(std::path::Path::new("./migrations"))
-            .await
-            .context("load runtime migrations")?
-            .run(&pool)
-            .await
-            .context("apply runtime migrations")?;
+        if let Ok(token) = env::var("AWS_SESSION_TOKEN") {
+            anyhow::ensure!(!token.trim().is_empty(), "AWS_SESSION_TOKEN is empty");
+        }
+        let pool = runtime_pool().await?;
 
         let store = AmazonS3Builder::from_env()
             .with_bucket_name(bucket)
@@ -523,6 +534,423 @@ impl Store {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+}
+
+impl PaperStore {
+    pub async fn from_env() -> anyhow::Result<Self> {
+        Ok(Self {
+            pool: runtime_pool().await?,
+        })
+    }
+
+    pub async fn initialize_cursor(
+        &self,
+        consumer: &str,
+        symbols: &[String],
+        start_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(!consumer.trim().is_empty(), "paper consumer is empty");
+        anyhow::ensure!(!symbols.is_empty(), "paper symbol set is empty");
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("start cursor initialization")?;
+        for symbol in symbols {
+            anyhow::ensure!(!symbol.trim().is_empty(), "paper cursor symbol is empty");
+            sqlx::query(
+                "INSERT INTO paper_agent_cursors (consumer, symbol, last_received_at, last_event_id) \
+                 VALUES ($1, $2, $3, $4) ON CONFLICT (consumer, symbol) DO NOTHING",
+            )
+            .bind(consumer)
+            .bind(symbol)
+            .bind(start_at)
+            .bind(Uuid::nil())
+            .execute(&mut *transaction)
+            .await
+            .context("initialize paper cursor")?;
+        }
+        transaction
+            .commit()
+            .await
+            .context("commit cursor initialization")?;
+        Ok(())
+    }
+
+    pub async fn next_ticker(
+        &self,
+        consumer: &str,
+        symbols: &[String],
+    ) -> anyhow::Result<Option<PaperTickerEvent>> {
+        anyhow::ensure!(!symbols.is_empty(), "paper symbol set is empty");
+        let row = sqlx::query(
+            "SELECT e.id, e.symbol, e.received_at, e.source_timestamp_ms, e.source_session, \
+                    e.source_event_id, e.payload, \
+                    (SELECT count(*) - 1 FROM raw_market_events skipped \
+                     WHERE skipped.source = 'lighter' \
+                       AND skipped.kind = 'ticker'::market_event_kind \
+                       AND skipped.symbol = c.symbol \
+                       AND (skipped.received_at, skipped.id) > (c.last_received_at, c.last_event_id) \
+                       AND (skipped.received_at, skipped.id) <= (e.received_at, e.id)) AS superseded_events \
+             FROM paper_agent_cursors c \
+             JOIN LATERAL ( \
+                 SELECT candidate.id, candidate.symbol, candidate.received_at, \
+                        candidate.source_timestamp_ms, candidate.source_session, \
+                        candidate.source_event_id, candidate.payload \
+                 FROM raw_market_events candidate \
+                 WHERE candidate.source = 'lighter' \
+                   AND candidate.kind = 'ticker'::market_event_kind \
+                   AND candidate.symbol = c.symbol \
+                   AND (candidate.received_at, candidate.id) > (c.last_received_at, c.last_event_id) \
+                 ORDER BY candidate.received_at DESC, candidate.id DESC LIMIT 1 \
+             ) e ON true \
+             WHERE c.consumer = $1 AND c.symbol = ANY($2) \
+             ORDER BY e.received_at, e.id LIMIT 1",
+        )
+        .bind(consumer)
+        .bind(symbols)
+        .fetch_optional(&self.pool)
+        .await
+        .context("load next paper ticker")?;
+        row.map(|row| {
+            Ok(PaperTickerEvent {
+                id: row.try_get("id")?,
+                symbol: row.try_get("symbol")?,
+                received_at: row.try_get("received_at")?,
+                source_timestamp_ms: row.try_get("source_timestamp_ms")?,
+                source_session: row.try_get("source_session")?,
+                source_event_id: row.try_get("source_event_id")?,
+                payload: row.try_get("payload")?,
+                superseded_events: u64::try_from(row.try_get::<i64, _>("superseded_events")?)?,
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn active_position(
+        &self,
+        strategy_version: &str,
+        symbol: &str,
+    ) -> anyhow::Result<Option<ActivePaperPosition>> {
+        let row = sqlx::query(
+            "SELECT e.id, e.stock_amount_raw, e.perp_quantity_wei, e.entry_spot_cost_raw, \
+                    e.entry_spot_price_micros, e.entry_perp_price_micros, e.entry_perp_fee_raw, \
+                    e.gas_cost_per_leg_raw \
+             FROM paper_opportunity_episodes e \
+             WHERE e.strategy_version = $1 AND e.symbol = $2 \
+               AND e.status = 'active'::paper_episode_status",
+        )
+        .bind(strategy_version)
+        .bind(symbol)
+        .fetch_optional(&self.pool)
+        .await
+        .context("load active paper position")?;
+        row.map(active_position_from_row).transpose()
+    }
+
+    pub async fn record_paper_evaluation(
+        &self,
+        consumer: &str,
+        strategy_version: &str,
+        event: &PaperTickerEvent,
+        evaluation: &PaperEvaluation,
+    ) -> anyhow::Result<PaperRecordOutcome> {
+        let mut transaction = self.pool.begin().await.context("start paper transaction")?;
+        let cursor = sqlx::query(
+            "SELECT last_received_at, last_event_id FROM paper_agent_cursors \
+             WHERE consumer = $1 AND symbol = $2 FOR UPDATE",
+        )
+        .bind(consumer)
+        .bind(&event.symbol)
+        .fetch_one(&mut *transaction)
+        .await
+        .context("lock paper cursor")?;
+        let last_received_at: DateTime<Utc> = cursor.try_get("last_received_at")?;
+        let last_event_id: Uuid = cursor.try_get("last_event_id")?;
+        if (event.received_at, event.id) <= (last_received_at, last_event_id) {
+            transaction.commit().await?;
+            return Ok(PaperRecordOutcome::default());
+        }
+        if sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM paper_evaluations WHERE strategy_version = $1 AND event_id = $2",
+        )
+        .bind(strategy_version)
+        .bind(event.id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some()
+        {
+            advance_paper_cursor(&mut transaction, consumer, event).await?;
+            transaction.commit().await?;
+            return Ok(PaperRecordOutcome {
+                superseded_events: event.superseded_events,
+                ..PaperRecordOutcome::default()
+            });
+        }
+
+        sqlx::query(
+            "INSERT INTO paper_market_state (strategy_version, symbol) VALUES ($1, $2) \
+             ON CONFLICT (strategy_version, symbol) DO NOTHING",
+        )
+        .bind(strategy_version)
+        .bind(&event.symbol)
+        .execute(&mut *transaction)
+        .await?;
+        let active_episode = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT active_episode_id FROM paper_market_state \
+             WHERE strategy_version = $1 AND symbol = $2 FOR UPDATE",
+        )
+        .bind(strategy_version)
+        .bind(&event.symbol)
+        .fetch_one(&mut *transaction)
+        .await?;
+
+        let mut outcome = PaperRecordOutcome {
+            inserted: true,
+            superseded_events: event.superseded_events,
+            ..PaperRecordOutcome::default()
+        };
+        let mut episode_id = active_episode;
+        if evaluation.status == PaperStatus::Candidate {
+            if let Some(active_id) = active_episode {
+                let mark = evaluation
+                    .mark
+                    .as_ref()
+                    .context("candidate position has no mark")?;
+                update_paper_mark(&mut transaction, active_id, event, evaluation, mark).await?;
+                outcome.episode_marked = true;
+            } else {
+                let entry = evaluation
+                    .entry
+                    .as_ref()
+                    .context("candidate has no matched entry")?;
+                let opened = Uuid::new_v4();
+                let dedupe_key = crate::sha256(
+                    format!(
+                        "{strategy_version}:{}:long_spot_short_perp:{}:{}",
+                        event.symbol, event.source_session, event.source_event_id
+                    )
+                    .as_bytes(),
+                );
+                insert_paper_episode(
+                    &mut transaction,
+                    opened,
+                    &dedupe_key,
+                    strategy_version,
+                    event,
+                    evaluation,
+                    entry,
+                )
+                .await?;
+                sqlx::query(
+                    "UPDATE paper_market_state SET active_episode_id = $3, updated_at = now() \
+                     WHERE strategy_version = $1 AND symbol = $2",
+                )
+                .bind(strategy_version)
+                .bind(&event.symbol)
+                .bind(opened)
+                .execute(&mut *transaction)
+                .await?;
+                episode_id = Some(opened);
+                outcome.episode_opened = true;
+            }
+        } else if let (Some(active_id), true, Some(mark)) = (
+            active_episode,
+            evaluation.close_position,
+            evaluation.mark.as_ref(),
+        ) {
+            sqlx::query(
+                "UPDATE paper_opportunity_episodes SET status = 'closed', latest_event_id = $2, \
+                        last_observed_at = $3, closed_at = $3, evaluation_count = evaluation_count + 1, \
+                        latest_spot_exit_raw = $4, latest_perp_ask_micros = $5, \
+                        unrealized_pnl_raw = $6, realized_pnl_raw = $6, close_reason = $7 \
+                 WHERE id = $1 AND status = 'active'::paper_episode_status",
+            )
+            .bind(active_id)
+            .bind(event.id)
+            .bind(evaluation.evaluated_at)
+            .bind(&mark.spot_exit_raw)
+            .bind(mark.perp_ask_micros)
+            .bind(mark.net_pnl_raw)
+            .bind(&evaluation.reason)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE paper_market_state SET active_episode_id = NULL, updated_at = now() \
+                 WHERE strategy_version = $1 AND symbol = $2",
+            )
+            .bind(strategy_version)
+            .bind(&event.symbol)
+            .execute(&mut *transaction)
+            .await?;
+            outcome.episode_closed = true;
+        }
+
+        sqlx::query(
+            "INSERT INTO paper_evaluations \
+                (id, strategy_version, event_id, symbol, status, reason, direction, episode_id, \
+                 block_number, block_hash, gross_edge_ppm, net_edge_ppm, evidence, evaluated_at) \
+             VALUES ($1, $2, $3, $4, $5::paper_evaluation_status, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+        )
+        .bind(evaluation.id)
+        .bind(strategy_version)
+        .bind(event.id)
+        .bind(&event.symbol)
+        .bind(evaluation.status.as_db())
+        .bind(&evaluation.reason)
+        .bind(if evaluation.is_candidate() {
+            Some("long_spot_short_perp")
+        } else {
+            None
+        })
+        .bind(episode_id)
+        .bind(evaluation.block_number)
+        .bind(&evaluation.block_hash)
+        .bind(evaluation.gross_edge_ppm)
+        .bind(evaluation.net_edge_ppm)
+        .bind(&evaluation.evidence)
+        .bind(evaluation.evaluated_at)
+        .execute(&mut *transaction)
+        .await
+        .context("persist paper evaluation")?;
+        advance_paper_cursor(&mut transaction, consumer, event).await?;
+        transaction
+            .commit()
+            .await
+            .context("commit paper evaluation")?;
+        Ok(outcome)
+    }
+}
+
+async fn insert_paper_episode(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+    dedupe_key: &str,
+    strategy_version: &str,
+    event: &PaperTickerEvent,
+    evaluation: &PaperEvaluation,
+    entry: &PaperEntry,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO paper_opportunity_episodes \
+            (id, dedupe_key, strategy_version, symbol, direction, status, first_event_id, \
+             latest_event_id, opened_at, last_observed_at, latest_net_edge_ppm, stock_amount_raw, \
+             perp_quantity_wei, entry_spot_cost_raw, entry_spot_price_micros, \
+             entry_perp_price_micros, entry_perp_fee_raw, gas_cost_per_leg_raw) \
+         VALUES ($1, $2, $3, $4, 'long_spot_short_perp', 'active', $5, $5, $6, $6, $7, \
+                 $8, $9, $10, $11, $12, $13, $14)",
+    )
+    .bind(id)
+    .bind(dedupe_key)
+    .bind(strategy_version)
+    .bind(&event.symbol)
+    .bind(event.id)
+    .bind(evaluation.evaluated_at)
+    .bind(
+        evaluation
+            .net_edge_ppm
+            .context("candidate has no net edge")?,
+    )
+    .bind(&entry.stock_amount_raw)
+    .bind(&entry.perp_quantity_wei)
+    .bind(&entry.entry_spot_cost_raw)
+    .bind(entry.entry_spot_price_micros)
+    .bind(entry.entry_perp_price_micros)
+    .bind(&entry.entry_perp_fee_raw)
+    .bind(&entry.gas_cost_per_leg_raw)
+    .execute(&mut **transaction)
+    .await
+    .context("open paper episode")?;
+    Ok(())
+}
+
+async fn update_paper_mark(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    episode_id: Uuid,
+    event: &PaperTickerEvent,
+    evaluation: &PaperEvaluation,
+    mark: &PaperMark,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE paper_opportunity_episodes SET latest_event_id = $2, last_observed_at = $3, \
+                evaluation_count = evaluation_count + 1, latest_net_edge_ppm = $4, \
+                latest_spot_exit_raw = $5, latest_perp_ask_micros = $6, unrealized_pnl_raw = $7 \
+         WHERE id = $1 AND status = 'active'::paper_episode_status",
+    )
+    .bind(episode_id)
+    .bind(event.id)
+    .bind(evaluation.evaluated_at)
+    .bind(
+        evaluation
+            .net_edge_ppm
+            .context("candidate has no net edge")?,
+    )
+    .bind(&mark.spot_exit_raw)
+    .bind(mark.perp_ask_micros)
+    .bind(mark.net_pnl_raw)
+    .execute(&mut **transaction)
+    .await
+    .context("mark paper episode")?;
+    Ok(())
+}
+
+async fn advance_paper_cursor(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    consumer: &str,
+    event: &PaperTickerEvent,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE paper_agent_cursors SET last_received_at = $3, last_event_id = $4, updated_at = now() \
+         WHERE consumer = $1 AND symbol = $2",
+    )
+    .bind(consumer)
+    .bind(&event.symbol)
+    .bind(event.received_at)
+    .bind(event.id)
+    .execute(&mut **transaction)
+    .await
+    .context("advance paper cursor")?;
+    Ok(())
+}
+
+fn active_position_from_row(row: sqlx::postgres::PgRow) -> anyhow::Result<ActivePaperPosition> {
+    Ok(ActivePaperPosition {
+        episode_id: row.try_get("id")?,
+        stock_amount_raw: parse_db_uint(&row.try_get::<String, _>("stock_amount_raw")?)?,
+        perp_quantity_wei: parse_db_uint(&row.try_get::<String, _>("perp_quantity_wei")?)?,
+        entry_spot_cost_raw: parse_db_uint(&row.try_get::<String, _>("entry_spot_cost_raw")?)?,
+        entry_spot_price_micros: u64::try_from(row.try_get::<i64, _>("entry_spot_price_micros")?)?,
+        entry_perp_price_micros: u64::try_from(row.try_get::<i64, _>("entry_perp_price_micros")?)?,
+        entry_perp_fee_raw: parse_db_uint(&row.try_get::<String, _>("entry_perp_fee_raw")?)?,
+        gas_cost_per_leg_raw: parse_db_uint(&row.try_get::<String, _>("gas_cost_per_leg_raw")?)?,
+    })
+}
+
+fn parse_db_uint(value: &str) -> anyhow::Result<U256> {
+    U256::from_str(value).context("invalid paper position integer")
+}
+
+async fn runtime_pool() -> anyhow::Result<PgPool> {
+    let database_url = env::var("DATABASE_URL").context("DATABASE_URL is required")?;
+    let migrations_url =
+        env::var("DATABASE_MIGRATIONS_URL").unwrap_or_else(|_| database_url.clone());
+    let migration_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(15))
+        .connect(&migrations_url)
+        .await
+        .context("connect to migration database")?;
+    MIGRATOR
+        .run(&migration_pool)
+        .await
+        .context("apply runtime migrations")?;
+    migration_pool.close().await;
+    PgPoolOptions::new()
+        .max_connections(12)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect(&database_url)
+        .await
+        .context("connect to runtime database")
 }
 
 fn event_from_row(row: &sqlx::postgres::PgRow, raw: Vec<u8>) -> anyhow::Result<RawMarketEvent> {
