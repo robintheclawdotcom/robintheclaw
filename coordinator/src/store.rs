@@ -204,10 +204,14 @@ async fn verify_promotion(
 ) -> Result<(), StoreError> {
     let stored = sqlx::query_as::<_, (Value, String)>(
         r#"
-        SELECT evidence, evidence_sha256
-        FROM execution_promotion_evidence
-        WHERE strategy_version = $1
-        ORDER BY id DESC
+        SELECT evidence.evidence, evidence.evidence_sha256
+        FROM execution_promotion_events promotion
+        JOIN execution_promotion_evidence evidence
+          ON evidence.strategy_version = promotion.strategy_version
+         AND evidence.evidence_sha256 = promotion.evidence_sha256
+        WHERE promotion.strategy_version = $1
+          AND promotion.to_state = 'canary_eligible'
+        ORDER BY promotion.id DESC
         LIMIT 1
         FOR SHARE
         "#,

@@ -17,6 +17,28 @@ pub enum PromotionState {
     Retired,
 }
 
+impl PromotionState {
+    pub fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Registered, Self::Research)
+                | (Self::Research, Self::ShadowEligible)
+                | (Self::ShadowEligible, Self::Shadow)
+                | (Self::Shadow, Self::AuditReady)
+                | (Self::AuditReady, Self::CanaryEligible)
+                | (
+                    Self::Registered
+                        | Self::Research
+                        | Self::ShadowEligible
+                        | Self::Shadow
+                        | Self::AuditReady,
+                    Self::Rejected | Self::Retired
+                )
+                | (Self::CanaryEligible, Self::Retired)
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromotionEvidence {
     pub hypothesis_registered: bool,
@@ -186,5 +208,13 @@ mod tests {
             evidence.canary_failures(),
             vec![GateFailure::NetReturnConfidence]
         );
+    }
+
+    #[test]
+    fn promotion_sequence_cannot_skip_gates() {
+        assert!(PromotionState::Registered.can_transition_to(PromotionState::Research));
+        assert!(!PromotionState::Registered.can_transition_to(PromotionState::Shadow));
+        assert!(!PromotionState::CanaryEligible.can_transition_to(PromotionState::Research));
+        assert!(PromotionState::CanaryEligible.can_transition_to(PromotionState::Retired));
     }
 }

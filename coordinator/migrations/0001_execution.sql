@@ -8,6 +8,64 @@ CREATE TABLE execution_promotion_evidence (
     UNIQUE (strategy_version, evidence_sha256)
 );
 
+CREATE TABLE execution_promotion_events (
+    id BIGSERIAL PRIMARY KEY,
+    strategy_version TEXT NOT NULL,
+    from_state TEXT NOT NULL CHECK (from_state IN (
+        'registered', 'research', 'shadow_eligible', 'shadow', 'audit_ready', 'canary_eligible'
+    )),
+    to_state TEXT NOT NULL CHECK (to_state IN (
+        'research', 'shadow_eligible', 'shadow', 'audit_ready', 'canary_eligible', 'rejected', 'retired'
+    )),
+    evidence_sha256 TEXT NOT NULL CHECK (evidence_sha256 ~ '^[0-9a-f]{64}$'),
+    approved_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (
+        (from_state = 'registered' AND to_state IN ('research', 'rejected', 'retired')) OR
+        (from_state = 'research' AND to_state IN ('shadow_eligible', 'rejected', 'retired')) OR
+        (from_state = 'shadow_eligible' AND to_state IN ('shadow', 'rejected', 'retired')) OR
+        (from_state = 'shadow' AND to_state IN ('audit_ready', 'rejected', 'retired')) OR
+        (from_state = 'audit_ready' AND to_state IN ('canary_eligible', 'rejected', 'retired')) OR
+        (from_state = 'canary_eligible' AND to_state = 'retired')
+    ),
+    UNIQUE (strategy_version, to_state)
+);
+
+CREATE OR REPLACE FUNCTION execution_validate_promotion()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    current_state TEXT;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext(NEW.strategy_version));
+    SELECT to_state INTO current_state
+    FROM execution_promotion_events
+    WHERE strategy_version = NEW.strategy_version
+    ORDER BY id DESC
+    LIMIT 1;
+
+    IF current_state IS NULL THEN
+        current_state := 'registered';
+    END IF;
+    IF current_state <> NEW.from_state THEN
+        RAISE EXCEPTION 'promotion state changed concurrently';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM execution_promotion_evidence
+        WHERE strategy_version = NEW.strategy_version
+          AND evidence_sha256 = NEW.evidence_sha256
+    ) THEN
+        RAISE EXCEPTION 'promotion evidence does not exist';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER execution_promotion_sequence
+    BEFORE INSERT ON execution_promotion_events
+    FOR EACH ROW EXECUTE FUNCTION execution_validate_promotion();
+
 CREATE TABLE execution_intents (
     id TEXT PRIMARY KEY,
     strategy_version TEXT NOT NULL,
@@ -82,3 +140,6 @@ CREATE TRIGGER execution_evidence_append_only
     BEFORE UPDATE OR DELETE ON execution_promotion_evidence
     FOR EACH ROW EXECUTE FUNCTION execution_reject_mutation();
 
+CREATE TRIGGER execution_promotions_append_only
+    BEFORE UPDATE OR DELETE ON execution_promotion_events
+    FOR EACH ROW EXECUTE FUNCTION execution_reject_mutation();
