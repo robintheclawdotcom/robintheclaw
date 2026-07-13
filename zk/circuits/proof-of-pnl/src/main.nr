@@ -11,8 +11,8 @@
 //! dataset after the fact. Binding that commitment to the agent's complete on-chain anchored
 //! record is an integration step performed outside this circuit; see the zk README.
 //!
-//! Signed PnL is carried as an unsigned value biased by `PNL_BIAS` so the commitment hashes clean
-//! field elements and the off-chain prover reproduces the encoding with a single addition.
+//! Signed PnL is biased by `PNL_BIAS` into the non-negative range before it enters the Poseidon
+//! preimage, so the commitment hashes plain field elements.
 
 use poseidon::poseidon2::Poseidon2;
 
@@ -82,8 +82,8 @@ fn main(
 }
 
 /// Poseidon commitment over the agent id, trade count, blinding, and the full fixed-size PnL and
-/// notional arrays. PnL is biased into the non-negative range before hashing so the encoding is a
-/// plain field element; the off-chain prover reproduces it by adding `PNL_BIAS`.
+/// notional arrays. PnL is biased into the non-negative range before hashing so each slot is a
+/// plain field element.
 pub fn commitment_hash(
     agent_id: Field,
     count: u32,
@@ -172,5 +172,64 @@ fn active_trade_needs_notional() {
     let mut notional: [u64; MAX_TRADES] = [0; MAX_TRADES];
     net_pnl[0] = 50;
     notional[0] = 0; // active slot with zero notional
+    let _ = main(net_pnl, notional, 1, 0x1, 0x2, 100, 1);
+}
+
+// A full batch at the per-trade bounds with the claim set to the exact realised return. This
+// drives the largest total_pnl the loop can produce, fills every slot (no padding), and exercises
+// the lhs == rhs equality edge of the threshold check in the accepting direction.
+#[test]
+fn max_bounds_at_threshold() {
+    let net_pnl: [i64; MAX_TRADES] = [PNL_BIAS; MAX_TRADES];
+    let notional: [u64; MAX_TRADES] = [MAX_NOTIONAL; MAX_TRADES];
+    // 32 * PNL_BIAS over 32 * MAX_NOTIONAL is 10000 bps; claim exactly 10000.
+    let out = main(net_pnl, notional, MAX_TRADES, 0x7, 0x8, 10000, MAX_TRADES);
+    let expected = commitment_hash(0x8, MAX_TRADES, 0x7, net_pnl, notional);
+    assert(out == expected, "commitment output mismatch");
+}
+
+// The largest rhs the check can form (MAX_THRESHOLD_BPS * 32 * MAX_NOTIONAL = 6.4e18) must be
+// computed without overflowing i64 and then correctly reject: 10000 bps is below 200000.
+#[test(should_fail_with = "below threshold")]
+fn max_rhs_stays_in_range() {
+    let net_pnl: [i64; MAX_TRADES] = [PNL_BIAS; MAX_TRADES];
+    let notional: [u64; MAX_TRADES] = [MAX_NOTIONAL; MAX_TRADES];
+    let _ = main(net_pnl, notional, MAX_TRADES, 0x7, 0x8, MAX_THRESHOLD_BPS, MAX_TRADES);
+}
+
+#[test(should_fail_with = "pnl out of range")]
+fn pnl_magnitude_rejected() {
+    let mut net_pnl: [i64; MAX_TRADES] = [0; MAX_TRADES];
+    let mut notional: [u64; MAX_TRADES] = [0; MAX_TRADES];
+    net_pnl[0] = PNL_BIAS + 1;
+    notional[0] = 1000;
+    let _ = main(net_pnl, notional, 1, 0x1, 0x2, 0, 1);
+}
+
+#[test(should_fail_with = "notional out of range")]
+fn notional_magnitude_rejected() {
+    let mut net_pnl: [i64; MAX_TRADES] = [0; MAX_TRADES];
+    let mut notional: [u64; MAX_TRADES] = [0; MAX_TRADES];
+    net_pnl[0] = 50;
+    notional[0] = MAX_NOTIONAL + 1;
+    let _ = main(net_pnl, notional, 1, 0x1, 0x2, 0, 1);
+}
+
+#[test(should_fail_with = "threshold out of range")]
+fn threshold_magnitude_rejected() {
+    let mut net_pnl: [i64; MAX_TRADES] = [0; MAX_TRADES];
+    let mut notional: [u64; MAX_TRADES] = [0; MAX_TRADES];
+    net_pnl[0] = 50;
+    notional[0] = 1000;
+    let _ = main(net_pnl, notional, 1, 0x1, 0x2, MAX_THRESHOLD_BPS + 1, 1);
+}
+
+#[test(should_fail_with = "below threshold")]
+fn negative_net_fails_positive_threshold() {
+    let mut net_pnl: [i64; MAX_TRADES] = [0; MAX_TRADES];
+    let mut notional: [u64; MAX_TRADES] = [0; MAX_TRADES];
+    net_pnl[0] = -50;
+    notional[0] = 1000;
+    // -500 bps against a +100 bps claim.
     let _ = main(net_pnl, notional, 1, 0x1, 0x2, 100, 1);
 }

@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { encodeBatch, toProverToml, MAX_TRADES, SCALE } from "./encode.mjs";
+import {
+  encodeBatch,
+  toProverToml,
+  toField,
+  MAX_TRADES,
+  SCALE,
+  FIELD_MODULUS,
+  MAX_THRESHOLD_BPS,
+  PNL_BIAS,
+  MAX_NOTIONAL,
+} from "./encode.mjs";
 
 const agentId = "0xabcd";
 
@@ -101,4 +111,44 @@ test("renders a Prover.toml with a blinding", () => {
   assert.match(toml, /agent_id = "0xabcd"/);
   assert.match(toml, /threshold_bps = "100"/);
   assert.match(toml, /trade_count = "1"/);
+});
+
+test("toField normalizes hex, decimal, and numeric inputs", () => {
+  assert.equal(toField("0xABCD", "x"), "0xabcd");
+  assert.equal(toField("255", "x"), "0xff");
+  assert.equal(toField(255, "x"), "0xff");
+  assert.equal(toField(255n, "x"), "0xff");
+});
+
+test("toField rejects malformed, negative, and oversized values", () => {
+  assert.throws(() => toField("0xZZ", "x"), /not a valid field element/);
+  assert.throws(() => toField("nope", "x"), /not a valid field element/);
+  assert.throws(() => toField(-5, "x"), /non-negative/);
+  assert.throws(() => toField(FIELD_MODULUS, "x"), /at or above the field modulus/);
+  assert.doesNotThrow(() => toField(FIELD_MODULUS - 1n, "x"));
+});
+
+test("toProverToml refuses a zero blinding", () => {
+  const encoded = encodeBatch({ agentId, thresholdBps: 100, trades: [{ netPnlUsd: 1, notionalUsd: 1000 }] });
+  assert.throws(() => toProverToml({ encoded, blinding: "0x0" }), /blinding must be non-zero/);
+});
+
+test("accepts the threshold at its exact bound and rejects one past it", () => {
+  const trades = [{ netPnlUsd: 1, notionalUsd: 1000 }];
+  assert.doesNotThrow(() => encodeBatch({ agentId, thresholdBps: MAX_THRESHOLD_BPS, trades }));
+  assert.doesNotThrow(() => encodeBatch({ agentId, thresholdBps: -MAX_THRESHOLD_BPS, trades }));
+  assert.throws(() => encodeBatch({ agentId, thresholdBps: MAX_THRESHOLD_BPS + 1n, trades }), /out of range/);
+  assert.throws(() => encodeBatch({ agentId, thresholdBps: -(MAX_THRESHOLD_BPS + 1n), trades }), /out of range/);
+});
+
+test("accepts per-trade values at their exact bounds", () => {
+  const maxPnlUsd = Number(PNL_BIAS / BigInt(SCALE));
+  const maxNotionalUsd = Number(MAX_NOTIONAL / BigInt(SCALE));
+  const encoded = encodeBatch({
+    agentId,
+    thresholdBps: 0,
+    trades: [{ netPnlUsd: maxPnlUsd, notionalUsd: maxNotionalUsd }],
+  });
+  assert.equal(encoded.netPnl[0], PNL_BIAS);
+  assert.equal(encoded.notional[0], MAX_NOTIONAL);
 });

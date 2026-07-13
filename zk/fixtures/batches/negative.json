@@ -1,0 +1,9 @@
+{
+  "agentId": "0xabcd",
+  "thresholdBps": -100,
+  "blinding": "0x1234",
+  "trades": [
+    { "netPnlUsd": -5, "notionalUsd": 1000 },
+    { "netPnlUsd": -3, "notionalUsd": 1000 }
+  ]
+}

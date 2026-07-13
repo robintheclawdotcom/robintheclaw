@@ -34,7 +34,7 @@ performed by the consuming contract, outside this circuit.
 circuits/proof-of-pnl/   Noir circuit (src/main.nr) + in-circuit tests
 prover/                  Node CLI that encodes a trade batch and drives nargo + bb
 contracts/               generated Honk verifier + a domain wrapper + Foundry tests
-fixtures/                a committed golden proof, public inputs, and verification keys
+fixtures/                batch inputs and a regen script that rebuilds the committed proofs via the CLI
 ```
 
 ## Build and test
@@ -64,30 +64,38 @@ cd prover
 node src/prove.mjs batch.json --out proof-output
 ```
 
-where `batch.json` is:
+where `batch.json` describes the claim and the private trades:
 
 ```json
 {
-  "agentId": "0x...",
-  "thresholdBps": 100,
-  "blinding": "0x...",
+  "agentId": "0xa11ce",
+  "thresholdBps": 10,
   "trades": [
-    { "netPnlUsd": 0.03, "notionalUsd": 100.0 },
-    { "netPnlUsd": -0.01, "notionalUsd": 100.0 }
+    { "netPnlUsd": 0.20, "notionalUsd": 100.0 },
+    { "netPnlUsd": 0.10, "notionalUsd": 100.0 }
   ]
 }
 ```
 
-The CLI writes `proof`, `public_inputs`, `vk`, and a `claim.json` summary. The blinding must be a
-fresh random field element per proof; reusing it, or omitting it, lets an observer who guesses the
-trades confirm them against the commitment.
+`thresholdBps` is the claim: net return was at least this many basis points, or negative for a
+max-loss claim. The CLI refuses to prove a batch whose net return is below the claim.
+
+The output directory gets `proof` and `proof.hex` (the keccak proof, binary and hex),
+`public_inputs`, `vk`, and `claim.json` (agent, threshold, trade count, net return, the Poseidon
+commitment, and the blinding). To verify on-chain, pass `proof.hex` and the four public parameters
+from `claim.json` (`agentId`, `thresholdBps`, `tradeCount`, `commitment`) to
+`PnlProofVerifier.verifyPnlClaim`; the Foundry test does exactly this.
+
+`blinding` is optional. Supply a fresh random field element, or omit it and the CLI generates one
+and records it in `claim.json`. Never reuse a blinding across proofs, and keep `claim.json`: the
+blinding is what reopens the commitment, and its secrecy is what stops an observer who guesses the
+trades from confirming them.
 
 ## Toolchain
 
 - Noir `nargo` 1.0.0-beta.22, Poseidon library `v0.3.0`.
-- Barretenberg `bb` (UltraHonk). The on-chain path uses `--oracle_hash keccak`, which is what the
-  generated Solidity verifier and its 7616-byte proof / 1888-byte key expect; the native path uses
-  the default oracle. The two proofs are not interchangeable.
+- Barretenberg `bb` (UltraHonk). Proofs are generated with `--oracle_hash keccak`, so the same
+  7616-byte proof verifies both natively (`bb verify`) and through the generated Solidity verifier.
 
 ## Notes and boundaries
 
