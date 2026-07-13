@@ -24,6 +24,11 @@ because owner-only wiring occurs in the same broadcast. Do not use a browser pro
 5. Run `npm run verify:testnet-proof` after each proof deployment.
 6. Publish only after the local check suite, identity leak scan, and a review of staged files.
 
+`Deploy.s.sol` creates a halted, no-venue core. It is not authorization to fund or enable
+execution. Immediately run `VerifyDeployment.s.sol` against the confirmed addresses and retain its
+output with the deployment record. A future typed venue adapter requires its own reviewed release
+and cannot be substituted with a generic Universal Router call.
+
 ## Render release procedure
 
 The Render service is Git-backed and deploys `main` automatically. The repository binding in

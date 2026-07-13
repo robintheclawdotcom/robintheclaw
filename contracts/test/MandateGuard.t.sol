@@ -17,7 +17,7 @@ contract MandateGuardTest is Test {
 
     function setUp() public {
         target = address(new MockTarget());
-        guard = new MandateGuard(owner, vault, 1_000e6, 1 days);
+        guard = new MandateGuard(owner, vault, 1_000e6, 1 days, false);
         vm.prank(owner);
         guard.setAllowed(target, sel, true);
     }
@@ -68,6 +68,13 @@ contract MandateGuardTest is Test {
         vm.prank(vault);
         vm.expectRevert(MandateGuard.IsHalted.selector);
         guard.check(target, sel, 1);
+    }
+
+    function test_canStartHalted() public {
+        MandateGuard haltedGuard = new MandateGuard(owner, vault, 1_000e6, 1 days, true);
+        vm.prank(vault);
+        vm.expectRevert(MandateGuard.IsHalted.selector);
+        haltedGuard.check(target, sel, 1);
     }
 
     function test_onlyOwnerAdmin() public {

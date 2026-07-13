@@ -23,7 +23,7 @@ contract DeployTestnet is Script {
         vm.startBroadcast();
 
         TestUSDG asset = new TestUSDG(owner, initialSupply);
-        MandateGuard guard = new MandateGuard(owner, owner, cap, window);
+        MandateGuard guard = new MandateGuard(owner, owner, cap, window, true);
         StrategyVault vault = new StrategyVault(asset, guard, owner, agent);
         AttestationAnchor anchor = new AttestationAnchor(address(vault));
 

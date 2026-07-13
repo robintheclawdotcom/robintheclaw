@@ -48,7 +48,7 @@ contract StrategyVaultTest is Test {
         dex = new MockDex();
         // deploy guard with a placeholder executor, then point it at the vault
         vm.startPrank(owner);
-        guard = new MandateGuard(owner, owner, 1_000e6, 1 days);
+        guard = new MandateGuard(owner, owner, 1_000e6, 1 days, false);
         vault = new StrategyVault(usdg, guard, owner, agent);
         guard.setExecutor(address(vault));
         guard.setAllowed(address(dex), swapSel, true);

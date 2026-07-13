@@ -16,6 +16,7 @@ decisioning, execution controls, and performance verification by design.
 - [Venue gates](venue-gates.md): what must be verified before any order path exists.
 - [Research runtime](research-runtime.md): private high-frequency capture, raw evidence, and shadow execution.
 - [Edge research methodology](research-methodology.md): model hierarchy, RWA inputs, statistical gates, and implementation roadmap.
+- [Mainnet readiness audit](production-audit-mainnet-readiness.md): release blockers, implemented safeguards, and required evidence.
 
 ## Non-negotiable operating rules
 

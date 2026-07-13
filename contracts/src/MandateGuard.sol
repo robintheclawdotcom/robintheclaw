@@ -39,7 +39,13 @@ contract MandateGuard {
         _;
     }
 
-    constructor(address owner_, address executor_, uint256 cap_, uint64 window_) {
+    constructor(
+        address owner_,
+        address executor_,
+        uint256 cap_,
+        uint64 window_,
+        bool initiallyHalted_
+    ) {
         require(owner_ != address(0) && executor_ != address(0), "zero addr");
         require(cap_ > 0, "cap=0");
         require(window_ > 0, "window=0");
@@ -48,6 +54,7 @@ contract MandateGuard {
         windowNotionalCap = cap_;
         windowLength = window_;
         windowStart = block.timestamp;
+        halted = initiallyHalted_;
     }
 
     function setExecutor(address executor_) external onlyOwner {
