@@ -17,22 +17,22 @@ func TestQuoteBundleSignatureBindsEveryField(t *testing.T) {
 	if err := quote.Sign(privateKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := quote.Verify(publicKey, 100_000); err != nil {
+	if err := quote.Verify(publicKey, 101, 100_000); err != nil {
 		t.Fatalf("valid quote rejected: %v", err)
 	}
 
 	tampered := quote
 	tampered.ExecutionAccountID = "account-canary-2"
-	if err := tampered.Verify(publicKey, 100_000); err == nil {
+	if err := tampered.Verify(publicKey, 101, 100_000); err == nil {
 		t.Fatal("cross-account substitution accepted")
 	}
 	tampered = quote
 	tampered.Spot.MinimumAmountOut = "1"
-	if err := tampered.Verify(publicKey, 100_000); err == nil {
+	if err := tampered.Verify(publicKey, 101, 100_000); err == nil {
 		t.Fatal("amount substitution accepted")
 	}
 	otherPublicKey, _, _ := ed25519.GenerateKey(nil)
-	if err := quote.Verify(otherPublicKey, 100_000); err == nil {
+	if err := quote.Verify(otherPublicKey, 101, 100_000); err == nil {
 		t.Fatal("untrusted quote key accepted")
 	}
 }
@@ -43,7 +43,7 @@ func TestQuoteBundleRejectsStaleAndMismatchedPolicy(t *testing.T) {
 	if err := quote.Sign(privateKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := quote.Verify(publicKey, quote.ExpiresAtMS); err == nil {
+	if err := quote.Verify(publicKey, 101, quote.ExpiresAtMS); err == nil {
 		t.Fatal("expired quote accepted")
 	}
 
@@ -52,8 +52,47 @@ func TestQuoteBundleRejectsStaleAndMismatchedPolicy(t *testing.T) {
 	if err := quote.Sign(privateKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := quote.Verify(publicKey, 100_000); err == nil {
+	if err := quote.Verify(publicKey, 101, 100_000); err == nil {
 		t.Fatal("unapproved strategy accepted")
+	}
+}
+
+func TestExitQuoteRejectsSubstitutedPersistenceAuthority(t *testing.T) {
+	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
+	quote := testQuote()
+	quote.Action = ActionUnwind
+	quote.Spot.Side = "sell"
+	quote.Spot.MinimumAmountOut = "24000000"
+	quote.Perp.Side = "long"
+	quote.Perp.ReduceOnly = true
+	quote.ExitAuthority = &ExitQuoteAuthority{
+		Source: "execution-authority", SourceSession: "authority-session-1", SourceEventID: "authority-event-1",
+		SourceSequence: 1, ExecutionAccountID: quote.ExecutionAccountID, IntentID: hashValue("intent"),
+		MarketManifest: quote.MarketManifest, PayloadSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ReceivedAtMS: 99_500, SubmissionDeadlineMS: quote.ExpiresAtMS,
+		ReconciliationDeadlineMS: quote.ExpiresAtMS + MaximumExitReconciliationMS,
+	}
+	if err := quote.Sign(privateKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := quote.Verify(publicKey, 101, 100_000); err != nil {
+		t.Fatal(err)
+	}
+	quote.ExitAuthority.ExecutionAccountID = "account-canary-2"
+	if err := quote.Verify(publicKey, 101, 100_000); err == nil {
+		t.Fatal("cross-account exit authority substitution accepted")
+	}
+}
+
+func TestQuoteBundleRejectsUnreviewedMarketIndex(t *testing.T) {
+	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
+	quote := testQuote()
+	quote.Perp.MarketIndex = 102
+	if err := quote.Sign(privateKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := quote.Verify(publicKey, 101, 100_000); err == nil {
+		t.Fatal("signed quote for an unreviewed market index accepted")
 	}
 }
 
@@ -80,10 +119,11 @@ func TestAuthenticatorRejectsReplayAndTampering(t *testing.T) {
 
 func testQuote() QuoteBundle {
 	return QuoteBundle{
-		SchemaVersion:          1,
+		SchemaVersion:          QuoteSchemaVersion,
 		RequestID:              hashValue("request"),
 		ExecutionAccountID:     "account-canary-1",
 		SourceEvaluationID:     hashValue("evaluation"),
+		MarketManifest:         hashValue("market"),
 		StrategyVersion:        StrategyVersion,
 		StrategyManifestSHA256: StrategyManifestSHA256,
 		SourceConfigSHA256:     SourceConfigSHA256,

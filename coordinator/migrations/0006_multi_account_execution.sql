@@ -6,7 +6,7 @@ CREATE TABLE execution_accounts (
     risk_version TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('provisioning', 'active', 'blocked', 'closed')),
     lighter_account_index BIGINT CHECK (lighter_account_index > 0),
-    lighter_api_key_index SMALLINT CHECK (lighter_api_key_index BETWEEN 2 AND 254),
+    lighter_api_key_index SMALLINT CHECK (lighter_api_key_index BETWEEN 4 AND 254),
     robinhood_vault TEXT CHECK (robinhood_vault ~ '^0x[0-9a-f]{40}$'),
     robinhood_signer TEXT CHECK (robinhood_signer ~ '^0x[0-9a-f]{40}$'),
     binding_sha256 TEXT CHECK (binding_sha256 ~ '^[0-9a-f]{64}$'),

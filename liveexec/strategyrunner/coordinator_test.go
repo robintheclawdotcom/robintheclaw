@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -182,6 +183,54 @@ func TestCoordinatorClientRejectsPayloadCollision(t *testing.T) {
 	}
 }
 
+func TestCoordinatorClientReconcilesExitCommitTimeoutWithoutResend(t *testing.T) {
+	exit := fixtureExit()
+	intentKey := bytes.Repeat([]byte{3}, 32)
+	exitKey := bytes.Repeat([]byte{4}, 32)
+	encoded, _ := json.Marshal(exit)
+	digest := sha256.Sum256(encoded)
+	payloadSHA256 := hex.EncodeToString(digest[:])
+	var submissions atomic.Int32
+	var statusQueries atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/exits":
+			submissions.Add(1)
+			time.Sleep(100 * time.Millisecond)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+		case "/v1/exit-status":
+			statusQueries.Add(1)
+			body, _ := io.ReadAll(request.Body)
+			wantMAC := coordinatorMAC(exitKey, request.URL.Path, "strategy-exit", request.Header.Get("X-RTC-Timestamp"), request.Header.Get("X-RTC-Nonce"), body)
+			gotMAC, _ := hex.DecodeString(request.Header.Get("X-RTC-Signature"))
+			if !hmac.Equal(wantMAC, gotMAC) {
+				t.Error("exit status authentication mismatch")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(exitStatusResponse{
+				RequestID: exit.RequestID, PayloadSHA256: payloadSHA256, Status: "persisted",
+				Saga: &coordinatorSaga{IntentID: exit.IntentID, State: "unwinding", Version: 7, PerpFilledBase: 1_000_000, SpotReceivedRaw: "2000000"},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := NewCoordinatorClientWithExit(server.URL, "strategy-runner", intentKey, "strategy-exit", exitKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.now = func() time.Time { return time.Unix(100, 0) }
+	client.nonce = func() (string, error) { return "0123456789abcdef0123456789abcdef", nil }
+	client.client.Timeout = 25 * time.Millisecond
+	persistence, err := client.SubmitExit(context.Background(), exit)
+	if err != nil || persistence.RequestID != exit.RequestID || persistence.CoordinatorState != "unwinding" ||
+		submissions.Load() != 1 || statusQueries.Load() != 1 {
+		t.Fatalf("exit commit timeout was not reconciled: persistence=%+v err=%v submissions=%d status=%d", persistence, err, submissions.Load(), statusQueries.Load())
+	}
+}
+
 func TestCoordinatorClientRejectsUnsafeConfig(t *testing.T) {
 	key := bytes.Repeat([]byte{3}, 32)
 	for name, baseURL := range map[string]string{
@@ -226,4 +275,21 @@ func fixtureIntent(t *testing.T) PairIntent {
 		t.Fatal(err)
 	}
 	return intent
+}
+
+func fixtureExit() ExitSubmission {
+	return ExitSubmission{
+		RequestID:                  "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ExecutionAccountID:         "account-canary-1",
+		IntentID:                   "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		QuoteSourceSession:         "authority-session-1",
+		QuoteSourceEventID:         "authority-event-1",
+		QuotePayloadSHA256:         strings.Repeat("c", 64),
+		PerpUnwindPrice:            25_000,
+		MinimumUnwindSettlementOut: "24000000",
+		RequestedAtMS:              99_500,
+		SubmissionDeadlineMS:       102_000,
+		ReconciliationDeadlineMS:   86_502_000,
+		Reason:                     "strategy_exit",
+	}
 }

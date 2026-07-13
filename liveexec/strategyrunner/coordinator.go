@@ -37,17 +37,43 @@ type IntentPersistence struct {
 	CoordinatorVersion uint64 `json:"coordinator_version"`
 }
 
+type ExitSubmission struct {
+	RequestID                  string `json:"request_id"`
+	ExecutionAccountID         string `json:"execution_account_id"`
+	IntentID                   string `json:"intent_id"`
+	QuoteSourceSession         string `json:"quote_source_session"`
+	QuoteSourceEventID         string `json:"quote_source_event_id"`
+	QuotePayloadSHA256         string `json:"quote_payload_sha256"`
+	PerpUnwindPrice            uint32 `json:"perp_unwind_price"`
+	MinimumUnwindSettlementOut string `json:"minimum_unwind_settlement_out"`
+	RequestedAtMS              uint64 `json:"requested_at_ms"`
+	SubmissionDeadlineMS       uint64 `json:"submission_deadline_ms"`
+	ReconciliationDeadlineMS   uint64 `json:"reconciliation_deadline_ms"`
+	Reason                     string `json:"reason"`
+}
+
+type ExitPersistence struct {
+	Status             string `json:"status"`
+	RequestID          string `json:"request_id"`
+	IntentID           string `json:"intent_id"`
+	CoordinatorState   string `json:"coordinator_state"`
+	CoordinatorVersion uint64 `json:"coordinator_version"`
+}
+
 type IntentDispatcher interface {
 	SubmitIntent(context.Context, PairIntent) (IntentPersistence, error)
+	SubmitExit(context.Context, ExitSubmission) (ExitPersistence, error)
 }
 
 type CoordinatorClient struct {
-	endpoint string
-	caller   string
-	key      []byte
-	client   *http.Client
-	now      func() time.Time
-	nonce    func() (string, error)
+	endpoint   string
+	caller     string
+	key        []byte
+	exitCaller string
+	exitKey    []byte
+	client     *http.Client
+	now        func() time.Time
+	nonce      func() (string, error)
 }
 
 type coordinatorSaga struct {
@@ -66,6 +92,18 @@ type intentStatusRequest struct {
 
 type intentStatusResponse struct {
 	IntentID      string           `json:"intent_id"`
+	PayloadSHA256 string           `json:"payload_sha256"`
+	Status        string           `json:"status"`
+	Saga          *coordinatorSaga `json:"saga"`
+}
+
+type exitStatusRequest struct {
+	RequestID     string `json:"request_id"`
+	PayloadSHA256 string `json:"payload_sha256"`
+}
+
+type exitStatusResponse struct {
+	RequestID     string           `json:"request_id"`
 	PayloadSHA256 string           `json:"payload_sha256"`
 	Status        string           `json:"status"`
 	Saga          *coordinatorSaga `json:"saga"`
@@ -107,6 +145,19 @@ func NewCoordinatorClient(baseURL, caller string, key []byte) (*CoordinatorClien
 	}, nil
 }
 
+func NewCoordinatorClientWithExit(baseURL, intentCaller string, intentKey []byte, exitCaller string, exitKey []byte) (*CoordinatorClient, error) {
+	client, err := NewCoordinatorClient(baseURL, intentCaller, intentKey)
+	if err != nil {
+		return nil, err
+	}
+	if !validCaller(exitCaller) || len(exitKey) != sha256.Size || exitCaller == intentCaller || hmac.Equal(exitKey, intentKey) {
+		return nil, errors.New("distinct coordinator exit caller and 32-byte HMAC key are required")
+	}
+	client.exitCaller = exitCaller
+	client.exitKey = append([]byte(nil), exitKey...)
+	return client, nil
+}
+
 func (c *CoordinatorClient) SubmitIntent(ctx context.Context, intent PairIntent) (IntentPersistence, error) {
 	body, err := json.Marshal(intent)
 	if err != nil {
@@ -122,7 +173,7 @@ func (c *CoordinatorClient) SubmitIntent(ctx context.Context, intent PairIntent)
 }
 
 func (c *CoordinatorClient) submitIntent(ctx context.Context, intent PairIntent, body []byte) (IntentPersistence, error) {
-	response, responseBody, err := c.post(ctx, "/v1/intents", body)
+	response, responseBody, err := c.post(ctx, "/v1/intents", body, c.caller, c.key)
 	if err != nil {
 		return IntentPersistence{}, err
 	}
@@ -144,7 +195,7 @@ func (c *CoordinatorClient) resolveIntent(ctx context.Context, intent PairIntent
 	if err != nil {
 		return IntentPersistence{}, fmt.Errorf("encode intent status request: %w", err)
 	}
-	response, responseBody, err := c.post(ctx, "/v1/intent-status", body)
+	response, responseBody, err := c.post(ctx, "/v1/intent-status", body, c.caller, c.key)
 	if err != nil {
 		return IntentPersistence{}, err
 	}
@@ -179,13 +230,88 @@ func (c *CoordinatorClient) resolveIntent(ctx context.Context, intent PairIntent
 	}
 }
 
-func (c *CoordinatorClient) post(ctx context.Context, path string, body []byte) (*http.Response, []byte, error) {
+func (c *CoordinatorClient) SubmitExit(ctx context.Context, exit ExitSubmission) (ExitPersistence, error) {
+	if !validCaller(c.exitCaller) || len(c.exitKey) != sha256.Size {
+		return ExitPersistence{}, ErrCoordinatorDeclined
+	}
+	body, err := json.Marshal(exit)
+	if err != nil {
+		return ExitPersistence{}, fmt.Errorf("encode coordinator exit: %w", err)
+	}
+	digest := sha256.Sum256(body)
+	payloadSHA256 := hex.EncodeToString(digest[:])
+	persistence, err := c.submitExit(ctx, exit, body)
+	if err == nil || !errors.Is(err, ErrCoordinatorAmbiguous) {
+		return persistence, err
+	}
+	return c.resolveExit(ctx, exit, payloadSHA256)
+}
+
+func (c *CoordinatorClient) submitExit(ctx context.Context, exit ExitSubmission, body []byte) (ExitPersistence, error) {
+	response, responseBody, err := c.post(ctx, "/v1/exits", body, c.exitCaller, c.exitKey)
+	if err != nil {
+		return ExitPersistence{}, err
+	}
+	if response.StatusCode != http.StatusAccepted && response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			return ExitPersistence{}, fmt.Errorf("%w with status %d", ErrCoordinatorDeclined, response.StatusCode)
+		}
+		return ExitPersistence{}, fmt.Errorf("%w: coordinator returned status %d", ErrCoordinatorAmbiguous, response.StatusCode)
+	}
+	var saga coordinatorSaga
+	if err := decodeStrict(response, responseBody, &saga); err != nil {
+		return ExitPersistence{}, err
+	}
+	return exitPersistenceFromSaga(exit, &saga, response.StatusCode == http.StatusAccepted)
+}
+
+func (c *CoordinatorClient) resolveExit(ctx context.Context, exit ExitSubmission, payloadSHA256 string) (ExitPersistence, error) {
+	body, err := json.Marshal(exitStatusRequest{RequestID: exit.RequestID, PayloadSHA256: payloadSHA256})
+	if err != nil {
+		return ExitPersistence{}, fmt.Errorf("encode exit status request: %w", err)
+	}
+	response, responseBody, err := c.post(ctx, "/v1/exit-status", body, c.exitCaller, c.exitKey)
+	if err != nil {
+		return ExitPersistence{}, err
+	}
+	if response.StatusCode != http.StatusOK {
+		return ExitPersistence{}, fmt.Errorf("%w: exit status returned %d", ErrCoordinatorAmbiguous, response.StatusCode)
+	}
+	var status exitStatusResponse
+	if err := decodeStrict(response, responseBody, &status); err != nil {
+		return ExitPersistence{}, err
+	}
+	if status.RequestID != exit.RequestID || status.PayloadSHA256 != payloadSHA256 {
+		return ExitPersistence{}, fmt.Errorf("%w: exit status identity mismatch", ErrCoordinatorAmbiguous)
+	}
+	switch status.Status {
+	case "persisted":
+		if status.Saga == nil {
+			return ExitPersistence{}, fmt.Errorf("%w: persisted exit has no saga", ErrCoordinatorAmbiguous)
+		}
+		return exitPersistenceFromSaga(exit, status.Saga, false)
+	case "absent":
+		if status.Saga != nil {
+			return ExitPersistence{}, fmt.Errorf("%w: absent exit contains a saga", ErrCoordinatorAmbiguous)
+		}
+		return ExitPersistence{}, ErrCoordinatorNotPersisted
+	case "conflict":
+		if status.Saga != nil {
+			return ExitPersistence{}, fmt.Errorf("%w: conflicting exit contains a saga", ErrCoordinatorAmbiguous)
+		}
+		return ExitPersistence{}, ErrCoordinatorPayloadConflict
+	default:
+		return ExitPersistence{}, fmt.Errorf("%w: unknown exit status", ErrCoordinatorAmbiguous)
+	}
+}
+
+func (c *CoordinatorClient) post(ctx context.Context, path string, body []byte, caller string, key []byte) (*http.Response, []byte, error) {
 	nonce, err := c.nonce()
 	if err != nil || !validNonce(nonce) {
 		return nil, nil, errors.New("coordinator nonce unavailable")
 	}
 	timestamp := strconv.FormatInt(c.now().Unix(), 10)
-	signature := coordinatorMAC(c.key, path, c.caller, timestamp, nonce, body)
+	signature := coordinatorMAC(key, path, caller, timestamp, nonce, body)
 	endpoint := strings.TrimSuffix(c.endpoint, "/v1/intents") + path
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -193,7 +319,7 @@ func (c *CoordinatorClient) post(ctx context.Context, path string, body []byte) 
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("X-RTC-Caller", c.caller)
+	request.Header.Set("X-RTC-Caller", caller)
 	request.Header.Set("X-RTC-Timestamp", timestamp)
 	request.Header.Set("X-RTC-Nonce", nonce)
 	request.Header.Set("X-RTC-Signature", hex.EncodeToString(signature))
@@ -208,6 +334,29 @@ func (c *CoordinatorClient) post(ctx context.Context, path string, body []byte) 
 		return nil, nil, fmt.Errorf("%w: invalid response body", ErrCoordinatorAmbiguous)
 	}
 	return response, responseBody, nil
+}
+
+func exitPersistenceFromSaga(exit ExitSubmission, saga *coordinatorSaga, requireUnwinding bool) (ExitPersistence, error) {
+	if saga.IntentID != exit.IntentID || saga.Version == 0 || !exitSagaState(saga.State) ||
+		(requireUnwinding && saga.State != "unwinding") {
+		return ExitPersistence{}, fmt.Errorf("%w: response does not prove exit persistence", ErrCoordinatorAmbiguous)
+	}
+	return ExitPersistence{
+		Status:             "persisted",
+		RequestID:          exit.RequestID,
+		IntentID:           exit.IntentID,
+		CoordinatorState:   saga.State,
+		CoordinatorVersion: saga.Version,
+	}, nil
+}
+
+func exitSagaState(state string) bool {
+	switch state {
+	case "unwinding", "closed", "unhedged", "failed_safe":
+		return true
+	default:
+		return false
+	}
 }
 
 func decodeStrict(response *http.Response, responseBody []byte, target any) error {

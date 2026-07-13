@@ -154,13 +154,18 @@ type UnwindDirective struct {
 	PerpBaseAmount             uint64 `json:"perp_base_amount"`
 	PerpLimitPrice             uint32 `json:"perp_limit_price"`
 	ReduceOnly                 bool   `json:"reduce_only"`
+	QuoteSourceSession         string `json:"quote_source_session"`
+	QuoteSourceEventID         string `json:"quote_source_event_id"`
+	QuotePayloadSHA256         string `json:"quote_payload_sha256"`
 	ObservedAtMS               uint64 `json:"observed_at_ms"`
 	DeadlineMS                 uint64 `json:"deadline_ms"`
+	ReconciliationDeadlineMS   uint64 `json:"reconciliation_deadline_ms"`
 }
 
 type RunOutput struct {
-	Kind        protocol.Action    `json:"kind"`
-	PairIntent  *PairIntent        `json:"pair_intent,omitempty"`
-	Unwind      *UnwindDirective   `json:"unwind,omitempty"`
-	Persistence *IntentPersistence `json:"persistence,omitempty"`
+	Kind            protocol.Action    `json:"kind"`
+	PairIntent      *PairIntent        `json:"pair_intent,omitempty"`
+	Unwind          *UnwindDirective   `json:"unwind,omitempty"`
+	Persistence     *IntentPersistence `json:"persistence,omitempty"`
+	ExitPersistence *ExitPersistence   `json:"exit_persistence,omitempty"`
 }

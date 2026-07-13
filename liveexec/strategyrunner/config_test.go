@@ -13,6 +13,8 @@ func TestConfigDefaultsToDisabled(t *testing.T) {
 	t.Setenv("ROBIN_COORDINATOR_URL", "")
 	t.Setenv("ROBIN_COORDINATOR_INTENT_CALLER", "")
 	t.Setenv("ROBIN_COORDINATOR_INTENT_HMAC_KEY", "")
+	t.Setenv("ROBIN_COORDINATOR_EXIT_CALLER", "")
+	t.Setenv("ROBIN_COORDINATOR_EXIT_HMAC_KEY", "")
 	config, err := LoadConfig()
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +30,8 @@ func TestEnabledConfigRequiresDistinctCoordinatorAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.CoordinatorURL != "http://127.0.0.1:8080" || config.CoordinatorCaller != "strategy-runner" || len(config.CoordinatorKey) != 32 {
+	if config.CoordinatorURL != "http://127.0.0.1:8080" || config.CoordinatorCaller != "strategy-runner" ||
+		config.CoordinatorExitCaller != "strategy-exit" || len(config.CoordinatorKey) != 32 || len(config.CoordinatorExitKey) != 32 {
 		t.Fatal("coordinator persistence config was not loaded")
 	}
 
@@ -43,6 +46,8 @@ func TestPartialCoordinatorConfigIsRejectedWhileDisabled(t *testing.T) {
 	t.Setenv("ROBIN_COORDINATOR_URL", "https://coordinator.example")
 	t.Setenv("ROBIN_COORDINATOR_INTENT_CALLER", "")
 	t.Setenv("ROBIN_COORDINATOR_INTENT_HMAC_KEY", "")
+	t.Setenv("ROBIN_COORDINATOR_EXIT_CALLER", "")
+	t.Setenv("ROBIN_COORDINATOR_EXIT_HMAC_KEY", "")
 	if _, err := LoadConfig(); err == nil {
 		t.Fatal("partial coordinator config accepted")
 	}
@@ -58,4 +63,7 @@ func setEnabledConfig(t *testing.T) {
 	t.Setenv("ROBIN_COORDINATOR_URL", "http://127.0.0.1:8080")
 	t.Setenv("ROBIN_COORDINATOR_INTENT_CALLER", "strategy-runner")
 	t.Setenv("ROBIN_COORDINATOR_INTENT_HMAC_KEY", hex.EncodeToString(bytes.Repeat([]byte{2}, 32)))
+	t.Setenv("ROBIN_COORDINATOR_EXIT_CALLER", "strategy-exit")
+	t.Setenv("ROBIN_COORDINATOR_EXIT_HMAC_KEY", hex.EncodeToString(bytes.Repeat([]byte{3}, 32)))
+	t.Setenv("ROBIN_LIGHTER_AAPL_MARKET_INDEX", "101")
 }

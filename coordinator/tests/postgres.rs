@@ -1,7 +1,7 @@
 use coordinator::store::{
     AccountCommandRequest, AccountCommandStatusRequest, AccountRegistrationRequest, ActionKind,
-    ExitRequest, IntentStatusRequest, NewAccountSnapshot, NewMarketQuote, NewVenueEvent,
-    NextAction, ObservationOutcome, RecoveryRequest, Store, StoreError,
+    ExitRequest, ExitStatusRequest, IntentStatusRequest, NewAccountSnapshot, NewMarketQuote,
+    NewVenueEvent, NextAction, ObservationOutcome, RecoveryRequest, Store, StoreError,
 };
 use execution::{
     ExecutionEvent, ExecutionSaga, ExecutionState, FrozenEvidence, PairIntent, PerpSide, SpotSide,
@@ -9,6 +9,9 @@ use execution::{
 };
 use research::PromotionEvidence;
 use sqlx::PgPool;
+
+const BASIS_AAPL_V1_ROUTE_SHA256: &str =
+    "23559b51e5512cfa0ab21ceeb3fbf97fc0edf3993528ae7b68d40affec6df5c8";
 
 #[tokio::test]
 #[ignore = "requires a disposable PostgreSQL database"]
@@ -54,6 +57,10 @@ async fn migration_and_promotion_gate_are_enforced() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0010_exit_dispatch.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
     let legacy = sqlx::query_as::<_, (String, bool, bool)>(
         "SELECT execution_account_id, active, payload_digest_required FROM execution_intents WHERE id = $1",
     )
@@ -92,7 +99,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         r#"
         UPDATE execution_accounts
         SET strategy_version = $1, risk_version = $1, status = 'active',
-            lighter_account_index = 7, lighter_api_key_index = 2,
+            lighter_account_index = 7, lighter_api_key_index = 4,
             robinhood_vault = '0x0000000000000000000000000000000000000002',
             robinhood_signer = '0x0000000000000000000000000000000000000003',
             owner_address = '0x0000000000000000000000000000000000000004',
@@ -162,7 +169,11 @@ async fn migration_and_promotion_gate_are_enforced() {
         source_session: "quote-session-1".into(),
         source_event_id: "quote-1".into(),
         source_sequence: 1,
+        execution_account_id: None,
         market_manifest: intent().evidence.market_manifest,
+        strategy_manifest_sha256: None,
+        route_sha256: None,
+        lighter_market_index: None,
         quote_block_hash: intent().evidence.quote_block_hash,
         mark_price: 25_000,
         publisher_at_ms: 899,
@@ -171,13 +182,33 @@ async fn migration_and_promotion_gate_are_enforced() {
         intent_id: None,
         spot_unwind_amount_in: None,
         spot_unwind_expected_amount_out: None,
+        submission_deadline_ms: None,
+        reconciliation_deadline_ms: None,
     };
-    assert!(store.record_market_quote(&market_quote).await.unwrap());
-    assert!(!store.record_market_quote(&market_quote).await.unwrap());
+    assert!(
+        store
+            .record_market_quote(&market_quote)
+            .await
+            .unwrap()
+            .created
+    );
+    assert!(
+        !store
+            .record_market_quote(&market_quote)
+            .await
+            .unwrap()
+            .created
+    );
     let mut duplicate_quote = market_quote.clone();
     duplicate_quote.source_event_id = "quote-duplicate".into();
     duplicate_quote.source_sequence = 2;
-    assert!(!store.record_market_quote(&duplicate_quote).await.unwrap());
+    assert!(
+        store
+            .record_market_quote(&duplicate_quote)
+            .await
+            .unwrap()
+            .created
+    );
     for snapshot in account_snapshots() {
         assert!(store.record_account_snapshot(&snapshot).await.unwrap());
     }
@@ -439,25 +470,31 @@ async fn migration_and_promotion_gate_are_enforced() {
     assert_ne!(action.lease_token, reclaimed.lease_token);
     assert!(matches!(
         store
-            .assign_lighter_nonce(&action.id, "worker-1", &action.lease_token, 7, 2, 11)
+            .assign_lighter_nonce(&action.id, "worker-1", &action.lease_token, 7, 4, 11)
             .await,
         Err(StoreError::LeaseLost)
     ));
     let action = reclaimed;
+    assert!(matches!(
+        store
+            .assign_lighter_nonce(&action.id, "worker-1", &action.lease_token, 7, 3, 11)
+            .await,
+        Err(StoreError::InvalidAction)
+    ));
     let nonce = store
-        .assign_lighter_nonce(&action.id, "worker-1", &action.lease_token, 7, 2, 11)
+        .assign_lighter_nonce(&action.id, "worker-1", &action.lease_token, 7, 4, 11)
         .await
         .unwrap();
     assert_eq!(nonce, 11);
     assert_eq!(
         store
-            .assign_lighter_nonce(&action.id, "worker-1", &action.lease_token, 7, 2, 99)
+            .assign_lighter_nonce(&action.id, "worker-1", &action.lease_token, 7, 4, 99)
             .await
             .unwrap(),
         11
     );
     store
-        .validate_lighter_nonce_binding(&action.id, 7, 2)
+        .validate_lighter_nonce_binding(&action.id, 7, 4)
         .await
         .unwrap();
     store
@@ -485,7 +522,7 @@ async fn migration_and_promotion_gate_are_enforced() {
     ));
     assert!(matches!(
         store
-            .assign_lighter_nonce(&action.id, "worker-1", &action.lease_token, 8, 2, 99)
+            .assign_lighter_nonce(&action.id, "worker-1", &action.lease_token, 8, 4, 99)
             .await,
         Err(StoreError::LighterConfigDrift)
     ));
@@ -736,22 +773,32 @@ async fn migration_and_promotion_gate_are_enforced() {
         source_session: "exit-quote-session-1".into(),
         source_event_id: "exit-quote-1".into(),
         source_sequence: 1,
+        execution_account_id: Some("singleton-mainnet-canary".into()),
         market_manifest: intent().evidence.market_manifest,
+        strategy_manifest_sha256: Some(intent().strategy_manifest_sha256),
+        route_sha256: Some(BASIS_AAPL_V1_ROUTE_SHA256.into()),
+        lighter_market_index: Some(101),
         quote_block_hash: "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
             .into(),
         mark_price: 25_000,
         publisher_at_ms: 1_099,
         received_at_ms: 1_100,
-        expires_at_ms: 31_000,
+        expires_at_ms: 30_000,
         intent_id: Some(intent().id),
         spot_unwind_amount_in: Some("2000000".into()),
         spot_unwind_expected_amount_out: Some("25000000".into()),
+        submission_deadline_ms: Some(30_000),
+        reconciliation_deadline_ms: Some(90_000),
     };
-    assert!(store.record_market_quote(&exit_quote).await.unwrap());
+    let exit_quote_receipt = store.record_market_quote(&exit_quote).await.unwrap();
+    assert!(exit_quote_receipt.created);
     let exit_request = ExitRequest {
+        request_id: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        execution_account_id: "singleton-mainnet-canary".into(),
         intent_id: intent().id,
         quote_source_session: "exit-quote-session-1".into(),
         quote_source_event_id: "exit-quote-1".into(),
+        quote_payload_sha256: exit_quote_receipt.receipt.payload_sha256,
         perp_unwind_price: 30_000,
         minimum_unwind_settlement_out: "24000000".into(),
         requested_at_ms: 1_200,
@@ -772,7 +819,20 @@ async fn migration_and_promotion_gate_are_enforced() {
         Err(StoreError::MarketEvidenceMismatch)
     ));
     let exiting = store.request_exit(&exit_request, 1_200).await.unwrap();
-    assert_eq!(exiting.state, ExecutionState::Unwinding);
+    assert!(exiting.created);
+    assert_eq!(exiting.saga.state, ExecutionState::Unwinding);
+    let duplicate_exit = store.request_exit(&exit_request, 9_999_999).await.unwrap();
+    assert!(!duplicate_exit.created);
+    assert_eq!(duplicate_exit.payload_sha256, exiting.payload_sha256);
+    let exit_status = store
+        .exit_status(&ExitStatusRequest {
+            request_id: exit_request.request_id.clone(),
+            payload_sha256: exiting.payload_sha256.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(exit_status.status, "persisted");
+    assert_eq!(exit_status.saga, Some(exiting.saga.clone()));
     let exit_action = sqlx::query_as::<_, (String, String, serde_json::Value)>(
         "SELECT id, kind, payload FROM execution_actions WHERE intent_id = $1 AND action_key LIKE 'exit-perp-%'",
     )
@@ -795,10 +855,16 @@ async fn migration_and_promotion_gate_are_enforced() {
     recovery_quote.publisher_at_ms = 1_299;
     recovery_quote.received_at_ms = 1_300;
     recovery_quote.expires_at_ms = 31_000;
-    assert!(store.record_market_quote(&recovery_quote).await.unwrap());
+    recovery_quote.submission_deadline_ms = Some(recovery_quote.expires_at_ms);
+    let recovery_quote_receipt = store.record_market_quote(&recovery_quote).await.unwrap();
+    assert!(recovery_quote_receipt.created);
     let mut recovery_request = exit_request.clone();
+    recovery_request.request_id =
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
     recovery_request.quote_source_event_id = "exit-quote-2".into();
+    recovery_request.quote_payload_sha256 = recovery_quote_receipt.receipt.payload_sha256;
     recovery_request.requested_at_ms = 1_400;
+    recovery_request.submission_deadline_ms = 31_000;
     assert!(matches!(
         store.request_exit(&recovery_request, 1_400).await,
         Err(StoreError::Conflict)
@@ -853,7 +919,11 @@ async fn migration_and_promotion_gate_are_enforced() {
         source_session: "exit-quote-session-2".into(),
         source_event_id: "exit-quote-3".into(),
         source_sequence: 1,
+        execution_account_id: Some("singleton-mainnet-canary".into()),
         market_manifest: intent().evidence.market_manifest,
+        strategy_manifest_sha256: Some(intent().strategy_manifest_sha256),
+        route_sha256: Some(BASIS_AAPL_V1_ROUTE_SHA256.into()),
+        lighter_market_index: Some(101),
         quote_block_hash: "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
             .into(),
         mark_price: 25_000,
@@ -863,21 +933,27 @@ async fn migration_and_promotion_gate_are_enforced() {
         intent_id: Some(intent().id),
         spot_unwind_amount_in: Some("0".into()),
         spot_unwind_expected_amount_out: Some("0".into()),
+        submission_deadline_ms: Some(31_500),
+        reconciliation_deadline_ms: Some(91_500),
     };
-    assert!(store.record_market_quote(&zero_spot_quote).await.unwrap());
+    let zero_quote_receipt = store.record_market_quote(&zero_spot_quote).await.unwrap();
+    assert!(zero_quote_receipt.created);
     let perp_only_exit = ExitRequest {
+        request_id: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+        execution_account_id: "singleton-mainnet-canary".into(),
         intent_id: intent().id,
         quote_source_session: zero_spot_quote.source_session.clone(),
         quote_source_event_id: zero_spot_quote.source_event_id.clone(),
+        quote_payload_sha256: zero_quote_receipt.receipt.payload_sha256,
         perp_unwind_price: 30_000,
         minimum_unwind_settlement_out: "0".into(),
         requested_at_ms: 1_600,
-        submission_deadline_ms: 31_000,
-        reconciliation_deadline_ms: 91_000,
+        submission_deadline_ms: 31_500,
+        reconciliation_deadline_ms: 91_500,
         reason: "operator_exit".into(),
     };
     let unwinding = store.request_exit(&perp_only_exit, 1_600).await.unwrap();
-    assert_eq!(unwinding.state, ExecutionState::Unwinding);
+    assert_eq!(unwinding.saga.state, ExecutionState::Unwinding);
     let bounded_action = sqlx::query_as::<_, (String, serde_json::Value)>(
         "SELECT id, payload FROM execution_actions WHERE intent_id = $1 AND kind = 'unwind_perp' AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
     )
@@ -904,12 +980,18 @@ async fn migration_and_promotion_gate_are_enforced() {
     operator_quote.publisher_at_ms = 1_699;
     operator_quote.received_at_ms = 1_700;
     operator_quote.expires_at_ms = 31_700;
-    assert!(store.record_market_quote(&operator_quote).await.unwrap());
+    operator_quote.submission_deadline_ms = Some(operator_quote.expires_at_ms);
+    operator_quote.reconciliation_deadline_ms = Some(91_700);
+    let operator_quote_receipt = store.record_market_quote(&operator_quote).await.unwrap();
+    assert!(operator_quote_receipt.created);
     let mut operator_exit = perp_only_exit.clone();
+    operator_exit.request_id =
+        "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into();
     operator_exit.quote_source_event_id = operator_quote.source_event_id.clone();
+    operator_exit.quote_payload_sha256 = operator_quote_receipt.receipt.payload_sha256;
     operator_exit.requested_at_ms = 1_800;
-    operator_exit.submission_deadline_ms = 31_600;
-    operator_exit.reconciliation_deadline_ms = 91_600;
+    operator_exit.submission_deadline_ms = 31_700;
+    operator_exit.reconciliation_deadline_ms = 91_700;
     store.request_exit(&operator_exit, 1_800).await.unwrap();
     let operator_action = sqlx::query_as::<_, (String, serde_json::Value)>(
         "SELECT id, payload FROM execution_actions WHERE intent_id = $1 AND kind = 'unwind_perp' AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
@@ -930,6 +1012,68 @@ async fn migration_and_promotion_gate_are_enforced() {
     .await
     .unwrap();
     assert_eq!(owner, intent().id);
+
+    sqlx::query(
+        "UPDATE execution_actions SET status = 'failed_safe', completed_at = now() WHERE id = $1",
+    )
+    .bind(&operator_action.0)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let control_action_id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    sqlx::query(
+        r#"
+        INSERT INTO execution_actions (id, intent_id, kind, action_key, payload, status)
+        VALUES ($1, $2, 'unwind_perp', 'control-command-pause-live-unwind-perp', $3, 'pending')
+        "#,
+    )
+    .bind(control_action_id)
+    .bind(intent().id)
+    .bind(sqlx::types::Json(serde_json::json!({
+        "filled_base": 1_000_000,
+        "unwound_before": 0,
+        "exit_reason": "operator_exit",
+        "control_command_id": "command-pause-live"
+    })))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut pause_quote = operator_quote.clone();
+    pause_quote.source_event_id = "exit-quote-pause".into();
+    pause_quote.source_sequence = 3;
+    pause_quote.quote_block_hash =
+        "0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef".into();
+    pause_quote.publisher_at_ms = 1_899;
+    pause_quote.received_at_ms = 1_900;
+    pause_quote.expires_at_ms = 31_900;
+    pause_quote.submission_deadline_ms = Some(31_900);
+    pause_quote.reconciliation_deadline_ms = Some(91_900);
+    let pause_quote_receipt = store.record_market_quote(&pause_quote).await.unwrap();
+    let mut pause_exit = operator_exit.clone();
+    pause_exit.request_id =
+        "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into();
+    pause_exit.quote_source_event_id = pause_quote.source_event_id.clone();
+    pause_exit.quote_payload_sha256 = pause_quote_receipt.receipt.payload_sha256;
+    pause_exit.requested_at_ms = 2_000;
+    pause_exit.submission_deadline_ms = 31_900;
+    pause_exit.reconciliation_deadline_ms = 91_900;
+    let bound_pause = store.request_exit(&pause_exit, 2_000).await.unwrap();
+    assert_eq!(bound_pause.saga.state, ExecutionState::Unwinding);
+    let bound_authority = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT payload->'exit_authority' FROM execution_actions WHERE id = $1",
+    )
+    .bind(control_action_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(bound_authority["quote_source_event_id"], "exit-quote-pause");
+    sqlx::query(
+        "UPDATE execution_actions SET status = 'failed_safe', completed_at = now() WHERE id = $1",
+    )
+    .bind(control_action_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     register_account(
         &pool,
@@ -1166,6 +1310,73 @@ async fn migration_and_promotion_gate_are_enforced() {
     .execute(&pool)
     .await
     .unwrap();
+    let mut unreviewed_market_quote = exit_quote.clone();
+    unreviewed_market_quote.source_event_id = "unreviewed-market-quote".into();
+    unreviewed_market_quote.source_sequence = 98;
+    unreviewed_market_quote.lighter_market_index = Some(102);
+    assert!(matches!(
+        store.record_market_quote(&unreviewed_market_quote).await,
+        Err(StoreError::ExecutionAccountUnavailable)
+    ));
+
+    let mut cross_account_quote = exit_quote.clone();
+    cross_account_quote.source_event_id = "cross-account-quote".into();
+    cross_account_quote.source_sequence = 99;
+    cross_account_quote.execution_account_id = Some("account-canary-2".into());
+    assert!(matches!(
+        store.record_market_quote(&cross_account_quote).await,
+        Err(StoreError::ExecutionAccountUnavailable)
+    ));
+
+    let mut colliding_exit = exit_request.clone();
+    colliding_exit.reason = "operator_exit".into();
+    assert!(matches!(
+        store.request_exit(&colliding_exit, 9_999_999).await,
+        Err(StoreError::ExitPayloadConflict)
+    ));
+    let exit_payload_incidents = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM execution_incidents WHERE kind = 'exit_payload_identity_conflict' AND intent_id = $1",
+    )
+    .bind(intent().id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(exit_payload_incidents, 1);
+
+    sqlx::query("UPDATE execution_control SET mode = 'ACTIVE' WHERE singleton")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE execution_account_control SET mode = 'ACTIVE' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut colliding_quote = exit_quote.clone();
+    colliding_quote.mark_price += 1;
+    assert!(matches!(
+        store.record_market_quote(&colliding_quote).await,
+        Err(StoreError::MarketQuoteConflict)
+    ));
+    let quote_payload_incidents = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM execution_incidents WHERE kind = 'market_quote_identity_conflict' AND execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(quote_payload_incidents, 1);
+
+    sqlx::query("UPDATE execution_control SET mode = 'ACTIVE' WHERE singleton")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE execution_account_control SET mode = 'ACTIVE' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("UPDATE execution_intents SET payload_sha256 = repeat('f', 64) WHERE id = $1")
         .bind(intent().id)
         .execute(&pool)
@@ -1253,7 +1464,7 @@ fn intent() -> PairIntent {
         risk_version: CANARY_RISK_VERSION.into(),
         strategy_manifest_sha256: execution::BASIS_AAPL_V1_MANIFEST_SHA256.into(),
         lighter_account_index: 7,
-        lighter_api_key_index: 2,
+        lighter_api_key_index: 4,
         robinhood_vault: "0x0000000000000000000000000000000000000002".into(),
         robinhood_signer: "0x0000000000000000000000000000000000000003".into(),
         symbol: "AAPL".into(),
@@ -1328,7 +1539,7 @@ fn account_snapshots_for(
             source_sequence: 1,
             payload: serde_json::json!({
                 "account_index": account_index,
-                "api_key_index": 2,
+                "api_key_index": 4,
                 "nonce_aligned": true,
                 "no_unknown_orders": true,
                 "no_unknown_positions": true,
@@ -1379,7 +1590,7 @@ async fn register_account(
             (execution_account_id, agent_id, strategy_version, risk_version, status,
              lighter_account_index, lighter_api_key_index, robinhood_vault,
              robinhood_signer, owner_address, strategy_manifest_sha256, binding_sha256)
-        VALUES ($1, $2, $3, $3, 'active', $4, 2, $5, $6, $7,
+        VALUES ($1, $2, $3, $3, 'active', $4, 4, $5, $6, $7,
                 $8, repeat('b', 64))
         "#,
     )
@@ -1430,7 +1641,7 @@ fn registration(
         risk_version: CANARY_RISK_VERSION.into(),
         strategy_manifest_sha256: execution::BASIS_AAPL_V1_MANIFEST_SHA256.into(),
         lighter_account_index,
-        lighter_api_key_index: 2,
+        lighter_api_key_index: 4,
         robinhood_owner: owner.into(),
         robinhood_vault: vault.into(),
         robinhood_signer: signer.into(),

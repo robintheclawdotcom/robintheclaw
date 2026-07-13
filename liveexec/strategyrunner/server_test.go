@@ -79,16 +79,16 @@ func TestServerNeverReportsAmbiguousPersistence(t *testing.T) {
 	}
 }
 
-func TestServerFailsClosedOnUnwindProtocolGap(t *testing.T) {
+func TestServerReturnsPersistedUnwind(t *testing.T) {
 	service, input := validInput(t, protocol.ActionUnwind)
 	pairID := testHash("open-pair")
 	input.OpenEpisode = &OpenEpisode{
 		PairIntentID: pairID, SpotUnwindIntentID: domainHash(spotUnwindDomain, []byte(pairID)),
 		SpotAmount: input.Quotes.Spot.StockAmount, MinimumSettlementAmountOut: "24000000", PerpBaseAmount: input.Quotes.Perp.BaseAmount,
 	}
-	response := serveAuthenticated(t, service, input, "nonce-unwind-gap")
-	if response.Code != http.StatusServiceUnavailable {
-		t.Fatalf("unwind protocol gap returned %d %s", response.Code, response.Body.String())
+	response := serveAuthenticated(t, service, input, "nonce-unwind")
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"exit_persistence"`)) {
+		t.Fatalf("persisted unwind returned %d %s", response.Code, response.Body.String())
 	}
 }
 

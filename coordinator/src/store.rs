@@ -15,6 +15,8 @@ use uuid::Uuid;
 const MAX_EXIT_SUBMISSION_WINDOW_MS: u64 = 15 * 60 * 1_000;
 const MAX_EXIT_RECONCILIATION_WINDOW_MS: u64 = 24 * 60 * 60 * 1_000;
 const ROBINHOOD_CHAIN_ID: u64 = 4663;
+const BASIS_AAPL_V1_ROUTE_SHA256: &str =
+    "23559b51e5512cfa0ab21ceeb3fbf97fc0edf3993528ae7b68d40affec6df5c8";
 
 #[derive(Clone)]
 pub struct Store {
@@ -244,7 +246,11 @@ pub struct NewMarketQuote {
     pub source_session: String,
     pub source_event_id: String,
     pub source_sequence: i64,
+    pub execution_account_id: Option<String>,
     pub market_manifest: String,
+    pub strategy_manifest_sha256: Option<String>,
+    pub route_sha256: Option<String>,
+    pub lighter_market_index: Option<u32>,
     pub quote_block_hash: String,
     pub mark_price: u32,
     pub publisher_at_ms: i64,
@@ -253,20 +259,61 @@ pub struct NewMarketQuote {
     pub intent_id: Option<String>,
     pub spot_unwind_amount_in: Option<String>,
     pub spot_unwind_expected_amount_out: Option<String>,
+    pub submission_deadline_ms: Option<i64>,
+    pub reconciliation_deadline_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MarketQuoteReceipt {
+    pub status: String,
+    pub source_session: String,
+    pub source_event_id: String,
+    pub payload_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketQuoteOutcome {
+    pub created: bool,
+    pub receipt: MarketQuoteReceipt,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExitRequest {
+    pub request_id: String,
+    pub execution_account_id: String,
     pub intent_id: String,
     pub quote_source_session: String,
     pub quote_source_event_id: String,
+    pub quote_payload_sha256: String,
     pub perp_unwind_price: u32,
     pub minimum_unwind_settlement_out: String,
     pub requested_at_ms: u64,
     pub submission_deadline_ms: u64,
     pub reconciliation_deadline_ms: u64,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExitStatusRequest {
+    pub request_id: String,
+    pub payload_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExitStatusResponse {
+    pub request_id: String,
+    pub payload_sha256: String,
+    pub status: String,
+    pub saga: Option<ExecutionSaga>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitAdmissionOutcome {
+    pub created: bool,
+    pub saga: ExecutionSaga,
+    pub payload_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -481,6 +528,8 @@ struct ExitQuoteRow {
     expected_amount_out: u128,
     received_at_ms: u64,
     expires_at_ms: u64,
+    submission_deadline_ms: u64,
+    reconciliation_deadline_ms: u64,
     max_unwind_price_deviation_bps: u32,
     max_spot_slippage_bps: u32,
 }
@@ -605,6 +654,10 @@ pub enum StoreError {
     Conflict,
     #[error("intent identity conflicts with the stored payload digest")]
     IntentPayloadConflict,
+    #[error("exit identity conflicts with the stored payload digest")]
+    ExitPayloadConflict,
+    #[error("market quote identity conflicts with stored evidence")]
+    MarketQuoteConflict,
     #[error("account command identity conflicts with stored evidence")]
     AccountCommandConflict,
     #[error("account command is blocked by execution controls or reconciliation")]
@@ -648,6 +701,7 @@ impl Store {
             "public.execution_venue_events",
             "public.execution_market_configs",
             "public.execution_market_quotes",
+            "public.execution_exit_requests",
             "public.execution_venue_source_sessions",
             "public.execution_venue_event_routes",
             "public.execution_lighter_nonce_reservations",
@@ -671,10 +725,21 @@ impl Store {
                 return false;
             }
         }
-        sqlx::query("SELECT payload_sha256, payload_digest_required FROM execution_intents LIMIT 0")
-            .execute(&self.pool)
-            .await
-            .is_ok()
+        if sqlx::query(
+            "SELECT payload_sha256, payload_digest_required FROM execution_intents LIMIT 0",
+        )
+        .execute(&self.pool)
+        .await
+        .is_err()
+        {
+            return false;
+        }
+        sqlx::query(
+            "SELECT execution_account_id, route_sha256, lighter_market_index, submission_deadline_ms FROM execution_market_quotes LIMIT 0",
+        )
+        .execute(&self.pool)
+        .await
+        .is_ok()
     }
 
     pub async fn halt(&self, reason: &str) -> Result<(), StoreError> {
@@ -1207,24 +1272,63 @@ impl Store {
         Err(StoreError::VenueEventConflict)
     }
 
-    pub async fn record_market_quote(&self, quote: &NewMarketQuote) -> Result<bool, StoreError> {
-        let exit_quote = match (
-            quote.intent_id.as_deref(),
-            quote.spot_unwind_amount_in.as_deref(),
-            quote.spot_unwind_expected_amount_out.as_deref(),
-        ) {
-            (None, None, None) => false,
-            (Some(intent_id), Some(amount_in), Some(amount_out)) => {
-                if quote.source != "execution-authority"
-                    || !valid_hash(intent_id)
-                    || parse_u128_string(amount_in).is_none()
-                    || parse_u128_string(amount_out).is_none()
-                {
-                    return Err(StoreError::InvalidAction);
-                }
-                true
+    pub async fn record_market_quote(
+        &self,
+        quote: &NewMarketQuote,
+    ) -> Result<MarketQuoteOutcome, StoreError> {
+        let exit_quote = if let Some(intent_id) = quote.intent_id.as_deref() {
+            let (
+                Some(execution_account_id),
+                Some(strategy_manifest_sha256),
+                Some(route_sha256),
+                Some(lighter_market_index),
+                Some(amount_in),
+                Some(amount_out),
+                Some(submission_deadline_ms),
+                Some(reconciliation_deadline_ms),
+            ) = (
+                quote.execution_account_id.as_deref(),
+                quote.strategy_manifest_sha256.as_deref(),
+                quote.route_sha256.as_deref(),
+                quote.lighter_market_index,
+                quote.spot_unwind_amount_in.as_deref(),
+                quote.spot_unwind_expected_amount_out.as_deref(),
+                quote.submission_deadline_ms,
+                quote.reconciliation_deadline_ms,
+            )
+            else {
+                return Err(StoreError::InvalidAction);
+            };
+            if quote.source != "execution-authority"
+                || !valid_hash(intent_id)
+                || !valid_control_id(execution_account_id)
+                || !valid_digest(strategy_manifest_sha256)
+                || route_sha256 != BASIS_AAPL_V1_ROUTE_SHA256
+                || lighter_market_index > 32767
+                || parse_u128_string(amount_in).is_none()
+                || parse_u128_string(amount_out).is_none()
+                || submission_deadline_ms != quote.expires_at_ms
+                || reconciliation_deadline_ms <= submission_deadline_ms
+                || reconciliation_deadline_ms.saturating_sub(submission_deadline_ms)
+                    > i64::try_from(MAX_EXIT_RECONCILIATION_WINDOW_MS)
+                        .map_err(|_| StoreError::InvalidAction)?
+            {
+                return Err(StoreError::InvalidAction);
             }
-            _ => return Err(StoreError::InvalidAction),
+            true
+        } else {
+            if quote.execution_account_id.is_some()
+                || quote.strategy_manifest_sha256.is_some()
+                || quote.route_sha256.is_some()
+                || quote.lighter_market_index.is_some()
+                || quote.spot_unwind_amount_in.is_some()
+                || quote.spot_unwind_expected_amount_out.is_some()
+                || quote.submission_deadline_ms.is_some()
+                || quote.reconciliation_deadline_ms.is_some()
+            {
+                return Err(StoreError::InvalidAction);
+            }
+            false
         };
         if (!exit_quote && quote.source != "lighter-auth")
             || quote.source_session.is_empty()
@@ -1244,16 +1348,46 @@ impl Store {
         let payload = serde_json::to_vec(quote).map_err(|_| StoreError::InvalidAction)?;
         let payload_sha256 = hex::encode(Sha256::digest(payload));
         let mut transaction = self.pool.begin().await?;
+        if exit_quote {
+            let binding = sqlx::query_as::<_, (String, Option<String>, Json<PairIntent>, i32)>(
+                r#"
+                SELECT intent.execution_account_id, account.strategy_manifest_sha256,
+                       intent.payload, config.lighter_market_index
+                FROM execution_intents intent
+                JOIN execution_accounts account
+                  ON account.execution_account_id = intent.execution_account_id
+                JOIN execution_market_configs config ON config.manifest_id = $2
+                WHERE intent.id = $1
+                FOR SHARE OF intent, account, config
+                "#,
+            )
+            .bind(&quote.intent_id)
+            .bind(&quote.market_manifest)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StoreError::MissingIntent)?;
+            if quote.execution_account_id.as_deref() != Some(binding.0.as_str())
+                || quote.strategy_manifest_sha256 != binding.1
+                || binding.2.evidence.market_manifest != quote.market_manifest
+                || binding.2.lighter_market_index != quote.lighter_market_index.unwrap_or(u32::MAX)
+                || u32::try_from(binding.3).ok() != quote.lighter_market_index
+            {
+                return Err(StoreError::ExecutionAccountUnavailable);
+            }
+        }
         let inserted = sqlx::query(
             r#"
             INSERT INTO execution_market_quotes
-                (source, source_session, source_event_id, source_sequence, market_manifest,
-                 quote_block_hash, mark_price, payload_sha256, publisher_at, received_at, expires_at,
-                 intent_id, spot_unwind_amount_in, spot_unwind_expected_amount_out)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                    TIMESTAMPTZ 'epoch' + $9 * interval '1 millisecond',
-                    TIMESTAMPTZ 'epoch' + $10 * interval '1 millisecond',
-                    TIMESTAMPTZ 'epoch' + $11 * interval '1 millisecond', $12, $13, $14)
+                (source, source_session, source_event_id, source_sequence, execution_account_id,
+                 market_manifest, strategy_manifest_sha256, route_sha256, quote_block_hash,
+                 lighter_market_index, mark_price, payload_sha256, publisher_at, received_at, expires_at, intent_id,
+                 spot_unwind_amount_in, spot_unwind_expected_amount_out, submission_deadline_ms,
+                 reconciliation_deadline_ms, exit_binding_version)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                    TIMESTAMPTZ 'epoch' + $13 * interval '1 millisecond',
+                    TIMESTAMPTZ 'epoch' + $14 * interval '1 millisecond',
+                    TIMESTAMPTZ 'epoch' + $15 * interval '1 millisecond', $16, $17, $18,
+                    $19, $20, $21)
             ON CONFLICT DO NOTHING
             "#,
         )
@@ -1261,8 +1395,12 @@ impl Store {
         .bind(&quote.source_session)
         .bind(&quote.source_event_id)
         .bind(quote.source_sequence)
+        .bind(&quote.execution_account_id)
         .bind(&quote.market_manifest)
+        .bind(&quote.strategy_manifest_sha256)
+        .bind(&quote.route_sha256)
         .bind(&quote.quote_block_hash)
+        .bind(quote.lighter_market_index.map(i64::from))
         .bind(i64::from(quote.mark_price))
         .bind(&payload_sha256)
         .bind(quote.publisher_at_ms)
@@ -1271,33 +1409,26 @@ impl Store {
         .bind(&quote.intent_id)
         .bind(&quote.spot_unwind_amount_in)
         .bind(&quote.spot_unwind_expected_amount_out)
+        .bind(quote.submission_deadline_ms)
+        .bind(quote.reconciliation_deadline_ms)
+        .bind(if exit_quote { 1_i16 } else { 0_i16 })
         .execute(&mut *transaction)
         .await?;
         if inserted.rows_affected() == 1 {
             transaction.commit().await?;
-            return Ok(true);
+            return Ok(MarketQuoteOutcome {
+                created: true,
+                receipt: MarketQuoteReceipt {
+                    status: "recorded".into(),
+                    source_session: quote.source_session.clone(),
+                    source_event_id: quote.source_event_id.clone(),
+                    payload_sha256,
+                },
+            });
         }
-        type StoredQuote = (
-            String,
-            String,
-            i64,
-            String,
-            i64,
-            i64,
-            i64,
-            i64,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        );
-        let existing = sqlx::query_as::<_, StoredQuote>(
+        let existing = sqlx::query_as::<_, (String, Option<String>)>(
             r#"
-            SELECT market_manifest, quote_block_hash, mark_price, payload_sha256,
-                   source_sequence,
-                   (EXTRACT(EPOCH FROM publisher_at) * 1000)::bigint,
-                   (EXTRACT(EPOCH FROM received_at) * 1000)::bigint,
-                   (EXTRACT(EPOCH FROM expires_at) * 1000)::bigint,
-                   intent_id, spot_unwind_amount_in, spot_unwind_expected_amount_out
+            SELECT payload_sha256, execution_account_id
             FROM execution_market_quotes
             WHERE source = $1 AND source_session = $2 AND source_event_id = $3
             FOR SHARE
@@ -1308,75 +1439,53 @@ impl Store {
         .bind(&quote.source_event_id)
         .fetch_optional(&mut *transaction)
         .await?;
-        let identical = existing.as_ref().is_some_and(|existing| {
-            existing.0 == quote.market_manifest
-                && existing.1 == quote.quote_block_hash
-                && existing.2 == i64::from(quote.mark_price)
-                && existing.3 == payload_sha256
-                && existing.4 == quote.source_sequence
-                && existing.5 == quote.publisher_at_ms
-                && existing.6 == quote.received_at_ms
-                && existing.7 == quote.expires_at_ms
-                && existing.8 == quote.intent_id
-                && existing.9 == quote.spot_unwind_amount_in
-                && existing.10 == quote.spot_unwind_expected_amount_out
-        });
-        if identical {
+        if existing
+            .as_ref()
+            .is_some_and(|stored| stored.0 == payload_sha256)
+        {
             transaction.commit().await?;
-            return Ok(false);
-        }
-        if existing.is_none() {
-            let reference = sqlx::query_as::<
-                _,
-                (
-                    i64,
-                    i64,
-                    i64,
-                    Option<String>,
-                    Option<String>,
-                    Option<String>,
-                ),
-            >(
-                r#"
-                SELECT mark_price,
-                       (EXTRACT(EPOCH FROM publisher_at) * 1000)::bigint,
-                       (EXTRACT(EPOCH FROM expires_at) * 1000)::bigint,
-                       intent_id, spot_unwind_amount_in, spot_unwind_expected_amount_out
-                FROM execution_market_quotes
-                WHERE market_manifest = $1 AND quote_block_hash = $2
-                  AND received_at = TIMESTAMPTZ 'epoch' + $3 * interval '1 millisecond'
-                FOR SHARE
-                "#,
-            )
-            .bind(&quote.market_manifest)
-            .bind(&quote.quote_block_hash)
-            .bind(quote.received_at_ms)
-            .fetch_one(&mut *transaction)
-            .await?;
-            if reference.0 == i64::from(quote.mark_price)
-                && reference.1 == quote.publisher_at_ms
-                && reference.2 == quote.expires_at_ms
-                && reference.3 == quote.intent_id
-                && reference.4 == quote.spot_unwind_amount_in
-                && reference.5 == quote.spot_unwind_expected_amount_out
-            {
-                transaction.commit().await?;
-                return Ok(false);
-            }
+            return Ok(MarketQuoteOutcome {
+                created: false,
+                receipt: MarketQuoteReceipt {
+                    status: "duplicate".into(),
+                    source_session: quote.source_session.clone(),
+                    source_event_id: quote.source_event_id.clone(),
+                    payload_sha256,
+                },
+            });
         }
         halt_execution(&mut transaction, "market_quote_identity_conflict").await?;
+        let mut affected_accounts = Vec::new();
+        if let Some(execution_account_id) = quote.execution_account_id.as_deref() {
+            affected_accounts.push(execution_account_id.to_owned());
+        }
+        if let Some(execution_account_id) = existing.and_then(|stored| stored.1) {
+            if !affected_accounts.contains(&execution_account_id) {
+                affected_accounts.push(execution_account_id);
+            }
+        }
+        for execution_account_id in &affected_accounts {
+            halt_account(
+                &mut transaction,
+                execution_account_id,
+                "market_quote_identity_conflict",
+            )
+            .await?;
+        }
         sqlx::query(
-            "INSERT INTO execution_incidents (severity, kind, details) VALUES ('critical', 'market_quote_identity_conflict', $1)",
+            "INSERT INTO execution_incidents (execution_account_id, severity, kind, details) VALUES ($1, 'critical', 'market_quote_identity_conflict', $2)",
         )
+        .bind(quote.execution_account_id.as_deref())
         .bind(Json(serde_json::json!({
             "source": quote.source,
             "source_session": quote.source_session,
             "source_event_id": quote.source_event_id,
+            "incoming_payload_sha256": payload_sha256,
         })))
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
-        Err(StoreError::VenueEventConflict)
+        Err(StoreError::MarketQuoteConflict)
     }
 
     pub async fn record_venue_event(&self, event: &NewVenueEvent) -> Result<bool, StoreError> {
@@ -1805,19 +1914,89 @@ impl Store {
         &self,
         request: &ExitRequest,
         now_ms: u64,
-    ) -> Result<ExecutionSaga, StoreError> {
-        if !valid_hash(&request.intent_id)
+    ) -> Result<ExitAdmissionOutcome, StoreError> {
+        if !valid_hash(&request.request_id)
+            || !valid_control_id(&request.execution_account_id)
+            || !valid_hash(&request.intent_id)
             || request.quote_source_session.is_empty()
             || request.quote_source_session.len() > 128
             || request.quote_source_event_id.is_empty()
             || request.quote_source_event_id.len() > 256
+            || !valid_digest(&request.quote_payload_sha256)
             || request.perp_unwind_price == 0
             || parse_u128_string(&request.minimum_unwind_settlement_out).is_none()
             || !matches!(
                 request.reason.as_str(),
                 "strategy_exit" | "risk_exit" | "operator_exit"
             )
-            || request.requested_at_ms.abs_diff(now_ms) > 30_000
+        {
+            return Err(StoreError::InvalidAction);
+        }
+        let payload_sha256 = calculate_exit_payload_sha256(request)?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&request.request_id)
+            .execute(&mut *transaction)
+            .await?;
+        let existing = sqlx::query_as::<_, (String, String, String)>(
+            r#"
+            SELECT payload_sha256, intent_id, execution_account_id
+            FROM execution_exit_requests
+            WHERE request_id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(&request.request_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some((stored_digest, intent_id, execution_account_id)) = existing {
+            if stored_digest == payload_sha256
+                && intent_id == request.intent_id
+                && execution_account_id == request.execution_account_id
+            {
+                let saga = load_saga(&mut transaction, &request.intent_id).await?;
+                transaction.commit().await?;
+                return Ok(ExitAdmissionOutcome {
+                    created: false,
+                    saga,
+                    payload_sha256,
+                });
+            }
+            halt_execution(&mut transaction, "exit_payload_identity_conflict").await?;
+            halt_account(
+                &mut transaction,
+                &execution_account_id,
+                "exit_payload_identity_conflict",
+            )
+            .await?;
+            if request.execution_account_id != execution_account_id {
+                halt_account(
+                    &mut transaction,
+                    &request.execution_account_id,
+                    "exit_payload_identity_conflict",
+                )
+                .await?;
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO execution_incidents
+                    (intent_id, execution_account_id, severity, kind, details)
+                VALUES ($1, $2, 'critical', 'exit_payload_identity_conflict', $3)
+                "#,
+            )
+            .bind(&request.intent_id)
+            .bind(&request.execution_account_id)
+            .bind(Json(serde_json::json!({
+                "request_id": request.request_id,
+                "stored_payload_sha256": stored_digest,
+                "incoming_payload_sha256": payload_sha256,
+            })))
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            return Err(StoreError::ExitPayloadConflict);
+        }
+        if request.requested_at_ms.abs_diff(now_ms) > 30_000
             || request.submission_deadline_ms <= now_ms
             || request.submission_deadline_ms > now_ms.saturating_add(MAX_EXIT_SUBMISSION_WINDOW_MS)
             || request.reconciliation_deadline_ms <= request.submission_deadline_ms
@@ -1828,14 +2007,17 @@ impl Store {
         {
             return Err(StoreError::InvalidAction);
         }
-        let mut transaction = self.pool.begin().await?;
         let current = load_saga(&mut transaction, &request.intent_id).await?;
         if current.perp_filled_base == 0 {
             return Err(StoreError::InvalidAction);
         }
-        let live_exit_action = sqlx::query_scalar::<_, String>(
+        let intent = load_intent(&mut transaction, &request.intent_id).await?;
+        if intent.execution_account_id != request.execution_account_id {
+            return Err(StoreError::ExecutionAccountUnavailable);
+        }
+        let live_exit_action = sqlx::query_as::<_, (String, String, Value)>(
             r#"
-            SELECT id
+            SELECT id, kind, payload
             FROM execution_actions
             WHERE intent_id = $1
               AND status IN ('pending', 'leased')
@@ -1847,10 +2029,6 @@ impl Store {
         .bind(&request.intent_id)
         .fetch_optional(&mut *transaction)
         .await?;
-        if live_exit_action.is_some() {
-            return Err(StoreError::Conflict);
-        }
-        let intent = load_intent(&mut transaction, &request.intent_id).await?;
         let quote = load_exit_quote(
             &mut transaction,
             &request.intent_id,
@@ -1860,6 +2038,7 @@ impl Store {
             Some((
                 &request.quote_source_session,
                 &request.quote_source_event_id,
+                &request.quote_payload_sha256,
             )),
         )
         .await?
@@ -1877,6 +2056,48 @@ impl Store {
         )
         .ok_or(StoreError::MarketEvidenceMismatch)?;
         let authority = serde_json::to_value(authority).map_err(|_| StoreError::InvalidAction)?;
+
+        if let Some((action_id, action_kind, action_payload)) = live_exit_action {
+            let remaining = current
+                .perp_filled_base
+                .saturating_sub(current.perp_unwound_base);
+            let expected_kind = if remaining > 0 {
+                ActionKind::UnwindPerp.as_str()
+            } else {
+                ActionKind::UnwindSpot.as_str()
+            };
+            if request.reason != "operator_exit"
+                || current.state != ExecutionState::Unwinding
+                || action_kind != expected_kind
+                || action_payload.get("control_command_id").is_none()
+                || action_payload.get("exit_authority").is_some()
+            {
+                return Err(StoreError::Conflict);
+            }
+            sqlx::query(
+                "UPDATE execution_actions SET payload = jsonb_set(payload, '{exit_authority}', $2), updated_at = now() WHERE id = $1",
+            )
+            .bind(&action_id)
+            .bind(Json(&authority))
+            .execute(&mut *transaction)
+            .await?;
+            append_action_event(
+                &mut transaction,
+                &action_id,
+                &request.intent_id,
+                "exit_authority_bound",
+                authority,
+            )
+            .await?;
+            insert_exit_request(&mut transaction, request, &payload_sha256, current.version)
+                .await?;
+            transaction.commit().await?;
+            return Ok(ExitAdmissionOutcome {
+                created: true,
+                saga: current,
+                payload_sha256,
+            });
+        }
 
         let (saga, kind, phase, payload) = match current.state {
             ExecutionState::PerpFilled => {
@@ -1991,8 +2212,49 @@ impl Store {
             },
         )
         .await?;
+        insert_exit_request(&mut transaction, request, &payload_sha256, saga.version).await?;
         transaction.commit().await?;
-        Ok(saga)
+        Ok(ExitAdmissionOutcome {
+            created: true,
+            saga,
+            payload_sha256,
+        })
+    }
+
+    pub async fn exit_status(
+        &self,
+        request: &ExitStatusRequest,
+    ) -> Result<ExitStatusResponse, StoreError> {
+        if !valid_hash(&request.request_id) || !valid_digest(&request.payload_sha256) {
+            return Err(StoreError::InvalidAction);
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&request.request_id)
+            .execute(&mut *transaction)
+            .await?;
+        let existing = sqlx::query_as::<_, (String, String)>(
+            "SELECT payload_sha256, intent_id FROM execution_exit_requests WHERE request_id = $1",
+        )
+        .bind(&request.request_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let (status, saga) = match existing {
+            None => ("absent", None),
+            Some((stored_digest, intent_id)) if stored_digest == request.payload_sha256 => (
+                "persisted",
+                Some(load_saga(&mut transaction, &intent_id).await?),
+            ),
+            Some(_) => ("conflict", None),
+        };
+        let response = ExitStatusResponse {
+            request_id: request.request_id.clone(),
+            payload_sha256: request.payload_sha256.clone(),
+            status: status.into(),
+            saga,
+        };
+        transaction.commit().await?;
+        Ok(response)
     }
 
     pub async fn request_recovery(
@@ -2144,10 +2406,8 @@ impl Store {
             transaction.commit().await?;
             return Ok(false);
         };
-        let submission_deadline = quote.expires_at_ms;
-        let reconciliation_deadline = now_ms
-            .checked_add(MAX_EXIT_RECONCILIATION_WINDOW_MS)
-            .ok_or(StoreError::InvalidAction)?;
+        let submission_deadline = quote.submission_deadline_ms;
+        let reconciliation_deadline = quote.reconciliation_deadline_ms;
         let authority = build_exit_authority(
             &saga,
             quote,
@@ -2577,7 +2837,7 @@ impl Store {
         api_key_index: u8,
         observed_next_nonce: i64,
     ) -> Result<i64, StoreError> {
-        if account_index <= 0 || !(2..=254).contains(&api_key_index) || observed_next_nonce < 0 {
+        if account_index <= 0 || !(4..=254).contains(&api_key_index) || observed_next_nonce < 0 {
             return Err(StoreError::InvalidAction);
         }
         let mut transaction = self.pool.begin().await?;
@@ -2738,7 +2998,7 @@ impl Store {
         account_index: i64,
         api_key_index: u8,
     ) -> Result<(), StoreError> {
-        if account_index <= 0 || !(2..=254).contains(&api_key_index) {
+        if account_index <= 0 || !(4..=254).contains(&api_key_index) {
             return Err(StoreError::InvalidAction);
         }
         let mut transaction = self.pool.begin().await?;
@@ -3680,29 +3940,81 @@ async fn load_intent(
     serde_json::from_value(payload).map_err(|_| StoreError::InvalidAction)
 }
 
+async fn insert_exit_request(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &ExitRequest,
+    payload_sha256: &str,
+    saga_version: u64,
+) -> Result<(), StoreError> {
+    let saga_version = i64::try_from(saga_version).map_err(|_| StoreError::InvalidSaga)?;
+    sqlx::query(
+        r#"
+        INSERT INTO execution_exit_requests
+            (request_id, intent_id, execution_account_id, quote_source_session,
+             quote_source_event_id, quote_payload_sha256, payload, payload_sha256,
+             saga_version_at_accept)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(&request.request_id)
+    .bind(&request.intent_id)
+    .bind(&request.execution_account_id)
+    .bind(&request.quote_source_session)
+    .bind(&request.quote_source_event_id)
+    .bind(&request.quote_payload_sha256)
+    .bind(Json(request))
+    .bind(payload_sha256)
+    .bind(saga_version)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn load_exit_quote(
     transaction: &mut Transaction<'_, Postgres>,
     intent_id: &str,
     intent: &PairIntent,
     now_ms: u64,
     spot_amount_in: u128,
-    reference: Option<(&str, &str)>,
+    reference: Option<(&str, &str, &str)>,
 ) -> Result<Option<ExitQuoteRow>, StoreError> {
-    type ExitQuoteDbRow = (String, String, i64, String, String, i64, i64, i32, i32);
+    type ExitQuoteDbRow = (
+        String,
+        String,
+        i64,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        i32,
+        i32,
+    );
     let now = i64::try_from(now_ms).map_err(|_| StoreError::InvalidAction)?;
-    let (source_session, source_event_id) = reference.unzip();
+    let (source_session, source_event_id, payload_sha256) = match reference {
+        Some((session, event, digest)) => (Some(session), Some(event), Some(digest)),
+        None => (None, None, None),
+    };
     let row = sqlx::query_as::<_, ExitQuoteDbRow>(
         r#"
         SELECT quote.source_session, quote.source_event_id, quote.mark_price,
                quote.spot_unwind_amount_in, quote.spot_unwind_expected_amount_out,
                (EXTRACT(EPOCH FROM quote.received_at) * 1000)::bigint,
                (EXTRACT(EPOCH FROM quote.expires_at) * 1000)::bigint,
+               quote.submission_deadline_ms, quote.reconciliation_deadline_ms,
                config.max_unwind_price_deviation_bps, config.max_spot_slippage_bps
         FROM execution_market_quotes quote
         JOIN execution_market_configs config ON config.manifest_id = quote.market_manifest
         WHERE quote.source = 'execution-authority'
           AND quote.intent_id = $1
+          AND quote.execution_account_id = $7
           AND quote.market_manifest = $2
+          AND quote.strategy_manifest_sha256 = $8
+          AND quote.route_sha256 = $9
+          AND quote.lighter_market_index = $11
+          AND config.lighter_market_index = $11
+          AND quote.exit_binding_version = 1
           AND quote.spot_unwind_amount_in IS NOT NULL
           AND quote.spot_unwind_expected_amount_out IS NOT NULL
           AND quote.spot_unwind_amount_in = $6
@@ -3712,6 +4024,7 @@ async fn load_exit_quote(
           AND config.valid_until >= TIMESTAMPTZ 'epoch' + $3 * interval '1 millisecond'
           AND ($4::text IS NULL OR quote.source_session = $4)
           AND ($5::text IS NULL OR quote.source_event_id = $5)
+          AND ($10::text IS NULL OR quote.payload_sha256 = $10)
         ORDER BY quote.received_at DESC, quote.id DESC
         LIMIT 1
         FOR SHARE OF quote, config
@@ -3723,6 +4036,11 @@ async fn load_exit_quote(
     .bind(source_session)
     .bind(source_event_id)
     .bind(spot_amount_in.to_string())
+    .bind(&intent.execution_account_id)
+    .bind(&intent.strategy_manifest_sha256)
+    .bind(BASIS_AAPL_V1_ROUTE_SHA256)
+    .bind(payload_sha256)
+    .bind(i32::try_from(intent.lighter_market_index).map_err(|_| StoreError::InvalidAction)?)
     .fetch_optional(&mut **transaction)
     .await?;
     row.map(|row| {
@@ -3735,9 +4053,13 @@ async fn load_exit_quote(
                 .ok_or(StoreError::MarketEvidenceMismatch)?,
             received_at_ms: u64::try_from(row.5).map_err(|_| StoreError::MarketEvidenceMismatch)?,
             expires_at_ms: u64::try_from(row.6).map_err(|_| StoreError::MarketEvidenceMismatch)?,
-            max_unwind_price_deviation_bps: u32::try_from(row.7)
+            submission_deadline_ms: u64::try_from(row.7)
                 .map_err(|_| StoreError::MarketEvidenceMismatch)?,
-            max_spot_slippage_bps: u32::try_from(row.8)
+            reconciliation_deadline_ms: u64::try_from(row.8)
+                .map_err(|_| StoreError::MarketEvidenceMismatch)?,
+            max_unwind_price_deviation_bps: u32::try_from(row.9)
+                .map_err(|_| StoreError::MarketEvidenceMismatch)?,
+            max_spot_slippage_bps: u32::try_from(row.10)
                 .map_err(|_| StoreError::MarketEvidenceMismatch)?,
         })
     })
@@ -3756,6 +4078,8 @@ fn build_exit_authority(
     if quote.received_at_ms > now_ms
         || quote.expires_at_ms <= now_ms
         || submission_deadline_ms <= now_ms
+        || submission_deadline_ms != quote.submission_deadline_ms
+        || reconciliation_deadline_ms != quote.reconciliation_deadline_ms
         || submission_deadline_ms > quote.expires_at_ms
         || submission_deadline_ms > now_ms.checked_add(MAX_EXIT_SUBMISSION_WINDOW_MS)?
         || reconciliation_deadline_ms <= submission_deadline_ms
@@ -4899,7 +5223,7 @@ fn valid_account_registration(request: &AccountRegistrationRequest) -> bool {
         && request.risk_version == CANARY_RISK_VERSION
         && request.strategy_manifest_sha256 == BASIS_AAPL_V1_MANIFEST_SHA256
         && request.lighter_account_index > 0
-        && (2..=254).contains(&request.lighter_api_key_index)
+        && (4..=254).contains(&request.lighter_api_key_index)
         && valid_evm_address(&request.robinhood_owner)
         && valid_evm_address(&request.robinhood_vault)
         && valid_evm_address(&request.robinhood_signer)
@@ -5015,7 +5339,7 @@ fn valid_account_snapshot(snapshot: &NewAccountSnapshot) -> bool {
         )
         .is_ok_and(|value| {
             value.account_index > 0
-                && (2..=254).contains(&value.api_key_index)
+                && (4..=254).contains(&value.api_key_index)
                 && value.maintenance_margin_ratio_micros > 0
         }),
         "robinhood-chain" => serde_json::from_value::<RobinhoodAccountSnapshot>(
@@ -5119,6 +5443,11 @@ fn valid_digest(value: &str) -> bool {
 pub fn calculate_intent_payload_sha256(intent: &PairIntent) -> Result<String, StoreError> {
     let encoded = serde_json::to_vec(intent)
         .map_err(|_| StoreError::InvalidIntent("intent cannot be encoded".into()))?;
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
+pub fn calculate_exit_payload_sha256(request: &ExitRequest) -> Result<String, StoreError> {
+    let encoded = serde_json::to_vec(request).map_err(|_| StoreError::InvalidAction)?;
     Ok(hex::encode(Sha256::digest(encoded)))
 }
 
@@ -5548,7 +5877,7 @@ mod tests {
             risk_version: CANARY_RISK_VERSION.into(),
             strategy_manifest_sha256: BASIS_AAPL_V1_MANIFEST_SHA256.into(),
             lighter_account_index: 71,
-            lighter_api_key_index: 2,
+            lighter_api_key_index: 4,
             robinhood_owner: "0x0000000000000000000000000000000000000021".into(),
             robinhood_vault: "0x0000000000000000000000000000000000000022".into(),
             robinhood_signer: "0x0000000000000000000000000000000000000023".into(),
@@ -5571,7 +5900,7 @@ mod tests {
             risk_version: CANARY_RISK_VERSION.into(),
             strategy_manifest_sha256: BASIS_AAPL_V1_MANIFEST_SHA256.into(),
             lighter_account_index: 71,
-            lighter_api_key_index: 2,
+            lighter_api_key_index: 4,
             robinhood_owner: "0x0000000000000000000000000000000000000021".into(),
             robinhood_vault: "0x0000000000000000000000000000000000000022".into(),
             robinhood_signer: "0x0000000000000000000000000000000000000023".into(),

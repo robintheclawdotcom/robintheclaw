@@ -82,10 +82,6 @@ func (s *Server) run(w http.ResponseWriter, request *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "coordinator payload identity conflicts"})
 			return
 		}
-		if errors.Is(err, ErrUnwindProtocolGap) {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "coordinator exit authority is unavailable"})
-			return
-		}
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "strategy evidence rejected"})
 		return
 	}

@@ -13,41 +13,64 @@ import (
 
 type AdapterRequest struct {
 	ExecutionAccountID string
+	IntentID           string
 	Action             protocol.Action
 	EntryNotional      uint64
 }
 
+type DurableSource struct {
+	Session      string
+	EventID      string
+	Sequence     int64
+	ReceivedAtMS uint64
+}
+
 type AdapterResult struct {
-	Source       protocol.SourceIdentity
-	Spot         protocol.SpotQuote
-	Perp         protocol.PerpQuote
-	ObservedAtMS uint64
-	ExpiresAtMS  uint64
+	Source        protocol.SourceIdentity
+	Spot          protocol.SpotQuote
+	Perp          protocol.PerpQuote
+	DurableSource DurableSource
+	ObservedAtMS  uint64
+	ExpiresAtMS   uint64
 }
 
 type ExecutableQuoteAdapter interface {
 	Quote(context.Context, AdapterRequest) (AdapterResult, error)
 }
 
-type Service struct {
-	adapter    ExecutableQuoteAdapter
-	privateKey ed25519.PrivateKey
-	now        func() time.Time
+type MarketQuotePublisher interface {
+	Publish(context.Context, protocol.MarketQuotePublication) (protocol.MarketQuoteReceipt, error)
 }
 
-func NewService(adapter ExecutableQuoteAdapter, privateKey ed25519.PrivateKey) (*Service, error) {
-	if adapter == nil || len(privateKey) != ed25519.PrivateKeySize {
-		return nil, errors.New("quote adapter and signing key are required")
+type Service struct {
+	adapter            ExecutableQuoteAdapter
+	publisher          MarketQuotePublisher
+	privateKey         ed25519.PrivateKey
+	lighterMarketIndex uint32
+	now                func() time.Time
+}
+
+func NewService(adapter ExecutableQuoteAdapter, publisher MarketQuotePublisher, privateKey ed25519.PrivateKey, lighterMarketIndex uint32) (*Service, error) {
+	if adapter == nil || publisher == nil || len(privateKey) != ed25519.PrivateKeySize || lighterMarketIndex > 32767 {
+		return nil, errors.New("quote adapter, market quote publisher, signing key, and reviewed market index are required")
 	}
-	return &Service{adapter: adapter, privateKey: append(ed25519.PrivateKey(nil), privateKey...), now: time.Now}, nil
+	return &Service{
+		adapter: adapter, publisher: publisher, privateKey: append(ed25519.PrivateKey(nil), privateKey...),
+		lighterMarketIndex: lighterMarketIndex, now: time.Now,
+	}, nil
 }
 
 func (s *Service) Quote(ctx context.Context, request protocol.QuoteRequest) (protocol.QuoteBundle, error) {
 	nowMS := uint64(s.now().UnixMilli())
-	if !validHash(request.RequestID) || !validHash(request.SourceEvaluationID) || !validExecutionID(request.ExecutionAccountID) ||
+	if !validHash(request.RequestID) || !validHash(request.SourceEvaluationID) || !validHash(request.MarketManifest) ||
+		!validExecutionID(request.ExecutionAccountID) ||
 		(request.Action != protocol.ActionEntry && request.Action != protocol.ActionUnwind) || request.RequestedAtMS > nowMS ||
 		nowMS-request.RequestedAtMS > protocol.MaximumQuoteLifetimeMS {
 		return protocol.QuoteBundle{}, errors.New("invalid quote request")
+	}
+	if (request.Action == protocol.ActionEntry && request.IntentID != "") ||
+		(request.Action == protocol.ActionUnwind && !validHash(request.IntentID)) {
+		return protocol.QuoteBundle{}, errors.New("invalid quote intent binding")
 	}
 	entryNotional := uint64(0)
 	if request.Action == protocol.ActionEntry {
@@ -55,20 +78,22 @@ func (s *Service) Quote(ctx context.Context, request protocol.QuoteRequest) (pro
 	}
 	result, err := s.adapter.Quote(ctx, AdapterRequest{
 		ExecutionAccountID: request.ExecutionAccountID,
+		IntentID:           request.IntentID,
 		Action:             request.Action,
 		EntryNotional:      entryNotional,
 	})
 	if err != nil {
 		return protocol.QuoteBundle{}, err
 	}
-	if err := validateAdapterResult(request.Action, result, nowMS); err != nil {
+	if err := validateAdapterResult(request.Action, result, s.lighterMarketIndex, nowMS); err != nil {
 		return protocol.QuoteBundle{}, err
 	}
 	bundle := protocol.QuoteBundle{
-		SchemaVersion:          1,
+		SchemaVersion:          protocol.QuoteSchemaVersion,
 		RequestID:              request.RequestID,
 		ExecutionAccountID:     request.ExecutionAccountID,
 		SourceEvaluationID:     request.SourceEvaluationID,
+		MarketManifest:         request.MarketManifest,
 		StrategyVersion:        protocol.StrategyVersion,
 		StrategyManifestSHA256: protocol.StrategyManifestSHA256,
 		SourceConfigSHA256:     protocol.SourceConfigSHA256,
@@ -82,16 +107,48 @@ func (s *Service) Quote(ctx context.Context, request protocol.QuoteRequest) (pro
 		ObservedAtMS:           result.ObservedAtMS,
 		ExpiresAtMS:            result.ExpiresAtMS,
 	}
+	if request.Action == protocol.ActionUnwind {
+		reconciliationDeadline, ok := addUint64(result.ExpiresAtMS, protocol.MaximumExitReconciliationMS)
+		if !ok {
+			return protocol.QuoteBundle{}, errors.New("exit quote deadlines overflow")
+		}
+		publication, ok := exitPublication(request, result, reconciliationDeadline)
+		if !ok {
+			return protocol.QuoteBundle{}, errors.New("exit quote cannot be persisted")
+		}
+		receipt, err := s.publisher.Publish(ctx, publication)
+		if err != nil {
+			return protocol.QuoteBundle{}, err
+		}
+		if (receipt.Status != "recorded" && receipt.Status != "duplicate") ||
+			receipt.SourceSession != result.DurableSource.Session || receipt.SourceEventID != result.DurableSource.EventID ||
+			!validDigest(receipt.PayloadSHA256) {
+			return protocol.QuoteBundle{}, errors.New("coordinator did not prove quote persistence")
+		}
+		bundle.ExitAuthority = &protocol.ExitQuoteAuthority{
+			Source:                   "execution-authority",
+			SourceSession:            receipt.SourceSession,
+			SourceEventID:            receipt.SourceEventID,
+			SourceSequence:           result.DurableSource.Sequence,
+			ExecutionAccountID:       request.ExecutionAccountID,
+			IntentID:                 request.IntentID,
+			MarketManifest:           request.MarketManifest,
+			PayloadSHA256:            receipt.PayloadSHA256,
+			ReceivedAtMS:             result.DurableSource.ReceivedAtMS,
+			SubmissionDeadlineMS:     result.ExpiresAtMS,
+			ReconciliationDeadlineMS: reconciliationDeadline,
+		}
+	}
 	if err := bundle.Sign(s.privateKey); err != nil {
 		return protocol.QuoteBundle{}, err
 	}
-	if err := bundle.Verify(s.privateKey.Public().(ed25519.PublicKey), nowMS); err != nil {
+	if err := bundle.Verify(s.privateKey.Public().(ed25519.PublicKey), s.lighterMarketIndex, nowMS); err != nil {
 		return protocol.QuoteBundle{}, err
 	}
 	return bundle, nil
 }
 
-func validateAdapterResult(action protocol.Action, result AdapterResult, nowMS uint64) error {
+func validateAdapterResult(action protocol.Action, result AdapterResult, lighterMarketIndex uint32, nowMS uint64) error {
 	if result.ObservedAtMS > nowMS || result.ExpiresAtMS <= nowMS || result.ExpiresAtMS <= result.ObservedAtMS ||
 		result.ExpiresAtMS-result.ObservedAtMS > protocol.MaximumQuoteLifetimeMS {
 		return errors.New("adapter returned stale quote")
@@ -108,7 +165,8 @@ func validateAdapterResult(action protocol.Action, result AdapterResult, nowMS u
 	if spot.Venue != protocol.SpotVenue || spot.ChainID != protocol.ChainID || spot.SettlementToken != protocol.SettlementToken ||
 		spot.StockToken != protocol.StockToken || spot.Router != protocol.Router || spot.Side != spotSide || spot.BlockHash == "" ||
 		spot.ObservedAtMS != result.ObservedAtMS || perp.Venue != protocol.PerpVenue || perp.Symbol != protocol.Symbol ||
-		perp.Side != perpSide || perp.ReduceOnly != reduceOnly || perp.ObservedAtMS != result.ObservedAtMS {
+		perp.Side != perpSide || perp.ReduceOnly != reduceOnly || perp.MarketIndex != lighterMarketIndex ||
+		perp.ObservedAtMS != result.ObservedAtMS {
 		return errors.New("adapter returned a route or direction mismatch")
 	}
 	settlement, ok := positiveDecimal(spot.SettlementAmount)
@@ -130,8 +188,57 @@ func validateAdapterResult(action protocol.Action, result AdapterResult, nowMS u
 			perpNotional(perp).Cmp(new(big.Int).SetUint64(protocol.EntryNotionalMicros)) != 0 {
 			return errors.New("entry quote does not match the fixed notional")
 		}
+		if result.DurableSource != (DurableSource{}) {
+			return errors.New("entry quote contains exit persistence identity")
+		}
+	} else if !validSourcePart(result.DurableSource.Session, 128) ||
+		!validSourcePart(result.DurableSource.EventID, 256) || result.DurableSource.Sequence < 0 ||
+		result.DurableSource.ReceivedAtMS < result.ObservedAtMS || result.DurableSource.ReceivedAtMS >= result.ExpiresAtMS ||
+		result.DurableSource.ReceivedAtMS > nowMS {
+		return errors.New("adapter returned invalid durable quote identity")
 	}
 	return nil
+}
+
+func exitPublication(request protocol.QuoteRequest, result AdapterResult, reconciliationDeadline uint64) (protocol.MarketQuotePublication, bool) {
+	publisherAt, publisherOK := toInt64(result.ObservedAtMS)
+	receivedAt, receivedOK := toInt64(result.DurableSource.ReceivedAtMS)
+	expiresAt, expiresOK := toInt64(result.ExpiresAtMS)
+	reconciliation, reconciliationOK := toInt64(reconciliationDeadline)
+	if !publisherOK || !receivedOK || !expiresOK || !reconciliationOK {
+		return protocol.MarketQuotePublication{}, false
+	}
+	return protocol.MarketQuotePublication{
+		Source:                      "execution-authority",
+		SourceSession:               result.DurableSource.Session,
+		SourceEventID:               result.DurableSource.EventID,
+		SourceSequence:              result.DurableSource.Sequence,
+		ExecutionAccountID:          request.ExecutionAccountID,
+		MarketManifest:              request.MarketManifest,
+		StrategyManifestSHA256:      protocol.StrategyManifestSHA256,
+		RouteSHA256:                 protocol.RouteSHA256,
+		LighterMarketIndex:          result.Perp.MarketIndex,
+		QuoteBlockHash:              result.Spot.BlockHash,
+		MarkPrice:                   result.Perp.MarkPrice,
+		PublisherAtMS:               publisherAt,
+		ReceivedAtMS:                receivedAt,
+		ExpiresAtMS:                 expiresAt,
+		IntentID:                    request.IntentID,
+		SpotUnwindAmountIn:          result.Spot.StockAmount,
+		SpotUnwindExpectedAmountOut: result.Spot.SettlementAmount,
+		SubmissionDeadlineMS:        expiresAt,
+		ReconciliationDeadlineMS:    reconciliation,
+	}, true
+}
+
+func addUint64(left, right uint64) (uint64, bool) {
+	value := left + right
+	return value, value >= left
+}
+
+func toInt64(value uint64) (int64, bool) {
+	converted := int64(value)
+	return converted, converted >= 0 && uint64(converted) == value
 }
 
 func perpNotional(quote protocol.PerpQuote) *big.Int {
@@ -173,6 +280,30 @@ func validExecutionID(value string) bool {
 	}
 	for _, char := range value {
 		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validDigest(value string) bool {
+	if len(value) != 64 || value == strings.Repeat("0", 64) {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validSourcePart(value string, maximum int) bool {
+	if value == "" || len(value) > maximum {
+		return false
+	}
+	for _, char := range value {
+		if char < 0x21 || char > 0x7e {
 			return false
 		}
 	}

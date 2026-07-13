@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -18,6 +19,24 @@ type fakeAdapter struct {
 	seen   AdapterRequest
 }
 
+type fakePublisher struct {
+	quotes []protocol.MarketQuotePublication
+	err    error
+}
+
+func (f *fakePublisher) Publish(_ context.Context, quote protocol.MarketQuotePublication) (protocol.MarketQuoteReceipt, error) {
+	f.quotes = append(f.quotes, quote)
+	if f.err != nil {
+		return protocol.MarketQuoteReceipt{}, f.err
+	}
+	encoded, _ := json.Marshal(quote)
+	digest := sha256.Sum256(encoded)
+	return protocol.MarketQuoteReceipt{
+		Status: "recorded", SourceSession: quote.SourceSession, SourceEventID: quote.SourceEventID,
+		PayloadSHA256: hex.EncodeToString(digest[:]),
+	}, nil
+}
+
 func (f *fakeAdapter) Quote(_ context.Context, request AdapterRequest) (AdapterResult, error) {
 	f.seen = request
 	return f.result, f.err
@@ -26,7 +45,7 @@ func (f *fakeAdapter) Quote(_ context.Context, request AdapterRequest) (AdapterR
 func TestServicePinsEntryPolicyAndSignsExecutableQuotes(t *testing.T) {
 	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
 	adapter := &fakeAdapter{result: adapterResult(protocol.ActionEntry)}
-	service, err := NewService(adapter, privateKey)
+	service, err := NewService(adapter, &fakePublisher{}, privateKey, 101)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,6 +54,7 @@ func TestServicePinsEntryPolicyAndSignsExecutableQuotes(t *testing.T) {
 		RequestID:          testHash("request"),
 		ExecutionAccountID: "account-canary-1",
 		SourceEvaluationID: testHash("evaluation"),
+		MarketManifest:     testHash("market"),
 		Action:             protocol.ActionEntry,
 		RequestedAtMS:      99_500,
 	}
@@ -48,32 +68,84 @@ func TestServicePinsEntryPolicyAndSignsExecutableQuotes(t *testing.T) {
 	if quote.StrategyManifestSHA256 != protocol.StrategyManifestSHA256 || quote.Spot.StockToken != protocol.StockToken {
 		t.Fatal("quote did not pin canonical strategy and route")
 	}
-	if err := quote.Verify(publicKey, 100_000); err != nil {
+	if err := quote.Verify(publicKey, 101, 100_000); err != nil {
 		t.Fatalf("authority produced unverifiable quote: %v", err)
+	}
+}
+
+func TestServicePersistsExitAuthorityBeforeSigning(t *testing.T) {
+	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
+	result := adapterResult(protocol.ActionUnwind)
+	result.Perp.BaseAmount = 250_000
+	adapter := &fakeAdapter{result: result}
+	publisher := &fakePublisher{}
+	service, err := NewService(adapter, publisher, privateKey, 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return time.UnixMilli(100_000) }
+	request := protocol.QuoteRequest{
+		RequestID: testHash("exit-request"), ExecutionAccountID: "account-canary-1",
+		SourceEvaluationID: testHash("exit-evaluation"), MarketManifest: testHash("market"),
+		IntentID: testHash("open-intent"), Action: protocol.ActionUnwind, RequestedAtMS: 99_500,
+	}
+	quote, err := service.Quote(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(publisher.quotes) != 1 || adapter.seen.IntentID != request.IntentID {
+		t.Fatal("exit quote was signed without exact coordinator publication")
+	}
+	persisted := publisher.quotes[0]
+	if persisted.ExecutionAccountID != request.ExecutionAccountID || persisted.IntentID != request.IntentID ||
+		persisted.RouteSHA256 != protocol.RouteSHA256 || persisted.MarketManifest != request.MarketManifest || persisted.LighterMarketIndex != 101 ||
+		persisted.SpotUnwindAmountIn != result.Spot.StockAmount || persisted.SpotUnwindExpectedAmountOut != result.Spot.SettlementAmount ||
+		persisted.SubmissionDeadlineMS != int64(result.ExpiresAtMS) || quote.ExitAuthority == nil ||
+		quote.ExitAuthority.PayloadSHA256 == "" || quote.Perp.BaseAmount != 250_000 {
+		t.Fatal("persisted exit authority omitted a bound field")
+	}
+	if err := quote.Verify(publicKey, 101, 100_000); err != nil {
+		t.Fatalf("persisted exit quote was not verifiable: %v", err)
+	}
+}
+
+func TestServiceNeverSignsUnpersistedExit(t *testing.T) {
+	_, privateKey, _ := ed25519.GenerateKey(nil)
+	publisher := &fakePublisher{err: ErrMarketQuoteAmbiguous}
+	service, _ := NewService(&fakeAdapter{result: adapterResult(protocol.ActionUnwind)}, publisher, privateKey, 101)
+	service.now = func() time.Time { return time.UnixMilli(100_000) }
+	_, err := service.Quote(context.Background(), protocol.QuoteRequest{
+		RequestID: testHash("exit-request"), ExecutionAccountID: "account-canary-1",
+		SourceEvaluationID: testHash("exit-evaluation"), MarketManifest: testHash("market"),
+		IntentID: testHash("open-intent"), Action: protocol.ActionUnwind, RequestedAtMS: 99_500,
+	})
+	if !errors.Is(err, ErrMarketQuoteAmbiguous) {
+		t.Fatalf("unpersisted exit quote was not rejected: %v", err)
 	}
 }
 
 func TestServiceRejectsAdapterPolicyViolations(t *testing.T) {
 	_, privateKey, _ := ed25519.GenerateKey(nil)
 	cases := map[string]func(*AdapterResult){
-		"wrong token":     func(result *AdapterResult) { result.Spot.StockToken = "0x0000000000000000000000000000000000000001" },
-		"wrong notional":  func(result *AdapterResult) { result.Spot.SettlementAmount = "24999999" },
-		"wrong direction": func(result *AdapterResult) { result.Perp.Side = "long" },
-		"stale":           func(result *AdapterResult) { result.ExpiresAtMS = 100_000 },
-		"missing source":  func(result *AdapterResult) { result.Source.AdapterID = "" },
+		"wrong token":       func(result *AdapterResult) { result.Spot.StockToken = "0x0000000000000000000000000000000000000001" },
+		"wrong notional":    func(result *AdapterResult) { result.Spot.SettlementAmount = "24999999" },
+		"wrong direction":   func(result *AdapterResult) { result.Perp.Side = "long" },
+		"stale":             func(result *AdapterResult) { result.ExpiresAtMS = 100_000 },
+		"missing source":    func(result *AdapterResult) { result.Source.AdapterID = "" },
+		"unreviewed market": func(result *AdapterResult) { result.Perp.MarketIndex = 102 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
 			result := adapterResult(protocol.ActionEntry)
 			mutate(&result)
-			service, err := NewService(&fakeAdapter{result: result}, privateKey)
+			service, err := NewService(&fakeAdapter{result: result}, &fakePublisher{}, privateKey, 101)
 			if err != nil {
 				t.Fatal(err)
 			}
 			service.now = func() time.Time { return time.UnixMilli(100_000) }
 			_, err = service.Quote(context.Background(), protocol.QuoteRequest{
 				RequestID: testHash("request"), ExecutionAccountID: "account-canary-1",
-				SourceEvaluationID: testHash("evaluation"), Action: protocol.ActionEntry, RequestedAtMS: 99_500,
+				SourceEvaluationID: testHash("evaluation"), MarketManifest: testHash("market"), Action: protocol.ActionEntry, RequestedAtMS: 99_500,
 			})
 			if err == nil {
 				t.Fatal("invalid adapter result accepted")
@@ -85,11 +157,11 @@ func TestServiceRejectsAdapterPolicyViolations(t *testing.T) {
 func TestServiceDoesNotMaskAdapterFailure(t *testing.T) {
 	_, privateKey, _ := ed25519.GenerateKey(nil)
 	want := errors.New("both venue quote sources unavailable")
-	service, _ := NewService(&fakeAdapter{err: want}, privateKey)
+	service, _ := NewService(&fakeAdapter{err: want}, &fakePublisher{}, privateKey, 101)
 	service.now = func() time.Time { return time.UnixMilli(100_000) }
 	_, err := service.Quote(context.Background(), protocol.QuoteRequest{
 		RequestID: testHash("request"), ExecutionAccountID: "account-canary-1",
-		SourceEvaluationID: testHash("evaluation"), Action: protocol.ActionEntry, RequestedAtMS: 99_500,
+		SourceEvaluationID: testHash("evaluation"), MarketManifest: testHash("market"), Action: protocol.ActionEntry, RequestedAtMS: 99_500,
 	})
 	if !errors.Is(err, want) {
 		t.Fatalf("adapter error was masked: %v", err)
@@ -113,6 +185,12 @@ func adapterResult(action protocol.Action) AdapterResult {
 			Venue: protocol.PerpVenue, Symbol: protocol.Symbol, MarketIndex: 101, Side: perpSide, ReduceOnly: reduceOnly,
 			BaseAmount: 1_000_000, BaseDecimals: 6, PriceDecimals: 3, LimitPrice: 25_000, MarkPrice: 25_000, ObservedAtMS: 99_000,
 		},
+		DurableSource: func() DurableSource {
+			if action != protocol.ActionUnwind {
+				return DurableSource{}
+			}
+			return DurableSource{Session: "authority-session-1", EventID: "authority-event-1", Sequence: 1, ReceivedAtMS: 99_500}
+		}(),
 		ObservedAtMS: 99_000,
 		ExpiresAtMS:  102_000,
 	}

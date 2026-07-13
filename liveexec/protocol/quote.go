@@ -14,22 +14,24 @@ import (
 )
 
 const (
-	StrategyVersion        = "basis-aapl-v1"
-	StrategyManifestSHA256 = "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a"
-	SourceConfigSHA256     = "b701b39cbce20ccef48527811299732812d14297750fc3eee2a3c4a4a3f29edd"
-	RouteSHA256            = "23559b51e5512cfa0ab21ceeb3fbf97fc0edf3993528ae7b68d40affec6df5c8"
-	OraclePolicySHA256     = "b6f928e078847713aaca6c308769a774f367ec89f5f02d7332e1989095e53578"
-	RiskPolicySHA256       = "b6a73ad263d6b61fabda029282410dc8200e700c956d2804508b354bbfeb94f6"
-	RiskVersion            = StrategyVersion
-	ChainID                = uint64(4663)
-	Symbol                 = "AAPL"
-	SpotVenue              = "robinhood-chain-mainnet"
-	PerpVenue              = "lighter-mainnet"
-	SettlementToken        = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
-	StockToken             = "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9"
-	Router                 = "0x8876789976decbfcbbbe364623c63652db8c0904"
-	EntryNotionalMicros    = uint64(25_000_000)
-	MaximumQuoteLifetimeMS = uint64(5_000)
+	StrategyVersion             = "basis-aapl-v1"
+	StrategyManifestSHA256      = "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a"
+	SourceConfigSHA256          = "b701b39cbce20ccef48527811299732812d14297750fc3eee2a3c4a4a3f29edd"
+	RouteSHA256                 = "23559b51e5512cfa0ab21ceeb3fbf97fc0edf3993528ae7b68d40affec6df5c8"
+	OraclePolicySHA256          = "b6f928e078847713aaca6c308769a774f367ec89f5f02d7332e1989095e53578"
+	RiskPolicySHA256            = "b6a73ad263d6b61fabda029282410dc8200e700c956d2804508b354bbfeb94f6"
+	RiskVersion                 = StrategyVersion
+	ChainID                     = uint64(4663)
+	Symbol                      = "AAPL"
+	SpotVenue                   = "robinhood-chain-mainnet"
+	PerpVenue                   = "lighter-mainnet"
+	SettlementToken             = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+	StockToken                  = "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9"
+	Router                      = "0x8876789976decbfcbbbe364623c63652db8c0904"
+	EntryNotionalMicros         = uint64(25_000_000)
+	MaximumQuoteLifetimeMS      = uint64(5_000)
+	MaximumExitReconciliationMS = uint64(24 * 60 * 60 * 1_000)
+	QuoteSchemaVersion          = uint8(2)
 )
 
 var (
@@ -48,6 +50,8 @@ type QuoteRequest struct {
 	RequestID          string `json:"request_id"`
 	ExecutionAccountID string `json:"execution_account_id"`
 	SourceEvaluationID string `json:"source_evaluation_id"`
+	MarketManifest     string `json:"market_manifest"`
+	IntentID           string `json:"intent_id,omitempty"`
 	Action             Action `json:"action"`
 	RequestedAtMS      uint64 `json:"requested_at_ms"`
 }
@@ -88,26 +92,71 @@ type PerpQuote struct {
 	ObservedAtMS  uint64 `json:"observed_at_ms"`
 }
 
+type ExitQuoteAuthority struct {
+	Source                   string `json:"source"`
+	SourceSession            string `json:"source_session"`
+	SourceEventID            string `json:"source_event_id"`
+	SourceSequence           int64  `json:"source_sequence"`
+	ExecutionAccountID       string `json:"execution_account_id"`
+	IntentID                 string `json:"intent_id"`
+	MarketManifest           string `json:"market_manifest"`
+	PayloadSHA256            string `json:"payload_sha256"`
+	ReceivedAtMS             uint64 `json:"received_at_ms"`
+	SubmissionDeadlineMS     uint64 `json:"submission_deadline_ms"`
+	ReconciliationDeadlineMS uint64 `json:"reconciliation_deadline_ms"`
+}
+
+type MarketQuotePublication struct {
+	Source                      string `json:"source"`
+	SourceSession               string `json:"source_session"`
+	SourceEventID               string `json:"source_event_id"`
+	SourceSequence              int64  `json:"source_sequence"`
+	ExecutionAccountID          string `json:"execution_account_id"`
+	MarketManifest              string `json:"market_manifest"`
+	StrategyManifestSHA256      string `json:"strategy_manifest_sha256"`
+	RouteSHA256                 string `json:"route_sha256"`
+	LighterMarketIndex          uint32 `json:"lighter_market_index"`
+	QuoteBlockHash              string `json:"quote_block_hash"`
+	MarkPrice                   uint32 `json:"mark_price"`
+	PublisherAtMS               int64  `json:"publisher_at_ms"`
+	ReceivedAtMS                int64  `json:"received_at_ms"`
+	ExpiresAtMS                 int64  `json:"expires_at_ms"`
+	IntentID                    string `json:"intent_id"`
+	SpotUnwindAmountIn          string `json:"spot_unwind_amount_in"`
+	SpotUnwindExpectedAmountOut string `json:"spot_unwind_expected_amount_out"`
+	SubmissionDeadlineMS        int64  `json:"submission_deadline_ms"`
+	ReconciliationDeadlineMS    int64  `json:"reconciliation_deadline_ms"`
+}
+
+type MarketQuoteReceipt struct {
+	Status        string `json:"status"`
+	SourceSession string `json:"source_session"`
+	SourceEventID string `json:"source_event_id"`
+	PayloadSHA256 string `json:"payload_sha256"`
+}
+
 type QuoteBundle struct {
-	SchemaVersion          uint8          `json:"schema_version"`
-	ID                     string         `json:"id"`
-	RequestID              string         `json:"request_id"`
-	ExecutionAccountID     string         `json:"execution_account_id"`
-	SourceEvaluationID     string         `json:"source_evaluation_id"`
-	StrategyVersion        string         `json:"strategy_version"`
-	StrategyManifestSHA256 string         `json:"strategy_manifest_sha256"`
-	SourceConfigSHA256     string         `json:"source_config_sha256"`
-	RouteSHA256            string         `json:"route_sha256"`
-	OraclePolicySHA256     string         `json:"oracle_policy_sha256"`
-	RiskPolicySHA256       string         `json:"risk_policy_sha256"`
-	Action                 Action         `json:"action"`
-	Source                 SourceIdentity `json:"source"`
-	Spot                   SpotQuote      `json:"spot"`
-	Perp                   PerpQuote      `json:"perp"`
-	ObservedAtMS           uint64         `json:"observed_at_ms"`
-	ExpiresAtMS            uint64         `json:"expires_at_ms"`
-	PublicKey              string         `json:"public_key"`
-	Signature              string         `json:"signature"`
+	SchemaVersion          uint8               `json:"schema_version"`
+	ID                     string              `json:"id"`
+	RequestID              string              `json:"request_id"`
+	ExecutionAccountID     string              `json:"execution_account_id"`
+	SourceEvaluationID     string              `json:"source_evaluation_id"`
+	MarketManifest         string              `json:"market_manifest"`
+	StrategyVersion        string              `json:"strategy_version"`
+	StrategyManifestSHA256 string              `json:"strategy_manifest_sha256"`
+	SourceConfigSHA256     string              `json:"source_config_sha256"`
+	RouteSHA256            string              `json:"route_sha256"`
+	OraclePolicySHA256     string              `json:"oracle_policy_sha256"`
+	RiskPolicySHA256       string              `json:"risk_policy_sha256"`
+	Action                 Action              `json:"action"`
+	Source                 SourceIdentity      `json:"source"`
+	Spot                   SpotQuote           `json:"spot"`
+	Perp                   PerpQuote           `json:"perp"`
+	ExitAuthority          *ExitQuoteAuthority `json:"exit_authority,omitempty"`
+	ObservedAtMS           uint64              `json:"observed_at_ms"`
+	ExpiresAtMS            uint64              `json:"expires_at_ms"`
+	PublicKey              string              `json:"public_key"`
+	Signature              string              `json:"signature"`
 }
 
 func (q *QuoteBundle) Sign(privateKey ed25519.PrivateKey) error {
@@ -128,9 +177,12 @@ func (q *QuoteBundle) Sign(privateKey ed25519.PrivateKey) error {
 	return nil
 }
 
-func (q QuoteBundle) Verify(expectedPublicKey ed25519.PublicKey, nowMS uint64) error {
+func (q QuoteBundle) Verify(expectedPublicKey ed25519.PublicKey, expectedMarketIndex uint32, nowMS uint64) error {
 	if len(expectedPublicKey) != ed25519.PublicKeySize {
 		return errors.New("invalid trusted quote key")
+	}
+	if expectedMarketIndex > 32767 {
+		return errors.New("invalid trusted market index")
 	}
 	embedded, err := base64.StdEncoding.DecodeString(q.PublicKey)
 	if err != nil || len(embedded) != ed25519.PublicKeySize || subtle.ConstantTimeCompare(embedded, expectedPublicKey) != 1 {
@@ -148,7 +200,7 @@ func (q QuoteBundle) Verify(expectedPublicKey ed25519.PublicKey, nowMS uint64) e
 	if err != nil || !ed25519.Verify(expectedPublicKey, material, signature) {
 		return errors.New("quote signature mismatch")
 	}
-	if err := q.validateCanonical(); err != nil {
+	if err := q.validateCanonical(expectedMarketIndex); err != nil {
 		return err
 	}
 	if q.ObservedAtMS > nowMS || q.ExpiresAtMS <= nowMS || nowMS-q.ObservedAtMS > MaximumQuoteLifetimeMS {
@@ -157,13 +209,14 @@ func (q QuoteBundle) Verify(expectedPublicKey ed25519.PublicKey, nowMS uint64) e
 	return nil
 }
 
-func (q QuoteBundle) validateCanonical() error {
-	if q.SchemaVersion != 1 || q.StrategyVersion != StrategyVersion || q.StrategyManifestSHA256 != StrategyManifestSHA256 ||
+func (q QuoteBundle) validateCanonical(expectedMarketIndex uint32) error {
+	if q.SchemaVersion != QuoteSchemaVersion || q.StrategyVersion != StrategyVersion || q.StrategyManifestSHA256 != StrategyManifestSHA256 ||
 		q.SourceConfigSHA256 != SourceConfigSHA256 || q.RouteSHA256 != RouteSHA256 ||
 		q.OraclePolicySHA256 != OraclePolicySHA256 || q.RiskPolicySHA256 != RiskPolicySHA256 {
 		return errors.New("quote policy mismatch")
 	}
-	if !validHash(q.ID) || !validHash(q.RequestID) || !validHash(q.SourceEvaluationID) || !validHash(q.Spot.BlockHash) {
+	if !validHash(q.ID) || !validHash(q.RequestID) || !validHash(q.SourceEvaluationID) ||
+		!validHash(q.MarketManifest) || !validHash(q.Spot.BlockHash) {
 		return errors.New("quote identity is invalid")
 	}
 	if !validExecutionID(q.ExecutionAccountID) || q.Source.AdapterID == "" || q.Source.SpotSource == "" ||
@@ -172,6 +225,12 @@ func (q QuoteBundle) validateCanonical() error {
 	}
 	if q.Action != ActionEntry && q.Action != ActionUnwind {
 		return errors.New("quote action is invalid")
+	}
+	if q.Action == ActionEntry && q.ExitAuthority != nil {
+		return errors.New("entry quote contains exit authority")
+	}
+	if q.Action == ActionUnwind && !q.validExitAuthority() {
+		return errors.New("exit quote authority is invalid")
 	}
 	if q.Spot.Venue != SpotVenue || q.Spot.ChainID != ChainID || q.Spot.SettlementToken != SettlementToken ||
 		q.Spot.StockToken != StockToken || q.Spot.Router != Router || q.Perp.Venue != PerpVenue || q.Perp.Symbol != Symbol {
@@ -186,7 +245,7 @@ func (q QuoteBundle) validateCanonical() error {
 	}
 	if q.Spot.SettlementAmount == "" || q.Spot.StockAmount == "" || q.Spot.MinimumAmountOut == "" ||
 		q.Spot.ReferencePriceMicros == 0 || q.Perp.BaseAmount == 0 || q.Perp.LimitPrice == 0 || q.Perp.MarkPrice == 0 ||
-		q.Perp.MarketIndex > 32767 || q.Perp.BaseDecimals > 18 || q.Perp.PriceDecimals > 18 {
+		q.Perp.MarketIndex != expectedMarketIndex || q.Perp.BaseDecimals > 18 || q.Perp.PriceDecimals > 18 {
 		return errors.New("quote amounts are invalid")
 	}
 	settlement, settlementOK := positiveDecimal(q.Spot.SettlementAmount)
@@ -202,6 +261,21 @@ func (q QuoteBundle) validateCanonical() error {
 		return errors.New("quote lifetime is invalid")
 	}
 	return nil
+}
+
+func (q QuoteBundle) validExitAuthority() bool {
+	authority := q.ExitAuthority
+	if authority == nil || authority.Source != "execution-authority" ||
+		authority.ExecutionAccountID != q.ExecutionAccountID || authority.MarketManifest != q.MarketManifest ||
+		!validHash(authority.IntentID) || !validDigest(authority.PayloadSHA256) ||
+		!validSourcePart(authority.SourceSession, 128) || !validSourcePart(authority.SourceEventID, 256) ||
+		authority.SourceSequence < 0 || authority.ReceivedAtMS < q.ObservedAtMS || authority.ReceivedAtMS >= q.ExpiresAtMS ||
+		authority.SubmissionDeadlineMS != q.ExpiresAtMS ||
+		authority.ReconciliationDeadlineMS <= authority.SubmissionDeadlineMS ||
+		authority.ReconciliationDeadlineMS-authority.SubmissionDeadlineMS > MaximumExitReconciliationMS {
+		return false
+	}
+	return true
 }
 
 func positiveDecimal(value string) (*big.Int, bool) {
@@ -254,6 +328,30 @@ func validExecutionID(value string) bool {
 	}
 	for _, char := range value {
 		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validDigest(value string) bool {
+	if len(value) != 64 || value == strings.Repeat("0", 64) {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validSourcePart(value string, maximum int) bool {
+	if value == "" || len(value) > maximum {
+		return false
+	}
+	for _, char := range value {
+		if char < 0x21 || char > 0x7e {
 			return false
 		}
 	}

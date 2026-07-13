@@ -26,7 +26,7 @@ CREATE TABLE execution_account_registrations (
     risk_version TEXT NOT NULL,
     strategy_manifest_sha256 TEXT NOT NULL CHECK (strategy_manifest_sha256 ~ '^[0-9a-f]{64}$'),
     lighter_account_index BIGINT NOT NULL CHECK (lighter_account_index > 0),
-    lighter_api_key_index SMALLINT NOT NULL CHECK (lighter_api_key_index BETWEEN 2 AND 254),
+    lighter_api_key_index SMALLINT NOT NULL CHECK (lighter_api_key_index BETWEEN 4 AND 254),
     robinhood_owner TEXT NOT NULL CHECK (robinhood_owner ~ '^0x[0-9a-f]{40}$'),
     robinhood_vault TEXT NOT NULL CHECK (robinhood_vault ~ '^0x[0-9a-f]{40}$'),
     robinhood_signer TEXT NOT NULL CHECK (robinhood_signer ~ '^0x[0-9a-f]{40}$'),

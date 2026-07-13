@@ -3,7 +3,7 @@
 This module contains two internal services for `basis-aapl-v1`:
 
 - `quote-authority` obtains simultaneous executable spot and perp quotes from a reviewed adapter, pins every route and policy identity, and signs the bundle with Ed25519.
-- `strategy-runner` verifies the signed quote and authenticated evaluation, readiness, and account snapshots, then submits the exact deterministic `PairIntent v2` entry to the coordinator.
+- `strategy-runner` verifies the signed quote and authenticated evaluation, readiness, and account snapshots, then submits the exact deterministic `PairIntent v2` entry or episode-bound exit to the coordinator.
 
 Neither service accepts strategy code, calldata, market, leverage, threshold, or route inputs. Both services reject unknown JSON fields. The runner has no venue credential, wallet key, KMS permission, withdrawal path, or transfer path.
 
@@ -32,7 +32,9 @@ Coordinator persistence is idempotent over the canonical full PairIntent SHA-256
 
 If the create response is ambiguous, the runner does not resend. It makes one separately authenticated `/v1/intent-status` request containing the intent ID and canonical payload digest. Only `persisted` with the same digest and a valid persisted saga becomes success; the saga may already have advanced beyond `prechecked` while the response was lost. `absent`, `conflict`, `unverifiable`, another ambiguous response, or any identity mismatch remains a failure. The status read waits behind any in-flight admission for that intent ID. The status record lives in the coordinator database and is therefore shared across runner replicas; the runner does not rely on local output state.
 
-Unwind dispatch is intentionally unavailable. Coordinator `/v1/exits` requires a `quote_source_session` and `quote_source_event_id` that identify an already persisted `/v1/market-quotes` record bound to the intent, spot amount, expected output, and deadlines. The signed quote bundle currently has source labels but no durable coordinator session/event identity or proof that such a record was accepted. The runner validates the episode-bound unwind directive and then fails closed without calling `/v1/exits`. Adding invented session or event values would bypass the coordinator's market-authority contract.
+Before signing an exit quote, the quote authority persists the exact account, intent, market index, manifest, route, quantities, executable output, block, and deadlines through authenticated `/v1/market-quotes`. The coordinator returns a digest over that canonical publication. Its durable source session, source event, sequence, digest, and deadlines are part of the signed quote bundle; the authority never invents them.
+
+The runner submits the episode-bound exit once through authenticated `/v1/exits`. A natural strategy exit is `strategy_exit`; `reducing` and `closing` lifecycles produce `operator_exit`. If the response is ambiguous, the runner does not resend. It queries `/v1/exit-status` with the deterministic request ID and canonical payload digest and succeeds only on an exact persisted match. Exact retries are idempotent. Any source-identity or payload collision halts the affected account and global execution and records a critical incident.
 
 ## Fixed policy
 
@@ -41,7 +43,8 @@ The protocol pins:
 - strategy `basis-aapl-v1`;
 - manifest `4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a`;
 - Robinhood Chain `4663`, AAPL/USDG, and the checked-in router;
-- Lighter mainnet AAPL;
+- a reviewed Lighter mainnet AAPL market index supplied explicitly to both services;
+- a Lighter trading API key index from `4` through `254`; indices `0` through `3` are reserved;
 - long spot / short perp entry and reduce-only inverse unwind;
 - $25 per leg, $50 gross, 1x maximum exposure, one active episode, and $50 daily turnover;
 - fresh authenticated state and executable quotes no older than five seconds; and
@@ -71,6 +74,10 @@ Quote authority:
 - `ROBIN_QUOTE_AUTHORITY_CALLER`
 - `ROBIN_QUOTE_AUTHORITY_HMAC_KEY`
 - `ROBIN_QUOTE_AUTHORITY_ED25519_PRIVATE_KEY`
+- `ROBIN_LIGHTER_AAPL_MARKET_INDEX`
+- `ROBIN_COORDINATOR_URL`
+- `ROBIN_COORDINATOR_MARKET_CALLER`
+- `ROBIN_COORDINATOR_MARKET_HMAC_KEY`
 
 Strategy runner:
 
@@ -82,8 +89,13 @@ Strategy runner:
 - `ROBIN_COORDINATOR_URL`
 - `ROBIN_COORDINATOR_INTENT_CALLER`
 - `ROBIN_COORDINATOR_INTENT_HMAC_KEY`
+- `ROBIN_COORDINATOR_EXIT_CALLER`
+- `ROBIN_COORDINATOR_EXIT_HMAC_KEY`
+- `ROBIN_LIGHTER_AAPL_MARKET_INDEX`
 
-Runner ingress and quote-authority keys are base64. The coordinator intent HMAC key is exactly 32 bytes encoded as lowercase hex, matching coordinator authentication. The runner ingress and coordinator callers and HMAC keys must be distinct. Coordinator HTTP is accepted only for loopback, private IPs, or `.internal` hosts; other endpoints require HTTPS. Keys belong in the deployment secret store, never in repository files or examples.
+There is no default Lighter market index. Enabled services fail closed until the exact reviewed index is configured, and both reject a signed quote whose index differs even when the account snapshot repeats the same unreviewed value.
+
+Runner ingress and quote-authority keys are base64. Coordinator HMAC keys are exactly 32 bytes encoded as lowercase hex, matching coordinator authentication. Ingress, intent, exit, and market-publication callers and HMAC keys must be distinct within each service. Coordinator HTTP is accepted only for loopback, private IPs, or `.internal` hosts; other endpoints require HTTPS. Keys belong in the deployment secret store, never in repository files or examples.
 
 ## Validation
 

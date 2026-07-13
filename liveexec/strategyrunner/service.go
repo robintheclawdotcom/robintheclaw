@@ -29,27 +29,29 @@ var (
 	unwindDirectiveDomain = []byte("robin.live.unwind-directive.v1\x00")
 )
 
-var ErrUnwindProtocolGap = errors.New("coordinator exit authority is unavailable")
-
 type Service struct {
-	quotePublicKey ed25519.PublicKey
-	dispatcher     IntentDispatcher
-	now            func() time.Time
+	quotePublicKey     ed25519.PublicKey
+	dispatcher         IntentDispatcher
+	lighterMarketIndex uint32
+	now                func() time.Time
 }
 
-func NewService(quotePublicKey ed25519.PublicKey, dispatcher IntentDispatcher) (*Service, error) {
-	if len(quotePublicKey) != ed25519.PublicKeySize || dispatcher == nil {
-		return nil, errors.New("trusted quote public key and coordinator dispatcher are required")
+func NewService(quotePublicKey ed25519.PublicKey, dispatcher IntentDispatcher, lighterMarketIndex uint32) (*Service, error) {
+	if len(quotePublicKey) != ed25519.PublicKeySize || dispatcher == nil || lighterMarketIndex > 32767 {
+		return nil, errors.New("trusted quote public key, reviewed market index, and coordinator dispatcher are required")
 	}
-	return &Service{quotePublicKey: append(ed25519.PublicKey(nil), quotePublicKey...), dispatcher: dispatcher, now: time.Now}, nil
+	return &Service{
+		quotePublicKey: append(ed25519.PublicKey(nil), quotePublicKey...), dispatcher: dispatcher,
+		lighterMarketIndex: lighterMarketIndex, now: time.Now,
+	}, nil
 }
 
 func (s *Service) Run(ctx context.Context, input RunRequest) (RunOutput, error) {
 	nowMS := uint64(s.now().UnixMilli())
-	if err := input.Quotes.Verify(s.quotePublicKey, nowMS); err != nil {
+	if err := input.Quotes.Verify(s.quotePublicKey, s.lighterMarketIndex, nowMS); err != nil {
 		return RunOutput{}, err
 	}
-	if err := validateEvidence(input, nowMS); err != nil {
+	if err := validateEvidence(input, s.lighterMarketIndex, nowMS); err != nil {
 		return RunOutput{}, err
 	}
 	switch input.Evaluation.Action {
@@ -68,16 +70,44 @@ func (s *Service) Run(ctx context.Context, input RunRequest) (RunOutput, error) 
 		}
 		return RunOutput{Kind: protocol.ActionEntry, PairIntent: &intent, Persistence: &persistence}, nil
 	case protocol.ActionUnwind:
-		if _, err := buildUnwind(input); err != nil {
+		directive, err := buildUnwind(input)
+		if err != nil {
 			return RunOutput{}, err
 		}
-		return RunOutput{}, ErrUnwindProtocolGap
+		reason, err := exitReason(input.Readiness.Lifecycle)
+		if err != nil {
+			return RunOutput{}, err
+		}
+		exit := ExitSubmission{
+			RequestID:                  directive.ID,
+			ExecutionAccountID:         directive.ExecutionAccountID,
+			IntentID:                   directive.PairIntentID,
+			QuoteSourceSession:         directive.QuoteSourceSession,
+			QuoteSourceEventID:         directive.QuoteSourceEventID,
+			QuotePayloadSHA256:         directive.QuotePayloadSHA256,
+			PerpUnwindPrice:            directive.PerpLimitPrice,
+			MinimumUnwindSettlementOut: directive.MinimumSettlementAmountOut,
+			RequestedAtMS:              input.Quotes.ExitAuthority.ReceivedAtMS,
+			SubmissionDeadlineMS:       directive.DeadlineMS,
+			ReconciliationDeadlineMS:   directive.ReconciliationDeadlineMS,
+			Reason:                     reason,
+		}
+		persistence, err := s.dispatcher.SubmitExit(ctx, exit)
+		if err != nil {
+			return RunOutput{}, err
+		}
+		if persistence.Status != "persisted" || persistence.RequestID != directive.ID ||
+			persistence.IntentID != directive.PairIntentID || !exitSagaState(persistence.CoordinatorState) ||
+			persistence.CoordinatorVersion == 0 {
+			return RunOutput{}, fmt.Errorf("%w: invalid exit persistence receipt", ErrCoordinatorAmbiguous)
+		}
+		return RunOutput{Kind: protocol.ActionUnwind, Unwind: &directive, ExitPersistence: &persistence}, nil
 	default:
 		return RunOutput{}, errors.New("unsupported strategy action")
 	}
 }
 
-func validateEvidence(input RunRequest, nowMS uint64) error {
+func validateEvidence(input RunRequest, lighterMarketIndex uint32, nowMS uint64) error {
 	evaluation := input.Evaluation
 	readiness := input.Readiness
 	state := input.AccountState
@@ -91,6 +121,7 @@ func validateEvidence(input RunRequest, nowMS uint64) error {
 		return errors.New("strategy evidence is stale")
 	}
 	if quotes.SourceEvaluationID != evaluation.ID || quotes.Action != evaluation.Action ||
+		quotes.MarketManifest != evaluation.MarketManifest ||
 		quotes.ExecutionAccountID != readiness.ExecutionAccountID || quotes.ExecutionAccountID != state.ExecutionAccountID ||
 		readiness.ExecutionAccountID != state.ExecutionAccountID || readiness.AgentID != state.AgentID ||
 		readiness.StrategyVersion != protocol.StrategyVersion || readiness.StrategyManifestSHA256 != protocol.StrategyManifestSHA256 ||
@@ -99,8 +130,8 @@ func validateEvidence(input RunRequest, nowMS uint64) error {
 	}
 	if !validExecutionID(state.ExecutionAccountID) || !validExecutionID(state.AgentID) ||
 		!validAddress(state.RobinhoodVault) || !validAddress(state.RobinhoodSigner) || state.RobinhoodVault == state.RobinhoodSigner ||
-		state.LighterAccountIndex == 0 || state.LighterAPIKeyIndex < 2 || state.LighterAPIKeyIndex > 254 ||
-		state.LighterMarketIndex != quotes.Perp.MarketIndex || state.SpotConfigVersion == 0 ||
+		state.LighterAccountIndex == 0 || state.LighterAPIKeyIndex < 4 || state.LighterAPIKeyIndex > 254 ||
+		state.LighterMarketIndex != lighterMarketIndex || quotes.Perp.MarketIndex != lighterMarketIndex || state.SpotConfigVersion == 0 ||
 		state.NextClientOrderIndex > maximumClientOrderIndex || state.NextUnwindOrderIndex > maximumClientOrderIndex ||
 		state.NextClientOrderIndex == state.NextUnwindOrderIndex {
 		return errors.New("execution account binding is invalid")
@@ -226,9 +257,11 @@ func buildUnwind(input RunRequest) (UnwindDirective, error) {
 	}
 	episode := input.OpenEpisode
 	quotes := input.Quotes
+	authority := quotes.ExitAuthority
 	quoteMinimum, quoteMinimumOK := positiveDecimal(quotes.Spot.MinimumAmountOut)
 	episodeMinimum, episodeMinimumOK := positiveDecimal(episode.MinimumSettlementAmountOut)
-	if !validHash(episode.PairIntentID) || domainHash(spotUnwindDomain, []byte(episode.PairIntentID)) != episode.SpotUnwindIntentID ||
+	if authority == nil || authority.IntentID != episode.PairIntentID ||
+		!validHash(episode.PairIntentID) || domainHash(spotUnwindDomain, []byte(episode.PairIntentID)) != episode.SpotUnwindIntentID ||
 		episode.SpotAmount != quotes.Spot.StockAmount || episode.PerpBaseAmount != quotes.Perp.BaseAmount ||
 		!quoteMinimumOK || !episodeMinimumOK || quoteMinimum.Cmp(episodeMinimum) < 0 ||
 		quotes.Spot.Side != "sell" || quotes.Perp.Side != "long" || !quotes.Perp.ReduceOnly {
@@ -251,8 +284,12 @@ func buildUnwind(input RunRequest) (UnwindDirective, error) {
 		PerpBaseAmount:             quotes.Perp.BaseAmount,
 		PerpLimitPrice:             quotes.Perp.LimitPrice,
 		ReduceOnly:                 true,
+		QuoteSourceSession:         authority.SourceSession,
+		QuoteSourceEventID:         authority.SourceEventID,
+		QuotePayloadSHA256:         authority.PayloadSHA256,
 		ObservedAtMS:               quotes.ObservedAtMS,
-		DeadlineMS:                 quotes.ExpiresAtMS,
+		DeadlineMS:                 authority.SubmissionDeadlineMS,
+		ReconciliationDeadlineMS:   authority.ReconciliationDeadlineMS,
 	}
 	encoded, err := json.Marshal(directive)
 	if err != nil {
@@ -260,6 +297,17 @@ func buildUnwind(input RunRequest) (UnwindDirective, error) {
 	}
 	directive.ID = domainHash(unwindDirectiveDomain, encoded)
 	return directive, nil
+}
+
+func exitReason(lifecycle string) (string, error) {
+	switch lifecycle {
+	case "running":
+		return "strategy_exit", nil
+	case "reducing", "closing":
+		return "operator_exit", nil
+	default:
+		return "", errors.New("exit lifecycle has no coordinator reason")
+	}
 }
 
 func (intent *PairIntent) deriveIDs() error {

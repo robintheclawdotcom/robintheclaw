@@ -16,14 +16,14 @@ import (
 
 func TestServerAuthenticatesRequestsAndRejectsReplay(t *testing.T) {
 	_, privateKey, _ := ed25519.GenerateKey(nil)
-	service, _ := NewService(&fakeAdapter{result: adapterResult(protocol.ActionEntry)}, privateKey)
+	service, _ := NewService(&fakeAdapter{result: adapterResult(protocol.ActionEntry)}, &fakePublisher{}, privateKey, 101)
 	service.now = func() time.Time { return time.UnixMilli(100_000) }
 	key := []byte("01234567890123456789012345678901")
 	auth, _ := protocol.NewAuthenticator(key, "strategy-runner")
 	server := NewServer(service, auth, true).Handler()
 	body, _ := json.Marshal(protocol.QuoteRequest{
 		RequestID: testHash("request"), ExecutionAccountID: "account-canary-1",
-		SourceEvaluationID: testHash("evaluation"), Action: protocol.ActionEntry, RequestedAtMS: 99_500,
+		SourceEvaluationID: testHash("evaluation"), MarketManifest: testHash("market"), Action: protocol.ActionEntry, RequestedAtMS: 99_500,
 	})
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	signature := hex.EncodeToString(protocol.RequestMAC(key, http.MethodPost, "/v1/executable-quotes", "strategy-runner", timestamp, "nonce-1", body))

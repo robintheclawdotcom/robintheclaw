@@ -23,11 +23,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	coordinator, err := strategyrunner.NewCoordinatorClient(config.CoordinatorURL, config.CoordinatorCaller, config.CoordinatorKey)
+	coordinator, err := strategyrunner.NewCoordinatorClientWithExit(
+		config.CoordinatorURL,
+		config.CoordinatorCaller,
+		config.CoordinatorKey,
+		config.CoordinatorExitCaller,
+		config.CoordinatorExitKey,
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
-	service, err := strategyrunner.NewService(config.QuotePublicKey, coordinator)
+	service, err := strategyrunner.NewService(config.QuotePublicKey, coordinator, config.LighterMarketIndex)
 	if err != nil {
 		log.Fatal(err)
 	}

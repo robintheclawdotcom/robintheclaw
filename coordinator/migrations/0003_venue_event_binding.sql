@@ -34,7 +34,7 @@ CREATE INDEX execution_venue_event_routes_action
 CREATE TABLE execution_lighter_nonce_reservations (
     action_id TEXT PRIMARY KEY REFERENCES execution_actions(id),
     account_index BIGINT NOT NULL CHECK (account_index > 0),
-    api_key_index SMALLINT NOT NULL CHECK (api_key_index BETWEEN 2 AND 254),
+    api_key_index SMALLINT NOT NULL CHECK (api_key_index BETWEEN 4 AND 254),
     nonce BIGINT NOT NULL CHECK (nonce >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (account_index, api_key_index, nonce)

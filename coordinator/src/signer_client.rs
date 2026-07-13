@@ -157,7 +157,7 @@ impl SignerClients {
             .await?;
         if signed.execution_account_id != request.execution_account_id
             || signed.account_index <= 0
-            || !(2..=254).contains(&signed.api_key_index)
+            || !(4..=254).contains(&signed.api_key_index)
             || signed.intent_id != request.intent_id
             || !valid_hash(&signed.tx_hash)
             || !signed.tx_info.is_object()
@@ -218,6 +218,9 @@ impl SignerClients {
         account_index: i64,
         api_key_index: u8,
     ) -> Result<i64, SignerClientError> {
+        if account_index <= 0 || !(4..=254).contains(&api_key_index) {
+            return Err(SignerClientError::LighterNonceQuery);
+        }
         let response = self
             .client
             .get(format!("{}/api/v1/nextNonce", self.lighter_api_url))
@@ -461,7 +464,7 @@ mod tests {
                         Json(serde_json::json!({
                             "executionAccountId": "account-canary-1",
                             "accountIndex": 7,
-                            "apiKeyIndex": 2,
+                            "apiKeyIndex": 4,
                             "intentId": "intent-1",
                             "txType": 14,
                             "txHash": HASH,
@@ -510,7 +513,7 @@ mod tests {
             .broadcast_lighter(&SignedLighterTransaction {
                 execution_account_id: "account-canary-1".into(),
                 account_index: 7,
-                api_key_index: 2,
+                api_key_index: 4,
                 intent_id: "intent-1".into(),
                 tx_type: 14,
                 tx_hash: HASH.into(),
@@ -537,7 +540,7 @@ mod tests {
             .broadcast_lighter(&SignedLighterTransaction {
                 execution_account_id: "account-canary-1".into(),
                 account_index: 7,
-                api_key_index: 2,
+                api_key_index: 4,
                 intent_id: "intent-1".into(),
                 tx_type: 14,
                 tx_hash: HASH.into(),
@@ -564,7 +567,7 @@ mod tests {
             .broadcast_lighter(&SignedLighterTransaction {
                 execution_account_id: "account-canary-1".into(),
                 account_index: 7,
-                api_key_index: 2,
+                api_key_index: 4,
                 intent_id: "intent-1".into(),
                 tx_type: 14,
                 tx_hash: HASH.into(),
@@ -591,10 +594,14 @@ mod tests {
             .with_state(captured.clone());
         let base_url = serve(app).await;
         let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
-        assert_eq!(clients.fetch_lighter_nonce(7, 3).await, Ok(42));
+        assert_eq!(clients.fetch_lighter_nonce(7, 4).await, Ok(42));
         let query = captured.lock().unwrap().take().unwrap();
         assert!(query.contains("account_index=7"));
-        assert!(query.contains("api_key_index=3"));
+        assert!(query.contains("api_key_index=4"));
+        assert_eq!(
+            clients.fetch_lighter_nonce(7, 3).await,
+            Err(SignerClientError::LighterNonceQuery)
+        );
     }
 
     #[tokio::test]

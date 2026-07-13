@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 
 type fakeDispatcher struct {
 	intents []PairIntent
+	exits   []ExitSubmission
 	err     error
 }
 
@@ -28,6 +30,17 @@ func (f *fakeDispatcher) SubmitIntent(_ context.Context, intent PairIntent) (Int
 		return IntentPersistence{}, f.err
 	}
 	return IntentPersistence{Status: "persisted", IntentID: intent.ID, CoordinatorState: "prechecked", CoordinatorVersion: 1}, nil
+}
+
+func (f *fakeDispatcher) SubmitExit(_ context.Context, exit ExitSubmission) (ExitPersistence, error) {
+	f.exits = append(f.exits, exit)
+	if f.err != nil {
+		return ExitPersistence{}, f.err
+	}
+	return ExitPersistence{
+		Status: "persisted", RequestID: exit.RequestID, IntentID: exit.IntentID,
+		CoordinatorState: "unwinding", CoordinatorVersion: 7,
+	}, nil
 }
 
 func TestRunnerEmitsDeterministicCanonicalPairIntent(t *testing.T) {
@@ -91,13 +104,7 @@ func TestRunnerNeverReportsUnpersistedIntent(t *testing.T) {
 func TestRunnerEmitsEpisodeBoundReduceOnlyUnwind(t *testing.T) {
 	service, input := validInput(t, protocol.ActionUnwind)
 	pairID := testHash("open-pair")
-	input.OpenEpisode = &OpenEpisode{
-		PairIntentID:               pairID,
-		SpotUnwindIntentID:         domainHash(spotUnwindDomain, []byte(pairID)),
-		SpotAmount:                 input.Quotes.Spot.StockAmount,
-		MinimumSettlementAmountOut: "24000000",
-		PerpBaseAmount:             input.Quotes.Perp.BaseAmount,
-	}
+	input.OpenEpisode = openEpisode(input)
 	directive, err := buildUnwind(input)
 	if err != nil {
 		t.Fatal(err)
@@ -108,12 +115,55 @@ func TestRunnerEmitsEpisodeBoundReduceOnlyUnwind(t *testing.T) {
 		t.Fatal("unwind directive is not bound to the open episode")
 	}
 
-	if _, err := service.Run(context.Background(), input); !errors.Is(err, ErrUnwindProtocolGap) {
-		t.Fatalf("unwind dispatch did not fail closed: %v", err)
+	output, err := service.Run(context.Background(), input)
+	if err != nil || output.Unwind == nil || output.ExitPersistence == nil || len(service.dispatcher.(*fakeDispatcher).exits) != 1 {
+		t.Fatalf("unwind was not durably dispatched: output=%+v err=%v", output, err)
 	}
 	input.OpenEpisode.PerpBaseAmount++
 	if _, err := buildUnwind(input); err == nil {
 		t.Fatal("cross-episode quantity substitution accepted")
+	}
+}
+
+func TestRunnerDispatchesNaturalPauseAndCloseExits(t *testing.T) {
+	tests := []struct {
+		lifecycle string
+		reason    string
+	}{
+		{lifecycle: "running", reason: "strategy_exit"},
+		{lifecycle: "reducing", reason: "operator_exit"},
+		{lifecycle: "closing", reason: "operator_exit"},
+	}
+	for _, test := range tests {
+		t.Run(test.lifecycle, func(t *testing.T) {
+			service, input := validInput(t, protocol.ActionUnwind)
+			input.Readiness.Lifecycle = test.lifecycle
+			input.OpenEpisode = openEpisode(input)
+			if _, err := service.Run(context.Background(), input); err != nil {
+				t.Fatal(err)
+			}
+			exits := service.dispatcher.(*fakeDispatcher).exits
+			if len(exits) != 1 || exits[0].Reason != test.reason {
+				t.Fatalf("wrong exit dispatch for %s: %+v", test.lifecycle, exits)
+			}
+		})
+	}
+}
+
+func TestRunnerDispatchesBoundedRepairQuantity(t *testing.T) {
+	service, input := validInput(t, protocol.ActionUnwind)
+	input.Quotes.Perp.BaseAmount = 250_000
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+	if err := input.Quotes.Sign(privateKey); err != nil {
+		t.Fatal(err)
+	}
+	input.OpenEpisode = openEpisode(input)
+	output, err := service.Run(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Unwind == nil || output.Unwind.PerpBaseAmount != 250_000 {
+		t.Fatalf("bounded repair quantity was not preserved: %+v", output.Unwind)
 	}
 }
 
@@ -123,6 +173,7 @@ func TestRunnerFailsClosedOnReadinessAndIdentityFailures(t *testing.T) {
 		"manifest mismatch":       func(input *RunRequest) { input.AccountState.StrategyManifestSHA256 = testHash("other")[2:] },
 		"stale readiness":         func(input *RunRequest) { input.Readiness.ObservedAtMS = 94_999 },
 		"unknown order":           func(input *RunRequest) { input.AccountState.UnknownLighterOrders = true },
+		"reserved api key":        func(input *RunRequest) { input.AccountState.LighterAPIKeyIndex = 3 },
 		"nonce drift":             func(input *RunRequest) { input.AccountState.LighterNonceAligned = false },
 		"oracle down":             func(input *RunRequest) { input.Readiness.OracleHealthy = false },
 		"sequencer down":          func(input *RunRequest) { input.Readiness.SequencerHealthy = false },
@@ -156,6 +207,19 @@ func TestRunnerRejectsStaleOrTamperedQuotes(t *testing.T) {
 	}
 }
 
+func TestRunnerRejectsAccountAndQuoteAgreementOnUnreviewedMarket(t *testing.T) {
+	service, input := validInput(t, protocol.ActionEntry)
+	input.Quotes.Perp.MarketIndex = 102
+	input.AccountState.LighterMarketIndex = 102
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+	if err := input.Quotes.Sign(privateKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Run(context.Background(), input); err == nil {
+		t.Fatal("account and quote agreement bypassed the reviewed market pin")
+	}
+}
+
 func TestRunRequestRejectsStrategyParameters(t *testing.T) {
 	_, input := validInput(t, protocol.ActionEntry)
 	encoded, err := json.Marshal(input)
@@ -174,16 +238,17 @@ func TestRunRequestRejectsStrategyParameters(t *testing.T) {
 func validInput(t *testing.T, action protocol.Action) (*Service, RunRequest) {
 	t.Helper()
 	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
-	service, err := NewService(privateKey.Public().(ed25519.PublicKey), &fakeDispatcher{})
+	service, err := NewService(privateKey.Public().(ed25519.PublicKey), &fakeDispatcher{}, 101)
 	if err != nil {
 		t.Fatal(err)
 	}
 	service.now = func() time.Time { return time.UnixMilli(100_000) }
 	quote := protocol.QuoteBundle{
-		SchemaVersion:          1,
+		SchemaVersion:          protocol.QuoteSchemaVersion,
 		RequestID:              testHash("request"),
 		ExecutionAccountID:     "account-canary-1",
 		SourceEvaluationID:     testHash("evaluation"),
+		MarketManifest:         testHash("market"),
 		StrategyVersion:        protocol.StrategyVersion,
 		StrategyManifestSHA256: protocol.StrategyManifestSHA256,
 		SourceConfigSHA256:     protocol.SourceConfigSHA256,
@@ -213,7 +278,7 @@ func validInput(t *testing.T, action protocol.Action) (*Service, RunRequest) {
 	}
 	state := AccountState{
 		ExecutionAccountID: "account-canary-1", AgentID: "agent-canary-1", StrategyManifestSHA256: protocol.StrategyManifestSHA256,
-		LighterAccountIndex: 7, LighterAPIKeyIndex: 2, LighterMarketIndex: 101, LighterNonceAligned: true,
+		LighterAccountIndex: 7, LighterAPIKeyIndex: 4, LighterMarketIndex: 101, LighterNonceAligned: true,
 		CollateralMicros: 20_000_000, MaintenanceMarginMicros: 10_000_000,
 		RobinhoodVault: "0x0000000000000000000000000000000000000002", RobinhoodSigner: "0x0000000000000000000000000000000000000003",
 		RobinhoodNonceAligned: true, NAVMicros: 100_000_000, Flat: true, SpotDecimals: 6, SpotConfigVersion: 1,
@@ -234,6 +299,13 @@ func validInput(t *testing.T, action protocol.Action) (*Service, RunRequest) {
 		readiness.AccountControl = "reduce_only"
 		state.Flat = false
 		state.ActiveEpisodes = 1
+		quote.ExitAuthority = &protocol.ExitQuoteAuthority{
+			Source: "execution-authority", SourceSession: "authority-session-1", SourceEventID: "authority-event-1",
+			SourceSequence: 1, ExecutionAccountID: quote.ExecutionAccountID, IntentID: testHash("open-pair"),
+			MarketManifest: quote.MarketManifest, PayloadSHA256: strings.Repeat("a", 64), ReceivedAtMS: 99_500,
+			SubmissionDeadlineMS:     quote.ExpiresAtMS,
+			ReconciliationDeadlineMS: quote.ExpiresAtMS + protocol.MaximumExitReconciliationMS,
+		}
 	}
 	if err := quote.Sign(privateKey); err != nil {
 		t.Fatal(err)
@@ -245,6 +317,17 @@ func validInput(t *testing.T, action protocol.Action) (*Service, RunRequest) {
 			Status: "approved", Action: action, ObservedAtMS: 99_000, EstimatedCostMicros: 10_000,
 		},
 		Readiness: readiness, AccountState: state, Quotes: quote,
+	}
+}
+
+func openEpisode(input RunRequest) *OpenEpisode {
+	pairID := testHash("open-pair")
+	return &OpenEpisode{
+		PairIntentID:               pairID,
+		SpotUnwindIntentID:         domainHash(spotUnwindDomain, []byte(pairID)),
+		SpotAmount:                 input.Quotes.Spot.StockAmount,
+		MinimumSettlementAmountOut: "24000000",
+		PerpBaseAmount:             input.Quotes.Perp.BaseAmount,
 	}
 }
 

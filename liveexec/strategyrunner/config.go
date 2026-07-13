@@ -12,14 +12,17 @@ import (
 )
 
 type Config struct {
-	Enabled           bool
-	ListenAddress     string
-	Caller            string
-	AuthKey           []byte
-	QuotePublicKey    ed25519.PublicKey
-	CoordinatorURL    string
-	CoordinatorCaller string
-	CoordinatorKey    []byte
+	Enabled               bool
+	ListenAddress         string
+	Caller                string
+	AuthKey               []byte
+	QuotePublicKey        ed25519.PublicKey
+	CoordinatorURL        string
+	CoordinatorCaller     string
+	CoordinatorKey        []byte
+	CoordinatorExitCaller string
+	CoordinatorExitKey    []byte
+	LighterMarketIndex    uint32
 }
 
 func LoadConfig() (Config, error) {
@@ -31,14 +34,16 @@ func LoadConfig() (Config, error) {
 	coordinatorURL := os.Getenv("ROBIN_COORDINATOR_URL")
 	coordinatorCaller := os.Getenv("ROBIN_COORDINATOR_INTENT_CALLER")
 	coordinatorKey := os.Getenv("ROBIN_COORDINATOR_INTENT_HMAC_KEY")
+	coordinatorExitCaller := os.Getenv("ROBIN_COORDINATOR_EXIT_CALLER")
+	coordinatorExitKey := os.Getenv("ROBIN_COORDINATOR_EXIT_HMAC_KEY")
 	configuredCoordinatorValues := 0
-	for _, value := range []string{coordinatorURL, coordinatorCaller, coordinatorKey} {
+	for _, value := range []string{coordinatorURL, coordinatorCaller, coordinatorKey, coordinatorExitCaller, coordinatorExitKey} {
 		if value != "" {
 			configuredCoordinatorValues++
 		}
 	}
-	if configuredCoordinatorValues != 0 && configuredCoordinatorValues != 3 {
-		return Config{}, errors.New("coordinator URL, caller, and HMAC key must be configured together")
+	if configuredCoordinatorValues != 0 && configuredCoordinatorValues != 5 {
+		return Config{}, errors.New("coordinator URL, intent auth, and exit auth must be configured together")
 	}
 	if !enabled {
 		return config, nil
@@ -55,7 +60,7 @@ func LoadConfig() (Config, error) {
 	if config.Caller == "" {
 		return Config{}, errors.New("ROBIN_STRATEGY_RUNNER_CALLER is required")
 	}
-	if configuredCoordinatorValues != 3 {
+	if configuredCoordinatorValues != 5 {
 		return Config{}, errors.New("coordinator persistence configuration is required")
 	}
 	config.CoordinatorURL = coordinatorURL
@@ -64,15 +69,29 @@ func LoadConfig() (Config, error) {
 	if err != nil || len(config.CoordinatorKey) != 32 || coordinatorKey != strings.ToLower(coordinatorKey) {
 		return Config{}, errors.New("ROBIN_COORDINATOR_INTENT_HMAC_KEY must be a 32-byte hex value")
 	}
+	config.CoordinatorExitCaller = coordinatorExitCaller
+	config.CoordinatorExitKey, err = hex.DecodeString(coordinatorExitKey)
+	if err != nil || len(config.CoordinatorExitKey) != 32 || coordinatorExitKey != strings.ToLower(coordinatorExitKey) {
+		return Config{}, errors.New("ROBIN_COORDINATOR_EXIT_HMAC_KEY must be a 32-byte hex value")
+	}
 	if _, err := coordinatorEndpoint(config.CoordinatorURL); err != nil {
 		return Config{}, err
 	}
-	if !validCaller(config.Caller) || !validCaller(config.CoordinatorCaller) || config.Caller == config.CoordinatorCaller {
+	if !validCaller(config.Caller) || !validCaller(config.CoordinatorCaller) || !validCaller(config.CoordinatorExitCaller) ||
+		config.Caller == config.CoordinatorCaller || config.Caller == config.CoordinatorExitCaller ||
+		config.CoordinatorCaller == config.CoordinatorExitCaller {
 		return Config{}, errors.New("runner and coordinator callers must be distinct lowercase service identifiers")
 	}
-	if hmac.Equal(config.AuthKey, config.CoordinatorKey) {
+	if hmac.Equal(config.AuthKey, config.CoordinatorKey) || hmac.Equal(config.AuthKey, config.CoordinatorExitKey) ||
+		hmac.Equal(config.CoordinatorKey, config.CoordinatorExitKey) {
 		return Config{}, errors.New("runner and coordinator HMAC keys must be distinct")
 	}
+	marketIndex := os.Getenv("ROBIN_LIGHTER_AAPL_MARKET_INDEX")
+	parsedMarketIndex, parseErr := strconv.ParseUint(marketIndex, 10, 15)
+	if marketIndex == "" || parseErr != nil {
+		return Config{}, errors.New("ROBIN_LIGHTER_AAPL_MARKET_INDEX must be an explicitly reviewed index between 0 and 32767")
+	}
+	config.LighterMarketIndex = uint32(parsedMarketIndex)
 	config.QuotePublicKey = ed25519.PublicKey(key)
 	return config, nil
 }
