@@ -44,12 +44,46 @@ type SpotIntent struct {
 	ConfigVersion uint64
 }
 
+type SubmissionStatus string
+
+const (
+	SubmissionSigned        SubmissionStatus = "signed"
+	SubmissionSubmitted     SubmissionStatus = "submitted"
+	SubmissionSoftConfirmed SubmissionStatus = "soft_confirmed"
+	SubmissionL1Posted      SubmissionStatus = "l1_posted"
+	SubmissionEthereumFinal SubmissionStatus = "ethereum_final"
+	SubmissionReverted      SubmissionStatus = "reverted"
+	SubmissionAmbiguous     SubmissionStatus = "ambiguous"
+	SubmissionReplaced      SubmissionStatus = "replaced"
+	SubmissionSuperseded    SubmissionStatus = "superseded"
+	SubmissionQuarantined   SubmissionStatus = "quarantined"
+)
+
 type Submission struct {
-	RequestID string `json:"request_id"`
-	IntentID  string `json:"intent_id"`
-	TxHash    string `json:"tx_hash"`
-	Nonce     uint64 `json:"nonce"`
-	Status    string `json:"status"`
+	RequestID string           `json:"request_id"`
+	IntentID  string           `json:"intent_id"`
+	TxHash    string           `json:"tx_hash"`
+	Nonce     uint64           `json:"nonce"`
+	Status    SubmissionStatus `json:"status"`
+}
+
+var errWriterNotReady = errors.New("writer is not ready")
+
+type journaledSubmissionError struct {
+	submission Submission
+	cause      error
+}
+
+func (failure *journaledSubmissionError) Error() string {
+	return fmt.Sprintf("journaled submission requires reconciliation: %v", failure.cause)
+}
+
+func (failure *journaledSubmissionError) Unwrap() error {
+	return failure.cause
+}
+
+func (failure *journaledSubmissionError) Submission() Submission {
+	return failure.submission
 }
 
 func (request ExecuteRequest) validate() (SpotIntent, []byte, string, error) {

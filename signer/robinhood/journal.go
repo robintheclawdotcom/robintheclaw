@@ -222,6 +222,7 @@ func (reservation *journalNonceReservation) Rollback(ctx context.Context) {
 func (journal *Journal) Existing(ctx context.Context, requestID, digest string) (*Submission, error) {
 	var submission Submission
 	var storedDigest string
+	var status string
 	err := journal.pool.QueryRow(ctx, `
 		SELECT request_id, intent_id, tx_hash, nonce, status, payload_sha256
 		FROM robinhood_signer_transactions
@@ -231,7 +232,7 @@ func (journal *Journal) Existing(ctx context.Context, requestID, digest string) 
 		&submission.IntentID,
 		&submission.TxHash,
 		&submission.Nonce,
-		&submission.Status,
+		&status,
 		&storedDigest,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -243,6 +244,7 @@ func (journal *Journal) Existing(ctx context.Context, requestID, digest string) 
 	if storedDigest != digest {
 		return nil, errors.New("request_id was reused with a different payload")
 	}
+	submission.Status = SubmissionStatus(status)
 	return &submission, nil
 }
 

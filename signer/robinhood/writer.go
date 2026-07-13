@@ -172,9 +172,6 @@ func (writer *Writer) Ready() bool {
 func (writer *Writer) Submit(ctx context.Context, request ExecuteRequest) (Submission, error) {
 	writer.submit.Lock()
 	defer writer.submit.Unlock()
-	if !writer.Ready() {
-		return Submission{}, errors.New("writer is not ready")
-	}
 	intent, payload, digest, err := request.validate()
 	if err != nil {
 		return Submission{}, err
@@ -183,6 +180,9 @@ func (writer *Writer) Submit(ctx context.Context, request ExecuteRequest) (Submi
 		return Submission{}, err
 	} else if existing != nil {
 		return *existing, nil
+	}
+	if !writer.Ready() {
+		return Submission{}, errWriterNotReady
 	}
 	evidence, err := writer.Verify(ctx)
 	if err != nil {
@@ -306,7 +306,7 @@ func (writer *Writer) Submit(ctx context.Context, request ExecuteRequest) (Submi
 		IntentID:  strings.ToLower(common.BytesToHash(intent.ID[:]).Hex()),
 		TxHash:    strings.ToLower(signed.Hash().Hex()),
 		Nonce:     nonce,
-		Status:    "signed",
+		Status:    SubmissionSigned,
 	}
 	record := signedRecord{
 		Submission:     submission,
@@ -328,19 +328,34 @@ func (writer *Writer) Submit(ctx context.Context, request ExecuteRequest) (Submi
 		return Submission{}, err
 	}
 	if err := writer.client.SendTransaction(ctx, signed); err != nil && !isKnownTransaction(err) {
-		if updateErr := writer.journal.SetAmbiguous(ctx, request.RequestID, boundedError(err)); updateErr != nil {
-			writer.ready.Store(false)
-			return Submission{}, errors.New("record ambiguous transaction")
+		submission.Status = SubmissionAmbiguous
+		updateContext, cancel := writer.journalUpdateContext(ctx)
+		updateErr := writer.journal.SetAmbiguous(updateContext, request.RequestID, boundedError(err))
+		cancel()
+		if updateErr != nil {
+			submission.Status = SubmissionSigned
+			err = errors.Join(err, errors.New("record ambiguous transaction"), updateErr)
 		}
 		writer.ready.Store(false)
-		return Submission{}, errors.New("transaction submission is ambiguous")
+		return submission, &journaledSubmissionError{submission: submission, cause: err}
 	}
-	if err := writer.journal.SetSubmitted(ctx, request.RequestID); err != nil {
+	updateContext, cancel := writer.journalUpdateContext(ctx)
+	err = writer.journal.SetSubmitted(updateContext, request.RequestID)
+	cancel()
+	if err != nil {
 		writer.ready.Store(false)
-		return Submission{}, err
+		return submission, &journaledSubmissionError{submission: submission, cause: err}
 	}
-	submission.Status = "submitted"
+	submission.Status = SubmissionSubmitted
 	return submission, nil
+}
+
+func (writer *Writer) journalUpdateContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := writer.config.RequestTimeout
+	if timeout <= 0 || timeout > 5*time.Second {
+		timeout = 5 * time.Second
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
 }
 
 func (writer *Writer) Reconcile(ctx context.Context) error {

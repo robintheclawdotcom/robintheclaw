@@ -14,7 +14,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -54,7 +53,7 @@ func (server *Server) ready(response http.ResponseWriter, _ *http.Request) {
 }
 
 func (server *Server) executeSpot(response http.ResponseWriter, request *http.Request) {
-	if !server.config.Enabled || server.writer == nil || !server.writer.Ready() {
+	if !server.config.Enabled || server.writer == nil {
 		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "signer unavailable"})
 		return
 	}
@@ -98,10 +97,21 @@ func (server *Server) executeSpot(response http.ResponseWriter, request *http.Re
 	}
 	submission, err := server.writer.Submit(ctx, payload)
 	if err != nil {
+		var tracked *journaledSubmissionError
+		if errors.As(err, &tracked) {
+			slog.Warn(
+				"spot intent requires reconciliation",
+				"request_id", payload.RequestID,
+				"status", tracked.Submission().Status,
+				"error", err,
+			)
+			writeJSON(response, http.StatusAccepted, tracked.Submission())
+			return
+		}
 		status := http.StatusConflict
 		if errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusGatewayTimeout
-		} else if strings.Contains(err.Error(), "not ready") {
+		} else if errors.Is(err, errWriterNotReady) {
 			status = http.StatusServiceUnavailable
 		}
 		slog.Warn("spot intent rejected", "request_id", payload.RequestID, "error", err)

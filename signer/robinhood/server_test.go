@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -77,6 +80,77 @@ func TestAuthorizationNonceCannotBeReplayed(t *testing.T) {
 	server.Handler().ServeHTTP(second, authenticatedRequest(config, body, nonce))
 	if second.Code != http.StatusUnauthorized {
 		t.Fatalf("replayed nonce was accepted: %d", second.Code)
+	}
+}
+
+func TestServerReturnsJournaledOutcomeAfterBroadcastTimeout(t *testing.T) {
+	fixture := newWriterFixture(t)
+	fixture.chain.sendError = context.DeadlineExceeded
+	fixture.config.APIHMACKey = []byte(strings.Repeat("a", 32))
+	fixture.config.CallerID = "execution-coordinator"
+	fixture.config.MaxRequestsPerMinute = 60
+	fixture.config.MaxConcurrentRequests = 4
+	fixture.config.RequestTimeout = time.Second
+	server := &Server{config: fixture.config, writer: fixture.writer}
+	body, err := json.Marshal(validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, authenticatedRequest(fixture.config, body, strings.Repeat("t", 32)))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("ambiguous submission returned %d: %s", response.Code, response.Body.String())
+	}
+	var submission Submission
+	if err := json.NewDecoder(response.Body).Decode(&submission); err != nil {
+		t.Fatal(err)
+	}
+	if submission.Status != "ambiguous" || submission.RequestID != validRequest().RequestID {
+		t.Fatalf("unexpected response: %#v", submission)
+	}
+
+	retryResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(
+		retryResponse,
+		authenticatedRequest(fixture.config, body, strings.Repeat("u", 32)),
+	)
+	if retryResponse.Code != http.StatusAccepted {
+		t.Fatalf("journaled retry returned %d: %s", retryResponse.Code, retryResponse.Body.String())
+	}
+	var retry Submission
+	if err := json.NewDecoder(retryResponse.Body).Decode(&retry); err != nil {
+		t.Fatal(err)
+	}
+	if retry != submission {
+		t.Fatalf("journaled retry changed the response: %#v", retry)
+	}
+	if len(fixture.chain.sent) != 1 {
+		t.Fatalf("journaled retry rebroadcast the transaction: %d", len(fixture.chain.sent))
+	}
+}
+
+func TestServerDistinguishesPreflightRejection(t *testing.T) {
+	fixture := newWriterFixture(t)
+	fixture.chain.simulationError = errors.New("execution reverted")
+	fixture.config.APIHMACKey = []byte(strings.Repeat("a", 32))
+	fixture.config.CallerID = "execution-coordinator"
+	fixture.config.MaxRequestsPerMinute = 60
+	fixture.config.MaxConcurrentRequests = 4
+	fixture.config.RequestTimeout = time.Second
+	server := &Server{config: fixture.config, writer: fixture.writer}
+	body, err := json.Marshal(validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, authenticatedRequest(fixture.config, body, strings.Repeat("p", 32)))
+	if response.Code != http.StatusConflict {
+		t.Fatalf("preflight rejection returned %d: %s", response.Code, response.Body.String())
+	}
+	if fixture.journal.reservation != nil || len(fixture.chain.sent) != 0 {
+		t.Fatal("preflight rejection crossed the journal boundary")
 	}
 }
 

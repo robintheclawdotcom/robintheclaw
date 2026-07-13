@@ -30,6 +30,7 @@ type fakeChain struct {
 	balance         *big.Int
 	receipts        map[common.Hash]*types.Receipt
 	sent            []*types.Transaction
+	sendHook        func()
 	sendError       error
 	finalityError   error
 	simulationError error
@@ -104,6 +105,9 @@ func (chain *fakeChain) BalanceAt(context.Context, common.Address, *big.Int) (*b
 
 func (chain *fakeChain) SendTransaction(_ context.Context, transaction *types.Transaction) error {
 	chain.sent = append(chain.sent, transaction)
+	if chain.sendHook != nil {
+		chain.sendHook()
+	}
 	return chain.sendError
 }
 
@@ -211,6 +215,146 @@ func TestSubmitPersistsBeforeBroadcast(t *testing.T) {
 	}
 	if len(fixture.chain.sent) != 1 || fixture.chain.sent[0].Hash() != common.HexToHash(submission.TxHash) {
 		t.Fatal("journaled transaction was not broadcast")
+	}
+}
+
+func TestSendTimeoutReturnsJournaledAmbiguity(t *testing.T) {
+	fixture := newWriterFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	fixture.chain.sendHook = cancel
+	fixture.chain.sendError = context.DeadlineExceeded
+
+	first, err := fixture.writer.Submit(ctx, validRequest())
+	var tracked *journaledSubmissionError
+	if !errors.As(err, &tracked) {
+		t.Fatalf("send timeout was not returned as a journaled outcome: %v", err)
+	}
+	if first.Status != "ambiguous" || tracked.Submission() != first {
+		t.Fatalf("unexpected ambiguous submission: %#v", first)
+	}
+	if fixture.journal.reservation == nil || !fixture.journal.reservation.committed {
+		t.Fatal("ambiguous transaction was not journaled before broadcast")
+	}
+	if fixture.writer.Ready() {
+		t.Fatal("ambiguous broadcast did not latch readiness off")
+	}
+
+	retry, err := fixture.writer.Submit(context.Background(), validRequest())
+	if err != nil {
+		t.Fatalf("idempotent retry failed while writer was unready: %v", err)
+	}
+	if retry != first {
+		t.Fatalf("retry did not return the journaled submission: %#v", retry)
+	}
+	if len(fixture.chain.sent) != 1 {
+		t.Fatalf("idempotent retry rebroadcast the transaction: %d", len(fixture.chain.sent))
+	}
+}
+
+func TestCanceledRequestAfterBroadcastRecordsSubmitted(t *testing.T) {
+	fixture := newWriterFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	fixture.chain.sendHook = cancel
+
+	submission, err := fixture.writer.Submit(ctx, validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submission.Status != SubmissionSubmitted {
+		t.Fatalf("unexpected submission: %#v", submission)
+	}
+	if fixture.journal.submitted != submission.RequestID {
+		t.Fatal("submitted transaction was not recorded after request cancellation")
+	}
+}
+
+func TestSubmittedJournalFailureReturnsSignedRetry(t *testing.T) {
+	fixture := newWriterFixture(t)
+	fixture.journal.setSubmitted = errors.New("journal unavailable")
+
+	first, err := fixture.writer.Submit(context.Background(), validRequest())
+	var tracked *journaledSubmissionError
+	if !errors.As(err, &tracked) {
+		t.Fatalf("status update failure was not returned as a journaled outcome: %v", err)
+	}
+	if first.Status != "signed" || tracked.Submission() != first {
+		t.Fatalf("unexpected signed submission: %#v", first)
+	}
+	if len(fixture.chain.sent) != 1 {
+		t.Fatalf("transaction was not broadcast exactly once: %d", len(fixture.chain.sent))
+	}
+
+	retry, err := fixture.writer.Submit(context.Background(), validRequest())
+	if err != nil {
+		t.Fatalf("signed retry failed while writer was unready: %v", err)
+	}
+	if retry != first {
+		t.Fatalf("retry did not return the signed journal state: %#v", retry)
+	}
+	if len(fixture.chain.sent) != 1 {
+		t.Fatalf("signed retry rebroadcast the transaction: %d", len(fixture.chain.sent))
+	}
+}
+
+func TestRetryReturnsEveryJournaledSubmissionStatus(t *testing.T) {
+	request := validRequest()
+	_, _, digest, err := request.validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := []SubmissionStatus{
+		SubmissionSigned,
+		SubmissionSubmitted,
+		SubmissionSoftConfirmed,
+		SubmissionL1Posted,
+		SubmissionEthereumFinal,
+		SubmissionAmbiguous,
+		SubmissionReplaced,
+	}
+	for _, status := range statuses {
+		t.Run(string(status), func(t *testing.T) {
+			fixture := newWriterFixture(t)
+			fixture.writer.ready.Store(false)
+			expected := Submission{
+				RequestID: request.RequestID,
+				IntentID:  request.Intent.ID,
+				TxHash:    "0x" + strings.Repeat("a", 64),
+				Nonce:     17,
+				Status:    status,
+			}
+			fixture.journal.existing = map[string]fakeExisting{
+				request.RequestID: {submission: expected, digest: digest},
+			}
+
+			actual, err := fixture.writer.Submit(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if actual != expected {
+				t.Fatalf("journaled status changed: %#v", actual)
+			}
+			if fixture.journal.reservation != nil || len(fixture.chain.sent) != 0 {
+				t.Fatal("idempotent retry entered the signing path")
+			}
+		})
+	}
+}
+
+func TestPreflightRejectionNeverCreatesSubmission(t *testing.T) {
+	fixture := newWriterFixture(t)
+	fixture.chain.simulationError = errors.New("execution reverted")
+
+	if submission, err := fixture.writer.Submit(context.Background(), validRequest()); err == nil {
+		t.Fatalf("reverted simulation was accepted: %#v", submission)
+	}
+	if fixture.journal.reservation != nil || len(fixture.journal.existing) != 0 {
+		t.Fatal("preflight rejection created a journaled submission")
+	}
+	if len(fixture.chain.sent) != 0 {
+		t.Fatal("preflight rejection was broadcast")
+	}
+	if !fixture.writer.Ready() {
+		t.Fatal("deterministic preflight rejection disabled the writer")
 	}
 }
 
