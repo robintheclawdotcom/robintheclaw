@@ -1,14 +1,17 @@
 pub mod api;
 pub mod config;
+pub mod signer_client;
 pub mod store;
 
 use config::Config;
+use signer_client::SignerClients;
 use store::Store;
 
 pub struct AppState {
     pub config: Config,
     pub store: Option<Store>,
     pub client: reqwest::Client,
+    pub signers: Option<SignerClients>,
 }
 
 impl AppState {
@@ -22,10 +25,40 @@ impl AppState {
             .timeout(std::time::Duration::from_secs(3))
             .build()
             .expect("static HTTP client configuration is valid");
+        let signers = if config.enabled {
+            Some(SignerClients::new(
+                client.clone(),
+                config
+                    .signer_caller_id
+                    .clone()
+                    .expect("validated caller ID"),
+                config
+                    .lighter_signer_url
+                    .clone()
+                    .expect("validated Lighter signer URL"),
+                config
+                    .robinhood_signer_url
+                    .clone()
+                    .expect("validated Robinhood signer URL"),
+                config
+                    .lighter_api_url
+                    .clone()
+                    .expect("validated Lighter API URL"),
+                config
+                    .lighter_signer_hmac_key
+                    .expect("validated Lighter HMAC key"),
+                config
+                    .robinhood_signer_hmac_key
+                    .expect("validated Robinhood HMAC key"),
+            ))
+        } else {
+            None
+        };
         Ok(Self {
             config,
             store,
             client,
+            signers,
         })
     }
 }

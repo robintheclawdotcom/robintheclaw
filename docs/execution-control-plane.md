@@ -78,6 +78,16 @@ A nonce cannot be replayed across writer replicas or process restarts. The API a
 concurrency, and per-minute admission limits. Render must deploy the signer as a private service;
 the Blueprint policy check rejects a public web-service definition.
 
+The coordinator uses the same canonical HMAC protocol for the Lighter signer, with a separate key.
+Signer responses are size-bounded and rejected unless the intent identity and transaction hash are
+well formed. The coordinator then submits the exact signed `tx_type` and serialized `tx_info` to
+Lighter's `/api/v1/sendTx` endpoint with price protection enabled. It never retries an ambiguous
+submission blindly, and it requires the API response hash to match the signer response before
+recording acceptance. Lighter states that HTTP acceptance does not prove sequencer execution;
+order state and fills must be reconciled from authenticated streams before the spot leg is sent:
+[Lighter transaction signing](https://apidocs.lighter.xyz/docs/trading),
+[sendTx](https://apidocs.lighter.xyz/reference/sendtx).
+
 ## Nonce and broadcast protocol
 
 For a new transaction, the writer opens a PostgreSQL transaction, locks the chain-and-signer nonce

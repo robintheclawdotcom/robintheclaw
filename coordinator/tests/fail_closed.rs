@@ -11,6 +11,10 @@ fn disabled_config() -> Config {
         api_token: None,
         lighter_signer_url: None,
         robinhood_signer_url: None,
+        signer_caller_id: None,
+        lighter_signer_hmac_key: None,
+        robinhood_signer_hmac_key: None,
+        lighter_api_url: None,
     }
 }
 
