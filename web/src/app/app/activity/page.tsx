@@ -17,7 +17,7 @@ export default function ActivityPage() {
   if (query.error) return <ErrorNotice error={query.error} retry={() => void query.refetch()} />;
   return (
     <>
-      <PageHeader eyebrow="Activity" title="Account and strategy history" description="Deposits, withdrawals, executions, attestations, and account changes in one chronological record." />
+      <PageHeader eyebrow="Operations" title="Activity log" description="Chronological account, vault, execution, and attestation events." />
       <section className="panel activity-page"><ActivityList items={visible} />
         {query.data?.nextCursor && <button className="button button-secondary load-more" onClick={() => { setItems(visible); setCursor(query.data?.nextCursor ?? undefined); }}>Load more</button>}
       </section>

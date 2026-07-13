@@ -16,7 +16,7 @@ export default function StrategyPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Strategy" title="Control your basis strategy" description="Set the operating state, manage capital, and follow real positions as execution comes online." action={vault && <MandateButton dashboard={dashboard} />} />
+      <PageHeader eyebrow="Strategy" title="Strategy controls" description="Manage operating state, capital, exposure, and positions." action={vault && <MandateButton dashboard={dashboard} />} />
       {!vault ? <SetupCard /> : (
         <>
           <div className="strategy-layout">
@@ -35,7 +35,7 @@ export default function StrategyPage() {
           </div>
           <section className="panel">
             <div className="panel-heading"><div><span className="eyebrow">Execution</span><h2>Positions</h2></div></div>
-            {dashboard.positions.length ? <div className="position-cards">{dashboard.positions.map((position) => <article key={position.id}><strong>{position.symbol}</strong><span>{position.status}</span><dl><div><dt>Entry basis</dt><dd>{position.entryBasisBps} bps</dd></div><div><dt>Current basis</dt><dd>{position.currentBasisBps} bps</dd></div><div><dt>Funding</dt><dd>{formatAmount(position.funding)}</dd></div><div><dt>P&amp;L</dt><dd>{formatAmount(position.pnl)}</dd></div></dl></article>)}</div> : <EmptyState title="No venue positions" body="The current release shows your mainnet vault and opportunity feed. Venue positions will appear only after they execute." />}
+            {dashboard.positions.length ? <div className="position-cards">{dashboard.positions.map((position) => <article key={position.id}><strong>{position.symbol}</strong><span>{position.status}</span><dl><div><dt>Entry basis</dt><dd>{position.entryBasisBps} bps</dd></div><div><dt>Current basis</dt><dd>{position.currentBasisBps} bps</dd></div><div><dt>Funding</dt><dd>{formatAmount(position.funding)}</dd></div><div><dt>P&amp;L</dt><dd>{formatAmount(position.pnl)}</dd></div></dl></article>)}</div> : <EmptyState title="No positions" body="No executed positions are currently recorded." />}
           </section>
         </>
       )}

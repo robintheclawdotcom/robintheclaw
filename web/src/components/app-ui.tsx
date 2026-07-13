@@ -27,18 +27,18 @@ export function ErrorNotice({ error, retry }: { error: unknown; retry?: () => vo
   const message = error instanceof Error ? error.message : "Something went wrong.";
   return (
     <div className="notice notice-error" role="alert">
-      <div><strong>Action needed</strong><p>{message}</p></div>
+      <div><strong>Request failed</strong><p>{message}</p></div>
       {retry && <button className="button button-secondary" onClick={retry}>Try again</button>}
     </div>
   );
 }
 
-export function LoadingPanel({ label = "Loading your account…" }: { label?: string }) {
+export function LoadingPanel({ label = "Loading account…" }: { label?: string }) {
   return <div className="loading-panel" role="status"><i />{label}</div>;
 }
 
 export function ActivityList({ items, compact = false }: { items: ActivityRecord[]; compact?: boolean }) {
-  if (!items.length) return <EmptyState title="No activity yet" body="Vault operations, strategy changes, and account events will appear here." />;
+  if (!items.length) return <EmptyState title="No activity" body="Account and strategy events will appear here." />;
   return (
     <div className={`activity-list ${compact ? "compact" : ""}`}>
       {items.map((item) => (
@@ -55,8 +55,8 @@ export function ActivityList({ items, compact = false }: { items: ActivityRecord
 export function SetupCard() {
   return (
     <section className="setup-card">
-      <div><span className="eyebrow">Ready when you are</span><h2>Activate your personal strategy vault</h2><p>Create and fund your mainnet vault in one sponsored operation. No extension or chain setup required.</p></div>
-      <Link className="button button-primary" href="/app/onboarding">Set up Robin</Link>
+      <div><span className="eyebrow">Strategy vault</span><h2>Create your strategy vault</h2><p>Establish and fund your mainnet vault in one sponsored operation.</p></div>
+      <Link className="button button-primary" href="/app/onboarding">Create vault</Link>
     </section>
   );
 }

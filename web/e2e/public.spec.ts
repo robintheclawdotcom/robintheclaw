@@ -1,12 +1,12 @@
 import { expect, test } from "@playwright/test";
 
-test("homepage leads with no-code strategy access", async ({ page }) => {
+test("homepage leads with autonomous trading capability", async ({ page }) => {
   await page.goto("/");
 
-  await expect(page.getByText("Open your strategy account", { exact: true })).toBeVisible();
-  await expect(page.getByText("typed contract layer live", { exact: false })).toBeVisible();
-  await expect(page.getByText("Source-verified governance, custody, risk, and routing", { exact: false })).toBeVisible();
-  await expect(page.getByText("No extension, seed phrase, CLI", { exact: false })).toBeVisible();
+  await expect(page.getByText("Strategy operations", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("production contract system deployed", { exact: true })).toBeVisible();
+  await expect(page.getByText("Custody, governance, mandate enforcement", { exact: false })).toBeVisible();
+  await expect(page.getByText("Account abstraction", { exact: false })).toBeVisible();
   await expect(page.getByText(/testnet/i)).toHaveCount(0);
   await expect(page.getByText("git clone", { exact: false })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "open app", exact: false }).first()).toHaveAttribute("href", "/app");

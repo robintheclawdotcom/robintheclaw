@@ -57,7 +57,7 @@ export function WithdrawForm({ dashboard }: { dashboard: DashboardSnapshot }) {
     <form className="action-form" id="withdraw" onSubmit={(event) => { event.preventDefault(); mutation.mutate(); }}>
       <label htmlFor="withdraw-amount">Amount to withdraw</label>
       <div className="amount-input"><input id="withdraw-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="0.00" /><span>{vault.balance.symbol}</span></div>
-      <small>Funds return to your Robin strategy account at {formatAddress(auth.embeddedAddress)}.</small>
+      <small>Destination: {formatAddress(auth.embeddedAddress)}</small>
       <button className="button button-secondary" disabled={mutation.isPending || !amount} type="submit">{mutation.isPending ? "Withdrawing…" : "Withdraw"}</button>
       {mutation.error && <span className="field-error" role="alert">{mutation.error.message}</span>}
     </form>
@@ -105,7 +105,7 @@ export function AddFundsForm({ dashboard }: { dashboard: DashboardSnapshot }) {
       </select>
       <label htmlFor="deposit-amount">Amount to add</label>
       <div className="amount-input"><input id="deposit-amount" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} placeholder="0.00" /><span>{vault.balance.symbol}</span></div>
-      <small>The selected wallet signs one sponsored approval-and-deposit batch.</small>
+      <small>Approval and deposit are submitted as one sponsored batch.</small>
       <button className="button button-primary" disabled={mutation.isPending || !amount || !wallet} type="submit">{mutation.isPending ? "Adding funds…" : "Add funds"}</button>
       {mutation.error && <ErrorNotice error={mutation.error} />}
     </form>

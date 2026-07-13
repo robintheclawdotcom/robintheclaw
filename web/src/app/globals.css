@@ -91,13 +91,13 @@ main { min-height: 100vh; background: var(--bg); padding: clamp(18px, 2vw, 32px)
 .home-view { max-width: 860px; margin: 0 auto; }
 .welcome { display: flex; gap: 20px; align-items: center; padding: 22px 24px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--highlight); animation: fade-up .5s ease both; }
 .welcome img { width: 72px; height: 72px; border: 1px solid var(--border); border-radius: 8px; image-rendering: pixelated; }
-.welcome h1 { margin: 0; font-size: 16px; }
+.welcome h1 { margin: 0; color: var(--text); font-size: 16px; }
 .welcome h1 span, .prompt b, .cards article span, .pipeline-item span, .code-block span { color: var(--accent); }
 .welcome p { margin: 6px 0 0; color: var(--text-secondary); font-size: 13.5px; line-height: 1.55; }
 small { color: var(--muted); font-size: 12px; line-height: 1.6; }
 .welcome small { display: block; margin-top: 8px; }
 .intro, .app-entry, .home-view > section:not(:first-child) { margin-top: 32px; animation: fade-up .5s ease both; }
-.prompt { display: flex; flex-wrap: wrap; gap: 9px; font-size: 14px; }
+.prompt { display: flex; flex-wrap: wrap; gap: 9px; color: var(--text-secondary); font-size: 14px; }
 .prompt span { color: var(--muted); }
 .prompt i { color: var(--faint); font-style: normal; }
 .prompt b { font-weight: 400; }

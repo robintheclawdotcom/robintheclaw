@@ -104,7 +104,7 @@ export default function OnboardingPage() {
     }
   };
 
-  if (query.isLoading) return <LoadingPanel label="Restoring your setup progress…" />;
+  if (query.isLoading) return <LoadingPanel label="Restoring setup…" />;
   if (query.error || !query.data) return <ErrorNotice error={query.error} retry={() => void query.refetch()} />;
   const me = query.data;
   const recoveryReady = me.user.hasRecovery || auth.hasRecovery;
@@ -113,8 +113,8 @@ export default function OnboardingPage() {
     return (
       <section className="onboarding-complete">
         <span className="success-mark">✓</span><span className="eyebrow">Setup complete</span>
-        <h1>Your Robin strategy account is ready.</h1>
-        <p>Your personal vault is funded on Robinhood Chain mainnet and ready for strategy control.</p>
+        <h1>Strategy vault active</h1>
+        <p>Your vault is funded and ready for strategy control on Robinhood Chain mainnet.</p>
         <Link className="button button-primary" href="/app">Open dashboard</Link>
       </section>
     );
@@ -122,31 +122,31 @@ export default function OnboardingPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Account setup" title="Activate Robin in one onchain operation" description="Your account, recovery method, and personal vault remain yours across every linked wallet." />
+      <PageHeader eyebrow="Account setup" title="Create your strategy vault" description="Establish recovery, verify wallets, and deploy the vault in one sponsored operation." />
       <ol className="onboarding-steps">
-        <Step number="1" title="Strategy account" complete={Boolean(me.smartAccount)}>
-          {me.smartAccount ? <p>Ready at <code>{formatAddress(me.smartAccount.address)}</code></p> : <p>Robin is creating your embedded signer and stable smart account.</p>}
+        <Step number="1" title="Smart account" complete={Boolean(me.smartAccount)}>
+          {me.smartAccount ? <p>Ready at <code>{formatAddress(me.smartAccount.address)}</code></p> : <p>Creating a durable smart account.</p>}
         </Step>
         <Step number="2" title="Recovery" complete={recoveryReady}>
           {recoveryReady ? <p>Email or passkey recovery is connected.</p> : <><p>Add a durable way to recover your account before funding the vault.</p><div className="button-row"><button className="button button-secondary" onClick={auth.linkEmail}>Add email</button><button className="button button-secondary" onClick={auth.linkPasskey}>Add passkey</button><button className="button button-quiet" disabled={sync.isPending} onClick={() => sync.mutate()}>I’ve added it</button></div></>}
         </Step>
-        <Step number="3" title="Linked wallets" complete={me.wallets.length > 0} optional>
-          <p>{me.wallets.length} wallet{me.wallets.length === 1 ? "" : "s"} linked. Add MetaMask, Phantom, or another detected browser wallet now or later.</p>
+        <Step number="3" title="Funding wallets" complete={me.wallets.length > 0} optional>
+          <p>{me.wallets.length} wallet{me.wallets.length === 1 ? "" : "s"} linked. Connect a supported wallet now or after setup.</p>
           <div className="button-row"><button className="button button-secondary" onClick={auth.linkWallet}>Link wallet</button><button className="button button-quiet" disabled={sync.isPending} onClick={() => sync.mutate()}>Refresh</button></div>
         </Step>
         <Step number="4" title="Personal vault" complete={false}>
-          <p>Robin will create your versioned mainnet vault and fund it in one sponsored batch.</p>
+          <p>A sponsored batch creates your mainnet vault and funds its initial balance.</p>
         </Step>
       </ol>
       {phase === "delayed" ? (
         <div className="notice notice-warning" role="status">
-          <div><strong>The onchain operation is saved.</strong><p>Server confirmation is delayed. Your setup will resume from the operation receipt and cannot create a second vault.</p>{error instanceof Error && <small>{error.message}</small>}</div>
+          <div><strong>Confirmation pending</strong><p>The transaction was submitted successfully. Confirmation will resume without creating another vault.</p>{error instanceof Error && <small>{error.message}</small>}</div>
           <button className="button button-primary" onClick={() => void retryConfirmation()}>Check again</button>
         </div>
       ) : (
         <section className="activate-panel">
-          <div><strong>{phaseLabel(phase)}</strong><p>One wallet confirmation. Mainnet gas is sponsored.</p></div>
-          <button className="button button-primary" disabled={!recoveryReady || !me.smartAccount || phase !== "idle"} onClick={() => void activate()}>{phase === "idle" ? "Create and fund vault" : "Working…"}</button>
+          <div><strong>{phaseLabel(phase)}</strong><p>One signature. Network fees are sponsored.</p></div>
+          <button className="button button-primary" disabled={!recoveryReady || !me.smartAccount || phase !== "idle"} onClick={() => void activate()}>{phase === "idle" ? "Create vault" : "Working…"}</button>
         </section>
       )}
       {error && phase !== "delayed" && <ErrorNotice error={error} />}
@@ -159,8 +159,8 @@ function Step({ number, title, complete, optional = false, children }: { number:
 }
 
 function phaseLabel(phase: string) {
-  if (phase === "preparing") return "Preparing your vault";
-  if (phase === "signing") return "Waiting for wallet confirmation";
-  if (phase === "confirming") return "Confirming on Robinhood Chain";
-  return "Ready to activate";
+  if (phase === "preparing") return "Preparing vault";
+  if (phase === "signing") return "Awaiting signature";
+  if (phase === "confirming") return "Confirming transaction";
+  return "Ready to deploy";
 }

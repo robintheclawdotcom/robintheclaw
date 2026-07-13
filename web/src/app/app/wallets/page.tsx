@@ -46,9 +46,9 @@ export default function WalletsPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Wallets" title="One account, multiple funding sources" description="Link wallets for portfolio visibility and funding without changing the smart account that owns your vault." action={<button className="button button-primary" onClick={auth.linkWallet}>Link wallet</button>} />
+      <PageHeader eyebrow="Capital" title="Wallets" description="Manage verified funding sources and portfolio connections. Vault ownership remains unchanged." action={<button className="button button-primary" onClick={auth.linkWallet}>Link wallet</button>} />
       {conflict && (
-        <div className="notice notice-error account-conflict" role="alert"><div><strong>This wallet belongs to another Robin account.</strong><p>Sign out and recover that account with its email or passkey. Robin never merges wallet ownership automatically.</p></div><button className="button button-secondary" onClick={() => void auth.logout()}>Recover other account</button></div>
+        <div className="notice notice-error account-conflict" role="alert"><div><strong>Wallet already linked</strong><p>This address is linked to another Robin account. Sign in to that account to manage it.</p></div><button className="button button-secondary" onClick={() => void auth.logout()}>Sign in to other account</button></div>
       )}
       <section className="panel wallet-panel">
         <div className="panel-heading"><div><span className="eyebrow">Linked portfolio</span><h2>{me.wallets.length} wallet{me.wallets.length === 1 ? "" : "s"}</h2></div><button className="button button-quiet" disabled={sync.isPending} onClick={() => sync.mutate()}>{sync.isPending ? "Syncing…" : "Sync wallets"}</button></div>
@@ -71,7 +71,7 @@ export default function WalletsPage() {
       {(sync.error && !conflict) && <ErrorNotice error={sync.error} />}
       {preferences.error && <ErrorNotice error={preferences.error} />}
       {unlink.error && <ErrorNotice error={unlink.error} />}
-      <section className="panel ownership-note"><span className="lock-mark">⌁</span><div><h2>Vault ownership stays stable</h2><p>Your Robin smart account remains the sole vault owner. Linking, selecting, or unlinking a funding wallet cannot rotate the owner or redirect withdrawals.</p><strong>{formatAddress(me.smartAccount?.address)}</strong></div></section>
+      <section className="panel ownership-note"><span className="lock-mark">⌁</span><div><h2>Vault ownership</h2><p>The smart account remains the sole vault owner. Funding-wallet changes cannot rotate ownership or alter withdrawal authorization.</p><strong>{formatAddress(me.smartAccount?.address)}</strong></div></section>
     </>
   );
 }

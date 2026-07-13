@@ -3,8 +3,8 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://robintheclaw.com"),
-  title: "Robin the Claw | Systematic RWA Trading",
-  description: "A systematic, delta-neutral RWA basis trading agent for Robinhood Chain.",
+  title: "Robin the Claw | Autonomous Trading for Tokenized Markets",
+  description: "Autonomous, delta-neutral execution for tokenized markets on Robinhood Chain.",
   alternates: {
     canonical: "/",
   },
@@ -20,8 +20,8 @@ export const metadata: Metadata = {
     apple: { url: "/brand/apple-touch-icon.png?v=green", sizes: "180x180", type: "image/png" },
   },
   openGraph: {
-    title: "Robin the Claw | Systematic RWA Trading",
-    description: "A systematic, delta-neutral RWA basis trading agent for Robinhood Chain.",
+    title: "Robin the Claw | Autonomous Trading for Tokenized Markets",
+    description: "Autonomous, delta-neutral execution for tokenized markets on Robinhood Chain.",
     url: "/",
     siteName: "Robin the Claw",
     locale: "en_US",
@@ -37,8 +37,8 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Robin the Claw | Systematic RWA Trading",
-    description: "A systematic, delta-neutral RWA basis trading agent for Robinhood Chain.",
+    title: "Robin the Claw | Autonomous Trading for Tokenized Markets",
+    description: "Autonomous, delta-neutral execution for tokenized markets on Robinhood Chain.",
     images: ["/brand/og-image.jpg?v=green"],
   },
 };

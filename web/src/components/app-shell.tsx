@@ -23,26 +23,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return (
       <main className="app-auth">
         <AuthPanel
-          eyebrow="Application setup"
-          title="The Robin app is ready for provider configuration."
-          body="Connect the deployment to Privy, Alchemy, and the application API to enable sign-in and sponsored mainnet onboarding."
+          eyebrow="Application unavailable"
+          title="Provider configuration is incomplete."
+          body="Contact the system administrator."
         />
       </main>
     );
   }
 
   if (!auth.ready) {
-    return <main className="app-auth"><div className="app-loader" role="status">Restoring your Robin account…</div></main>;
+    return <main className="app-auth"><div className="app-loader" role="status">Restoring session…</div></main>;
   }
 
   if (!auth.authenticated) {
     return (
       <main className="app-auth">
         <AuthPanel
-          eyebrow="Automated strategy access"
-          title="One account for capital, strategy, and performance."
-          body="Sign in with email, passkey, Google, Apple, or an EVM wallet. Robin creates your mainnet strategy account with no extension or RPC setup."
-          action={<button className="button button-primary" onClick={auth.login}>Open Robin</button>}
+          eyebrow="Strategy operations"
+          title="Autonomous strategy. Direct control."
+          body="Monitor capital, exposure, execution, and performance. Sign in with email, passkey, or a connected wallet."
+          action={<button className="button button-primary" onClick={auth.login}>Sign in</button>}
         />
       </main>
     );
@@ -105,7 +105,7 @@ function AuthPanel({
       <p>{body}</p>
       {action}
       <div className="auth-benefits" aria-label="Account benefits">
-        <span>No-code setup</span><span>Sponsored mainnet gas</span><span>Self-custodied vault</span>
+        <span>Unified capital</span><span>Sponsored mainnet gas</span><span>Self-custodied vault</span>
       </div>
     </section>
   );
