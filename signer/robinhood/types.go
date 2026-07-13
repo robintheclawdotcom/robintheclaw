@@ -1,0 +1,120 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
+)
+
+type SpotSide uint8
+
+const (
+	BuySpot SpotSide = iota
+	SellSpot
+)
+
+type SpotIntentRequest struct {
+	ID            string `json:"id"`
+	StockToken    string `json:"stock_token"`
+	Side          string `json:"side"`
+	AmountIn      string `json:"amount_in"`
+	MinAmountOut  string `json:"min_amount_out"`
+	Deadline      uint64 `json:"deadline"`
+	ConfigVersion uint64 `json:"config_version"`
+}
+
+type ExecuteRequest struct {
+	RequestID         string            `json:"request_id"`
+	ReplacesRequestID string            `json:"replaces_request_id,omitempty"`
+	Intent            SpotIntentRequest `json:"intent"`
+}
+
+type SpotIntent struct {
+	ID            [32]byte
+	StockToken    common.Address
+	Side          SpotSide
+	AmountIn      *big.Int
+	MinAmountOut  *big.Int
+	Deadline      uint64
+	ConfigVersion uint64
+}
+
+type Submission struct {
+	RequestID string `json:"request_id"`
+	IntentID  string `json:"intent_id"`
+	TxHash    string `json:"tx_hash"`
+	Nonce     uint64 `json:"nonce"`
+	Status    string `json:"status"`
+}
+
+func (request ExecuteRequest) validate() (SpotIntent, []byte, string, error) {
+	if strings.TrimSpace(request.RequestID) == "" || len(request.RequestID) > 128 {
+		return SpotIntent{}, nil, "", errors.New("invalid request_id")
+	}
+	if request.ReplacesRequestID == request.RequestID || len(request.ReplacesRequestID) > 128 {
+		return SpotIntent{}, nil, "", errors.New("invalid replaces_request_id")
+	}
+	intent, err := request.Intent.parse()
+	if err != nil {
+		return SpotIntent{}, nil, "", err
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return SpotIntent{}, nil, "", errors.New("encode request")
+	}
+	digest := sha256.Sum256(payload)
+	return intent, payload, fmt.Sprintf("%x", digest), nil
+}
+
+func (request SpotIntentRequest) parse() (SpotIntent, error) {
+	var intent SpotIntent
+	id := common.FromHex(request.ID)
+	if len(id) != len(intent.ID) || common.BytesToHash(id) == (common.Hash{}) {
+		return intent, errors.New("intent id must be a non-zero bytes32")
+	}
+	copy(intent.ID[:], id)
+	if !common.IsHexAddress(request.StockToken) || common.HexToAddress(request.StockToken) == (common.Address{}) {
+		return intent, errors.New("stock_token must be a non-zero address")
+	}
+	intent.StockToken = common.HexToAddress(request.StockToken)
+	switch request.Side {
+	case "buy_spot":
+		intent.Side = BuySpot
+	case "sell_spot":
+		intent.Side = SellSpot
+	default:
+		return intent, errors.New("side must be buy_spot or sell_spot")
+	}
+	amountIn, err := parseUint128(request.AmountIn)
+	if err != nil || amountIn.Sign() == 0 {
+		return intent, errors.New("amount_in must be a positive uint128")
+	}
+	minimum, err := parseUint128(request.MinAmountOut)
+	if err != nil || minimum.Sign() == 0 {
+		return intent, errors.New("min_amount_out must be a positive uint128")
+	}
+	if request.Deadline == 0 || request.ConfigVersion == 0 {
+		return intent, errors.New("deadline and config_version must be positive")
+	}
+	intent.AmountIn = amountIn
+	intent.MinAmountOut = minimum
+	intent.Deadline = request.Deadline
+	intent.ConfigVersion = request.ConfigVersion
+	return intent, nil
+}
+
+func parseUint128(value string) (*big.Int, error) {
+	if value == "" || strings.TrimSpace(value) != value || strings.HasPrefix(value, "+") {
+		return nil, errors.New("invalid integer")
+	}
+	number, ok := new(big.Int).SetString(value, 10)
+	if !ok || number.Sign() < 0 || number.BitLen() > 128 {
+		return nil, fmt.Errorf("outside uint128")
+	}
+	return number, nil
+}

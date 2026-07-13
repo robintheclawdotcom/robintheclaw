@@ -1,0 +1,208 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+type Server struct {
+	config Config
+	writer *Writer
+	once   sync.Once
+	slots  chan struct{}
+	rate   requestRate
+}
+
+type requestRate struct {
+	mu     sync.Mutex
+	window time.Time
+	count  uint16
+}
+
+func (server *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /livez", server.live)
+	mux.HandleFunc("GET /readyz", server.ready)
+	mux.HandleFunc("POST /v1/spot-intents", server.executeSpot)
+	return securityHeaders(mux)
+}
+
+func (server *Server) live(response http.ResponseWriter, _ *http.Request) {
+	writeJSON(response, http.StatusOK, map[string]string{"status": "live"})
+}
+
+func (server *Server) ready(response http.ResponseWriter, _ *http.Request) {
+	if !server.config.Enabled || server.writer == nil || !server.writer.Ready() {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"status": "unready"})
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+func (server *Server) executeSpot(response http.ResponseWriter, request *http.Request) {
+	if !server.config.Enabled || server.writer == nil || !server.writer.Ready() {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "signer unavailable"})
+		return
+	}
+	server.once.Do(func() {
+		server.slots = make(chan struct{}, server.config.MaxConcurrentRequests)
+	})
+	select {
+	case server.slots <- struct{}{}:
+		defer func() { <-server.slots }()
+	default:
+		writeJSON(response, http.StatusTooManyRequests, map[string]string{"error": "signer busy"})
+		return
+	}
+	request.Body = http.MaxBytesReader(response, request.Body, 16<<10)
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), server.config.RequestTimeout)
+	defer cancel()
+	request = request.WithContext(ctx)
+	if !server.authorized(request, body) {
+		writeJSON(response, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if !server.rate.allow(time.Now(), server.config.MaxRequestsPerMinute) {
+		writeJSON(response, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var payload ExecuteRequest
+	if err := decoder.Decode(&payload); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	submission, err := server.writer.Submit(ctx, payload)
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		} else if strings.Contains(err.Error(), "not ready") {
+			status = http.StatusServiceUnavailable
+		}
+		slog.Warn("spot intent rejected", "request_id", payload.RequestID, "error", err)
+		writeJSON(response, status, map[string]string{"error": "request rejected"})
+		return
+	}
+	writeJSON(response, http.StatusAccepted, submission)
+}
+
+func (server *Server) authorized(request *http.Request, body []byte) bool {
+	caller := request.Header.Get("X-RTC-Caller")
+	if subtle.ConstantTimeCompare([]byte(caller), []byte(server.config.CallerID)) != 1 {
+		return false
+	}
+	timestampText := request.Header.Get("X-RTC-Timestamp")
+	timestamp, err := strconv.ParseInt(timestampText, 10, 64)
+	if err != nil {
+		return false
+	}
+	now := time.Now()
+	signedAt := time.Unix(timestamp, 0)
+	if signedAt.Before(now.Add(-30*time.Second)) || signedAt.After(now.Add(30*time.Second)) {
+		return false
+	}
+	nonce := request.Header.Get("X-RTC-Nonce")
+	if !validNonce(nonce) {
+		return false
+	}
+	provided, err := hex.DecodeString(request.Header.Get("X-RTC-Signature"))
+	if err != nil || len(provided) != sha256.Size {
+		return false
+	}
+	bodyDigest := sha256.Sum256(body)
+	canonical := fmt.Sprintf(
+		"%s\n%s\n%s\n%s\n%s\n%x",
+		request.Method,
+		request.URL.Path,
+		caller,
+		timestampText,
+		nonce,
+		bodyDigest,
+	)
+	mac := hmac.New(sha256.New, server.config.APIHMACKey)
+	_, _ = mac.Write([]byte(canonical))
+	if subtle.ConstantTimeCompare(mac.Sum(nil), provided) != 1 {
+		return false
+	}
+	expiresAt := signedAt.Add(time.Minute)
+	return server.writer.journal.ClaimAuthNonce(request.Context(), nonce, expiresAt) == nil
+}
+
+func validNonce(value string) bool {
+	if len(value) < 32 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && character != '-' && character != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func (rate *requestRate) allow(now time.Time, limit uint16) bool {
+	rate.mu.Lock()
+	defer rate.mu.Unlock()
+	if rate.window.IsZero() || now.Sub(rate.window) >= time.Minute {
+		rate.window = now
+		rate.count = 0
+	}
+	if rate.count >= limit {
+		return false
+	}
+	rate.count++
+	return true
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Cache-Control", "no-store")
+		response.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		response.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(response, request)
+	})
+}
+
+func writeJSON(response http.ResponseWriter, status int, value any) {
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(status)
+	_ = json.NewEncoder(response).Encode(value)
+}
+
+func httpServer(config Config, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              config.ListenAddress,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       20 * time.Second,
+		WriteTimeout:      20 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+}
