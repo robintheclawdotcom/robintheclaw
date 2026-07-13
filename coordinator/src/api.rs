@@ -1,5 +1,7 @@
 use crate::{
-    store::{ExitRequest, NewMarketQuote, NewVenueEvent, RecoveryRequest, StoreError},
+    store::{
+        ExitRequest, NewAccountSnapshot, NewMarketQuote, NewVenueEvent, RecoveryRequest, StoreError,
+    },
     AppState,
 };
 use axum::{
@@ -24,9 +26,61 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/v1/exits", post(request_exit))
         .route("/v1/recoveries", post(request_recovery))
         .route("/v1/venue-events", post(record_venue_event))
+        .route("/v1/account-snapshots", post(record_account_snapshot))
         .route("/v1/market-quotes", post(record_market_quote))
         .layer(axum::extract::DefaultBodyLimit::max(64 << 10))
         .with_state(state)
+}
+
+async fn record_account_snapshot(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err((status, message)) = authorize(
+        &state,
+        AuthScope::AccountSnapshot,
+        "/v1/account-snapshots",
+        &headers,
+        &body,
+    )
+    .await
+    {
+        return error(status, message);
+    }
+    let Some(store) = &state.store else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled");
+    };
+    let snapshot: NewAccountSnapshot = match serde_json::from_slice(&body) {
+        Ok(snapshot) => snapshot,
+        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid request"),
+    };
+    let now_ms = match current_time_ms().and_then(|value| i64::try_from(value).map_err(|_| ())) {
+        Ok(value) => value,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "clock unavailable"),
+    };
+    if snapshot.received_at_ms.abs_diff(now_ms) > 5_000
+        || snapshot.observed_at_ms.abs_diff(now_ms) > 5_000
+        || snapshot.expires_at_ms <= now_ms
+    {
+        return error(
+            StatusCode::CONFLICT,
+            "account snapshot is stale or future-dated",
+        );
+    }
+    match store.record_account_snapshot(&snapshot).await {
+        Ok(true) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"status": "recorded"})),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "duplicate"})),
+        )
+            .into_response(),
+        Err(error) => store_error_response(error),
+    }
 }
 
 async fn request_recovery(
@@ -253,6 +307,7 @@ enum AuthScope {
     Exit,
     Recovery,
     VenueEvent,
+    AccountSnapshot,
     MarketQuote,
 }
 
@@ -263,6 +318,7 @@ impl AuthScope {
             Self::Exit => "exit",
             Self::Recovery => "recovery",
             Self::VenueEvent => "venue_event",
+            Self::AccountSnapshot => "account_snapshot",
             Self::MarketQuote => "market_quote",
         }
     }
@@ -293,6 +349,10 @@ async fn authorize(
         AuthScope::VenueEvent => (
             state.config.venue_hmac_key.as_ref(),
             state.config.venue_caller_id.as_deref(),
+        ),
+        AuthScope::AccountSnapshot => (
+            state.config.account_hmac_key.as_ref(),
+            state.config.account_caller_id.as_deref(),
         ),
         AuthScope::MarketQuote => (
             state.config.market_hmac_key.as_ref(),

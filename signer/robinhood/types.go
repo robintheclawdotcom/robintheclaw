@@ -29,9 +29,10 @@ type SpotIntentRequest struct {
 }
 
 type ExecuteRequest struct {
-	RequestID         string            `json:"request_id"`
-	ReplacesRequestID string            `json:"replaces_request_id,omitempty"`
-	Intent            SpotIntentRequest `json:"intent"`
+	ExecutionAccountID string            `json:"execution_account_id"`
+	RequestID          string            `json:"request_id"`
+	ReplacesRequestID  string            `json:"replaces_request_id,omitempty"`
+	Intent             SpotIntentRequest `json:"intent"`
 }
 
 type SpotIntent struct {
@@ -60,11 +61,14 @@ const (
 )
 
 type Submission struct {
-	RequestID string           `json:"request_id"`
-	IntentID  string           `json:"intent_id"`
-	TxHash    string           `json:"tx_hash"`
-	Nonce     uint64           `json:"nonce"`
-	Status    SubmissionStatus `json:"status"`
+	ExecutionAccountID string           `json:"execution_account_id"`
+	VaultAddress       string           `json:"vault_address"`
+	SignerAddress      string           `json:"signer_address"`
+	RequestID          string           `json:"request_id"`
+	IntentID           string           `json:"intent_id"`
+	TxHash             string           `json:"tx_hash"`
+	Nonce              uint64           `json:"nonce"`
+	Status             SubmissionStatus `json:"status"`
 }
 
 var errWriterNotReady = errors.New("writer is not ready")
@@ -87,6 +91,9 @@ func (failure *journaledSubmissionError) Submission() Submission {
 }
 
 func (request ExecuteRequest) validate() (SpotIntent, []byte, string, error) {
+	if !validExecutionAccountID(request.ExecutionAccountID) {
+		return SpotIntent{}, nil, "", errors.New("invalid execution_account_id")
+	}
 	if strings.TrimSpace(request.RequestID) == "" || len(request.RequestID) > 128 {
 		return SpotIntent{}, nil, "", errors.New("invalid request_id")
 	}

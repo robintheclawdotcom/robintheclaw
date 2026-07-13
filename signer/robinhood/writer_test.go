@@ -176,6 +176,7 @@ func newWriterFixture(t *testing.T) writerFixture {
 	}
 	config := Config{
 		Enabled:             true,
+		ExecutionAccountID:  "account-canary-1",
 		ChainID:             big.NewInt(4663),
 		SignerAddress:       signer.Address(),
 		TimelockAddress:     timelock,
@@ -316,11 +317,14 @@ func TestRetryReturnsEveryJournaledSubmissionStatus(t *testing.T) {
 			fixture := newWriterFixture(t)
 			fixture.writer.ready.Store(false)
 			expected := Submission{
-				RequestID: request.RequestID,
-				IntentID:  request.Intent.ID,
-				TxHash:    "0x" + strings.Repeat("a", 64),
-				Nonce:     17,
-				Status:    status,
+				ExecutionAccountID: fixture.config.ExecutionAccountID,
+				VaultAddress:       strings.ToLower(fixture.config.VaultAddress.Hex()),
+				SignerAddress:      strings.ToLower(fixture.config.SignerAddress.Hex()),
+				RequestID:          request.RequestID,
+				IntentID:           request.Intent.ID,
+				TxHash:             "0x" + strings.Repeat("a", 64),
+				Nonce:              17,
+				Status:             status,
 			}
 			fixture.journal.existing = map[string]fakeExisting{
 				request.RequestID: {submission: expected, digest: digest},

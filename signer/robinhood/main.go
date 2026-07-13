@@ -31,8 +31,8 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	serverState := &Server{config: config}
-	var journal *Journal
+	serverState := &Server{config: config, writers: make(map[string]*Writer)}
+	var journals []*Journal
 	if config.Enabled {
 		startup, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
@@ -52,22 +52,34 @@ func run() error {
 		if err != nil {
 			return errors.New("load AWS configuration")
 		}
-		signer, err := newKMSSigner(startup, awskms.NewFromConfig(aws), config.KMSKeyID)
+		accounts, err := config.accountConfigs()
 		if err != nil {
 			return err
 		}
-		manifest, deploymentID := config.manifest()
-		journal, err = openJournal(startup, config.DatabaseURL, manifest, deploymentID)
-		if err != nil {
-			return err
+		kmsClient := awskms.NewFromConfig(aws)
+		for _, account := range accounts {
+			signer, err := newKMSSigner(startup, kmsClient, account.KMSKeyID)
+			if err != nil {
+				return err
+			}
+			manifest, deploymentID := account.manifest()
+			journal, err := openJournal(startup, account.DatabaseURL, manifest, deploymentID)
+			if err != nil {
+				return err
+			}
+			journals = append(journals, journal)
+			writer := newWriter(account, client, verifier, signer, journal)
+			if err := writer.Recover(startup); err != nil {
+				return err
+			}
+			serverState.writers[account.ExecutionAccountID] = writer
+			go writer.RunReconciler(ctx)
 		}
-		defer journal.Close()
-		writer := newWriter(config, client, verifier, signer, journal)
-		if err := writer.Recover(startup); err != nil {
-			return err
-		}
-		serverState.writer = writer
-		go writer.RunReconciler(ctx)
+		defer func() {
+			for _, journal := range journals {
+				journal.Close()
+			}
+		}()
 	}
 
 	server := httpServer(config, serverState.Handler())

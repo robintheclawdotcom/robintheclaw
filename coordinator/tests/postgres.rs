@@ -1,9 +1,10 @@
 use coordinator::store::{
-    ActionKind, ExitRequest, NewMarketQuote, NewVenueEvent, NextAction, ObservationOutcome,
-    RecoveryRequest, Store, StoreError,
+    ActionKind, ExitRequest, NewAccountSnapshot, NewMarketQuote, NewVenueEvent, NextAction,
+    ObservationOutcome, RecoveryRequest, Store, StoreError,
 };
 use execution::{
     ExecutionEvent, ExecutionSaga, ExecutionState, FrozenEvidence, PairIntent, PerpSide, SpotSide,
+    CANARY_RISK_VERSION, PAIR_INTENT_VERSION,
 };
 use research::PromotionEvidence;
 use sqlx::PgPool;
@@ -22,6 +23,32 @@ async fn migration_and_promotion_gate_are_enforced() {
     ] {
         sqlx::raw_sql(migration).execute(&pool).await.unwrap();
     }
+    let legacy_id = "0x9999999999999999999999999999999999999999999999999999999999999999";
+    sqlx::query(
+        r#"
+        INSERT INTO execution_intents
+            (id, strategy_version, symbol, direction, payload, saga)
+        VALUES ($1, 'legacy-v1', 'AAPL', 'long_spot_short_perp', '{}'::jsonb, '{}'::jsonb)
+        "#,
+    )
+    .bind(legacy_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0006_multi_account_execution.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let legacy = sqlx::query_as::<_, (String, bool)>(
+        "SELECT execution_account_id, active FROM execution_intents WHERE id = $1",
+    )
+    .bind(legacy_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(legacy, ("singleton-mainnet-canary".into(), false));
 
     let evidence = approved_evidence();
     let digest = evidence.calculate_hash();
@@ -29,7 +56,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         "INSERT INTO execution_promotion_evidence \
          (strategy_version, evidence, evidence_sha256, approved_by) VALUES ($1, $2, $3, $4)",
     )
-    .bind("strategy-v1")
+    .bind(CANARY_RISK_VERSION)
     .bind(sqlx::types::Json(&evidence))
     .bind(&digest)
     .bind("approval-record")
@@ -50,12 +77,44 @@ async fn migration_and_promotion_gate_are_enforced() {
     .unwrap();
     sqlx::query(
         r#"
+        UPDATE execution_accounts
+        SET strategy_version = $1, risk_version = $1, status = 'active',
+            lighter_account_index = 7, lighter_api_key_index = 2,
+            robinhood_vault = '0x0000000000000000000000000000000000000002',
+            robinhood_signer = '0x0000000000000000000000000000000000000003',
+            binding_sha256 = repeat('a', 64)
+        WHERE execution_account_id = 'singleton-mainnet-canary'
+        "#,
+    )
+    .bind(CANARY_RISK_VERSION)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_account_control SET mode = 'ACTIVE', reason = 'integration test'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE execution_account_readiness
+        SET venue_approved = TRUE, oracle_healthy = TRUE, sequencer_healthy = TRUE,
+            reconciliation_ready = TRUE, exit_authority_ready = TRUE,
+            alerting_ready = TRUE, safe_rotation_ready = TRUE
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
         INSERT INTO execution_market_configs
             (manifest_id, symbol, spot_token, lighter_market_index, spot_decimals,
              perp_base_decimals, perp_price_decimals, spot_config_version, ui_multiplier_e18,
              max_price_deviation_bps, max_spot_slippage_bps,
              max_unwind_price_deviation_bps, review_record_sha256, valid_from, valid_until)
-        VALUES ($1, 'NVDA', $2, 101, 6, 6, 3, 1, $3, 100, 500, 2500, $4,
+        VALUES ($1, 'AAPL', $2, 101, 6, 6, 3, 1, $3, 100, 500, 2500, $4,
                 TIMESTAMPTZ 'epoch', TIMESTAMPTZ 'epoch' + interval '1 day')
         "#,
     )
@@ -87,18 +146,23 @@ async fn migration_and_promotion_gate_are_enforced() {
     duplicate_quote.source_event_id = "quote-duplicate".into();
     duplicate_quote.source_sequence = 2;
     assert!(!store.record_market_quote(&duplicate_quote).await.unwrap());
+    for snapshot in account_snapshots() {
+        assert!(store.record_account_snapshot(&snapshot).await.unwrap());
+    }
     let mut mismatched_market = intent();
     mismatched_market.symbol = "AMD".into();
+    mismatched_market.derive_identifiers().unwrap();
     assert!(matches!(
         store.create_intent(&mismatched_market, 1_200).await,
-        Err(StoreError::MarketEvidenceMismatch)
+        Err(StoreError::InvalidIntent(_))
     ));
     assert!(matches!(
         store.create_intent(&intent(), 1_200).await,
         Err(StoreError::MissingEvidence)
     ));
 
-    let skipped = insert_transition(&pool, "strategy-v1", "registered", "shadow", &digest).await;
+    let skipped =
+        insert_transition(&pool, CANARY_RISK_VERSION, "registered", "shadow", &digest).await;
     assert!(skipped.is_err());
 
     for (from, to) in [
@@ -108,13 +172,59 @@ async fn migration_and_promotion_gate_are_enforced() {
         ("shadow", "audit_ready"),
         ("audit_ready", "canary_eligible"),
     ] {
-        insert_transition(&pool, "strategy-v1", from, to, &digest)
+        insert_transition(&pool, CANARY_RISK_VERSION, from, to, &digest)
             .await
             .unwrap();
     }
 
     let saga = store.create_intent(&intent(), 1_200).await.unwrap();
     assert_eq!(saga.state, ExecutionState::Prechecked);
+    register_account(
+        &pool,
+        "account-canary-2",
+        "agent-canary-2",
+        8,
+        "0x0000000000000000000000000000000000000004",
+        "0x0000000000000000000000000000000000000005",
+    )
+    .await;
+    for snapshot in account_snapshots_for(
+        "account-canary-2",
+        8,
+        "0x0000000000000000000000000000000000000004",
+        "0x0000000000000000000000000000000000000005",
+    ) {
+        store.record_account_snapshot(&snapshot).await.unwrap();
+    }
+    let mut concurrent = intent();
+    concurrent.execution_account_id = "account-canary-2".into();
+    concurrent.agent_id = "agent-canary-2".into();
+    concurrent.lighter_account_index = 8;
+    concurrent.robinhood_vault = "0x0000000000000000000000000000000000000004".into();
+    concurrent.robinhood_signer = "0x0000000000000000000000000000000000000005".into();
+    concurrent.source_evaluation_id =
+        "0x7777777777777777777777777777777777777777777777777777777777777777".into();
+    concurrent.derive_identifiers().unwrap();
+    store.create_intent(&concurrent, 1_200).await.unwrap();
+    let active_accounts = sqlx::query_scalar::<_, i64>(
+        "SELECT count(DISTINCT execution_account_id) FROM execution_intents WHERE active",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active_accounts, 2);
+    sqlx::query("UPDATE execution_intents SET active = FALSE WHERE id = $1")
+        .bind(&concurrent.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE execution_actions SET status = 'failed_safe', completed_at = now() WHERE intent_id = $1",
+    )
+    .bind(&concurrent.id)
+    .execute(&pool)
+    .await
+    .unwrap();
     store
         .claim_api_nonce("intent", "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn", 1_900_000_000)
         .await
@@ -134,6 +244,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         .await
         .unwrap();
     let venue_event = NewVenueEvent {
+        execution_account_id: "singleton-mainnet-canary".into(),
         source: "lighter-auth".into(),
         source_session: "session-1".into(),
         source_event_id: "event-1".into(),
@@ -153,6 +264,12 @@ async fn migration_and_promotion_gate_are_enforced() {
         publisher_at_ms: 1_200,
         received_at_ms: 1_201,
     };
+    let mut cross_tenant_event = venue_event.clone();
+    cross_tenant_event.execution_account_id = "account-canary-2".into();
+    assert!(matches!(
+        store.record_venue_event(&cross_tenant_event).await,
+        Err(StoreError::ExecutionAccountUnavailable)
+    ));
     assert!(store.record_venue_event(&venue_event).await.unwrap());
     assert!(!store.record_venue_event(&venue_event).await.unwrap());
     let mut restarted_event = venue_event.clone();
@@ -241,6 +358,7 @@ async fn migration_and_promotion_gate_are_enforced() {
             "worker-1",
             &action.lease_token,
             action.control_version,
+            action.account_control_version,
         )
         .await
         .unwrap();
@@ -252,6 +370,7 @@ async fn migration_and_promotion_gate_are_enforced() {
                 "worker-1",
                 &action.lease_token,
                 action.control_version,
+                action.account_control_version,
             )
             .await,
         Err(StoreError::CoordinatorHalted)
@@ -407,26 +526,39 @@ async fn migration_and_promotion_gate_are_enforced() {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query(
+        "UPDATE execution_accounts SET status = 'active' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_account_control SET mode = 'ACTIVE', reason = 'lock test' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut second = intent();
-    second.id = "0x3333333333333333333333333333333333333333333333333333333333333333".into();
-    second.spot_unwind_intent_id =
+    second.source_evaluation_id =
         "0x4444444444444444444444444444444444444444444444444444444444444444".into();
     second.client_order_index = 10;
     second.unwind_client_order_index = 20;
-    assert!(matches!(
-        store.create_intent(&second, 1_200).await,
-        Err(StoreError::Conflict)
-    ));
+    second.derive_identifiers().unwrap();
+    let second_result = store.create_intent(&second, 1_200).await;
+    assert!(
+        matches!(second_result, Err(StoreError::DailyTurnoverExceeded)),
+        "unexpected second intent result: {second_result:?}"
+    );
 
     let mut retired = second.clone();
-    retired.id = "0x5555555555555555555555555555555555555555555555555555555555555555".into();
-    retired.spot_unwind_intent_id =
+    retired.source_evaluation_id =
         "0x6666666666666666666666666666666666666666666666666666666666666666".into();
     retired.client_order_index = 30;
     retired.unwind_client_order_index = 40;
+    retired.derive_identifiers().unwrap();
     let mut retirement = pool.begin().await.unwrap();
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-        .bind("strategy-v1")
+        .bind(CANARY_RISK_VERSION)
         .execute(&mut *retirement)
         .await
         .unwrap();
@@ -435,7 +567,7 @@ async fn migration_and_promotion_gate_are_enforced() {
          (strategy_version, from_state, to_state, evidence_sha256, approved_by) \
          VALUES ($1, $2, $3, $4, $5)",
     )
-    .bind("strategy-v1")
+    .bind(CANARY_RISK_VERSION)
     .bind("canary_eligible")
     .bind("retired")
     .bind(&digest)
@@ -736,11 +868,20 @@ fn approved_evidence() -> PromotionEvidence {
 }
 
 fn intent() -> PairIntent {
-    PairIntent {
-        id: "0x1111111111111111111111111111111111111111111111111111111111111111".into(),
-        spot_unwind_intent_id: "0x2222222222222222222222222222222222222222222222222222222222222222"
+    let mut intent = PairIntent {
+        version: PAIR_INTENT_VERSION,
+        id: String::new(),
+        spot_unwind_intent_id: String::new(),
+        execution_account_id: "singleton-mainnet-canary".into(),
+        agent_id: "singleton-mainnet-canary".into(),
+        source_evaluation_id: "0x3333333333333333333333333333333333333333333333333333333333333333"
             .into(),
-        symbol: "NVDA".into(),
+        risk_version: CANARY_RISK_VERSION.into(),
+        lighter_account_index: 7,
+        lighter_api_key_index: 2,
+        robinhood_vault: "0x0000000000000000000000000000000000000002".into(),
+        robinhood_signer: "0x0000000000000000000000000000000000000003".into(),
+        symbol: "AAPL".into(),
         spot_token: "0x0000000000000000000000000000000000000001".into(),
         lighter_market_index: 101,
         spot_side: SpotSide::Buy,
@@ -771,7 +912,7 @@ fn intent() -> PairIntent {
         evidence: FrozenEvidence {
             dataset_manifest: "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                 .into(),
-            strategy_version: "strategy-v1".into(),
+            strategy_version: CANARY_RISK_VERSION.into(),
             market_manifest: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .into(),
             quote_block_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -782,5 +923,107 @@ fn intent() -> PairIntent {
             perp_mark_price: 25_000,
             estimated_total_cost_micros: 10_000,
         },
-    }
+    };
+    intent.derive_identifiers().unwrap();
+    intent
+}
+
+fn account_snapshots() -> [NewAccountSnapshot; 2] {
+    account_snapshots_for(
+        "singleton-mainnet-canary",
+        7,
+        "0x0000000000000000000000000000000000000002",
+        "0x0000000000000000000000000000000000000003",
+    )
+}
+
+fn account_snapshots_for(
+    execution_account_id: &str,
+    account_index: u64,
+    vault: &str,
+    signer: &str,
+) -> [NewAccountSnapshot; 2] {
+    [
+        NewAccountSnapshot {
+            execution_account_id: execution_account_id.into(),
+            source: "lighter-auth".into(),
+            source_session: format!("lighter-{execution_account_id}"),
+            source_sequence: 1,
+            payload: serde_json::json!({
+                "account_index": account_index,
+                "api_key_index": 2,
+                "nonce_aligned": true,
+                "no_unknown_orders": true,
+                "no_unknown_positions": true,
+                "collateral_ready": true,
+                "maintenance_margin_ratio_micros": 2_000_000,
+            }),
+            observed_at_ms: 1_198,
+            received_at_ms: 1_199,
+            expires_at_ms: 1_500,
+        },
+        NewAccountSnapshot {
+            execution_account_id: execution_account_id.into(),
+            source: "robinhood-chain".into(),
+            source_session: format!("robinhood-{execution_account_id}"),
+            source_sequence: 1,
+            payload: serde_json::json!({
+                "vault_address": vault,
+                "signer_address": signer,
+                "funding_ready": true,
+                "wiring_verified": true,
+                "finality_healthy": true,
+            }),
+            observed_at_ms: 1_198,
+            received_at_ms: 1_199,
+            expires_at_ms: 1_500,
+        },
+    ]
+}
+
+async fn register_account(
+    pool: &PgPool,
+    execution_account_id: &str,
+    agent_id: &str,
+    lighter_account_index: i64,
+    vault: &str,
+    signer: &str,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO execution_accounts
+            (execution_account_id, agent_id, strategy_version, risk_version, status,
+             lighter_account_index, lighter_api_key_index, robinhood_vault,
+             robinhood_signer, binding_sha256)
+        VALUES ($1, $2, $3, $3, 'active', $4, 2, $5, $6, repeat('b', 64))
+        "#,
+    )
+    .bind(execution_account_id)
+    .bind(agent_id)
+    .bind(CANARY_RISK_VERSION)
+    .bind(lighter_account_index)
+    .bind(vault)
+    .bind(signer)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO execution_account_control (execution_account_id, mode, reason) VALUES ($1, 'ACTIVE', 'integration test')",
+    )
+    .bind(execution_account_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_account_readiness
+            (execution_account_id, venue_approved, oracle_healthy, sequencer_healthy,
+             reconciliation_ready, exit_authority_ready, alerting_ready, safe_rotation_ready)
+        VALUES ($1, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE)
+        "#,
+    )
+    .bind(execution_account_id)
+    .execute(pool)
+    .await
+    .unwrap();
 }

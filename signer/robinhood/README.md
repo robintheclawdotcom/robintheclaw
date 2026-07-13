@@ -9,6 +9,13 @@ AWS KMS `ECC_SECG_P256K1` signing key, a migrated PostgreSQL journal, and a pinn
 manifest. Startup and every new signature verify the KMS address, chain ID, runtime code hashes,
 vault wiring, settlement asset, timelock, recovery Safe, and guardian through both providers.
 
+Production account routing uses the owner-only JSON registry selected with
+`ROBINHOOD_SIGNER_ACCOUNTS_FILE`. Each entry binds an opaque execution-account ID to one KMS key and
+one canonical vault, risk manager, adapter, signer, and code-hash graph. Requests contain only the
+execution-account ID as routing identity; the signer resolves the graph and rejects unknown
+accounts or any configured, on-chain, signed, or returned identity mismatch. The legacy
+single-account configuration additionally requires `ROBINHOOD_EXECUTION_ACCOUNT_ID`.
+
 Nonce advancement and signed-transaction persistence commit atomically. The reconciler validates
 every stored transaction before broadcast, follows every fee-replacement candidate until a
 canonical winner is known, and requires both providers to agree on receipt, `safe`, and

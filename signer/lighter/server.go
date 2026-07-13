@@ -23,12 +23,13 @@ import (
 const maxBodyBytes = 64 << 10
 
 type signerServer struct {
-	config config
-	client *client.TxClient
-	now    func() time.Time
-	slots  chan struct{}
-	rate   requestRate
-	nonces authNonces
+	config   config
+	clients  map[string]*client.TxClient
+	accounts map[string]lighterAccountConfig
+	now      func() time.Time
+	slots    chan struct{}
+	rate     requestRate
+	nonces   authNonces
 }
 
 type requestRate struct {
@@ -43,10 +44,13 @@ type authNonces struct {
 }
 
 type signedTransaction struct {
-	IntentID string          `json:"intentId,omitempty"`
-	TxType   uint8           `json:"txType"`
-	TxHash   string          `json:"txHash"`
-	TxInfo   json.RawMessage `json:"txInfo"`
+	ExecutionAccountID string          `json:"executionAccountId"`
+	AccountIndex       int64           `json:"accountIndex"`
+	APIKeyIndex        uint8           `json:"apiKeyIndex"`
+	IntentID           string          `json:"intentId,omitempty"`
+	TxType             uint8           `json:"txType"`
+	TxHash             string          `json:"txHash"`
+	TxInfo             json.RawMessage `json:"txInfo"`
 }
 
 type transactOptions struct {
@@ -55,69 +59,79 @@ type transactOptions struct {
 }
 
 type createOrderRequest struct {
-	IntentID        string          `json:"intentId"`
-	MarketIndex     int16           `json:"marketIndex"`
-	ClientOrderID   int64           `json:"clientOrderIndex"`
-	BaseAmount      int64           `json:"baseAmount"`
-	Price           uint32          `json:"price"`
-	IsAsk           bool            `json:"isAsk"`
-	OrderType       uint8           `json:"orderType"`
-	TimeInForce     uint8           `json:"timeInForce"`
-	ReduceOnly      bool            `json:"reduceOnly"`
-	TriggerPrice    uint32          `json:"triggerPrice"`
-	OrderExpiryMS   int64           `json:"orderExpiryMs"`
-	TransactOptions transactOptions `json:"transaction"`
+	ExecutionAccountID string          `json:"executionAccountId"`
+	IntentID           string          `json:"intentId"`
+	MarketIndex        int16           `json:"marketIndex"`
+	ClientOrderID      int64           `json:"clientOrderIndex"`
+	BaseAmount         int64           `json:"baseAmount"`
+	Price              uint32          `json:"price"`
+	IsAsk              bool            `json:"isAsk"`
+	OrderType          uint8           `json:"orderType"`
+	TimeInForce        uint8           `json:"timeInForce"`
+	ReduceOnly         bool            `json:"reduceOnly"`
+	TriggerPrice       uint32          `json:"triggerPrice"`
+	OrderExpiryMS      int64           `json:"orderExpiryMs"`
+	TransactOptions    transactOptions `json:"transaction"`
 }
 
 type modifyOrderRequest struct {
-	IntentID        string          `json:"intentId"`
-	MarketIndex     int16           `json:"marketIndex"`
-	OrderIndex      int64           `json:"orderIndex"`
-	BaseAmount      int64           `json:"baseAmount"`
-	Price           uint32          `json:"price"`
-	TriggerPrice    uint32          `json:"triggerPrice"`
-	TransactOptions transactOptions `json:"transaction"`
+	ExecutionAccountID string          `json:"executionAccountId"`
+	IntentID           string          `json:"intentId"`
+	MarketIndex        int16           `json:"marketIndex"`
+	OrderIndex         int64           `json:"orderIndex"`
+	BaseAmount         int64           `json:"baseAmount"`
+	Price              uint32          `json:"price"`
+	TriggerPrice       uint32          `json:"triggerPrice"`
+	TransactOptions    transactOptions `json:"transaction"`
 }
 
 type cancelOrderRequest struct {
-	IntentID        string          `json:"intentId"`
-	MarketIndex     int16           `json:"marketIndex"`
-	OrderIndex      int64           `json:"orderIndex"`
-	TransactOptions transactOptions `json:"transaction"`
+	ExecutionAccountID string          `json:"executionAccountId"`
+	IntentID           string          `json:"intentId"`
+	MarketIndex        int16           `json:"marketIndex"`
+	OrderIndex         int64           `json:"orderIndex"`
+	TransactOptions    transactOptions `json:"transaction"`
 }
 
 type cancelAllRequest struct {
-	IntentID        string          `json:"intentId"`
-	Mode            string          `json:"mode"`
-	ExecuteAtMS     int64           `json:"executeAtMs"`
-	TransactOptions transactOptions `json:"transaction"`
+	ExecutionAccountID string          `json:"executionAccountId"`
+	IntentID           string          `json:"intentId"`
+	Mode               string          `json:"mode"`
+	ExecuteAtMS        int64           `json:"executeAtMs"`
+	TransactOptions    transactOptions `json:"transaction"`
 }
 
 type authTokenRequest struct {
-	ExpiresAtUnix int64 `json:"expiresAtUnix"`
+	ExecutionAccountID string `json:"executionAccountId"`
+	ExpiresAtUnix      int64  `json:"expiresAtUnix"`
 }
 
 func newSignerServer(value config) (*signerServer, error) {
 	server := &signerServer{
-		config: value,
-		now:    time.Now,
-		nonces: authNonces{expires: make(map[string]time.Time)},
+		config:   value,
+		now:      time.Now,
+		nonces:   authNonces{expires: make(map[string]time.Time)},
+		clients:  make(map[string]*client.TxClient),
+		accounts: make(map[string]lighterAccountConfig),
 	}
 	if !value.enabled {
 		return server, nil
 	}
 	server.slots = make(chan struct{}, value.maxConcurrentRequests)
-	txClient, err := client.NewTxClient(
-		nil,
-		value.privateKey,
-		value.accountIndex,
-		value.apiKeyIndex,
-		value.chainID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("initialize Lighter signer: %w", err)
+	for _, account := range value.accounts {
+		txClient, err := client.NewTxClient(
+			nil,
+			account.PrivateKey,
+			account.AccountIndex,
+			account.APIKeyIndex,
+			account.ChainID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("initialize Lighter signer for %s: %w", account.ExecutionAccountID, err)
+		}
+		server.clients[account.ExecutionAccountID] = txClient
+		server.accounts[account.ExecutionAccountID] = account
 	}
-	server.client = txClient
 	return server, nil
 }
 
@@ -138,7 +152,7 @@ func (s *signerServer) livez(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *signerServer) readyz(w http.ResponseWriter, _ *http.Request) {
-	if !s.config.enabled || s.client == nil {
+	if !s.config.enabled || len(s.clients) == 0 {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "disabled"})
 		return
 	}
@@ -147,7 +161,7 @@ func (s *signerServer) readyz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *signerServer) authorize(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.config.enabled || s.client == nil {
+		if !s.config.enabled || len(s.clients) == 0 {
 			writeError(w, http.StatusServiceUnavailable, "signer disabled")
 			return
 		}
@@ -274,11 +288,12 @@ func (s *signerServer) createOrder(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
-	if request.IntentID == "" {
-		writeError(w, http.StatusBadRequest, "intentId is required")
+	client, account, ok := s.account(request.ExecutionAccountID)
+	if request.IntentID == "" || !ok {
+		writeError(w, http.StatusBadRequest, "execution account or intent is invalid")
 		return
 	}
-	tx, err := s.client.GetCreateOrderTransaction(&types.CreateOrderTxReq{
+	tx, err := client.GetCreateOrderTransaction(&types.CreateOrderTxReq{
 		MarketIndex:      request.MarketIndex,
 		ClientOrderIndex: request.ClientOrderID,
 		BaseAmount:       request.BaseAmount,
@@ -290,7 +305,7 @@ func (s *signerServer) createOrder(w http.ResponseWriter, r *http.Request) {
 		TriggerPrice:     request.TriggerPrice,
 		OrderExpiry:      request.OrderExpiryMS,
 	}, txOptions(request.TransactOptions))
-	writeSigned(w, request.IntentID, tx, err)
+	writeSigned(w, account, request.IntentID, tx, err)
 }
 
 func (s *signerServer) modifyOrder(w http.ResponseWriter, r *http.Request) {
@@ -298,18 +313,19 @@ func (s *signerServer) modifyOrder(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
-	if request.IntentID == "" {
-		writeError(w, http.StatusBadRequest, "intentId is required")
+	client, account, ok := s.account(request.ExecutionAccountID)
+	if request.IntentID == "" || !ok {
+		writeError(w, http.StatusBadRequest, "execution account or intent is invalid")
 		return
 	}
-	tx, err := s.client.GetModifyOrderTransaction(&types.ModifyOrderTxReq{
+	tx, err := client.GetModifyOrderTransaction(&types.ModifyOrderTxReq{
 		MarketIndex:  request.MarketIndex,
 		Index:        request.OrderIndex,
 		BaseAmount:   request.BaseAmount,
 		Price:        request.Price,
 		TriggerPrice: request.TriggerPrice,
 	}, txOptions(request.TransactOptions))
-	writeSigned(w, request.IntentID, tx, err)
+	writeSigned(w, account, request.IntentID, tx, err)
 }
 
 func (s *signerServer) cancelOrder(w http.ResponseWriter, r *http.Request) {
@@ -317,15 +333,16 @@ func (s *signerServer) cancelOrder(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
-	if request.IntentID == "" {
-		writeError(w, http.StatusBadRequest, "intentId is required")
+	client, account, ok := s.account(request.ExecutionAccountID)
+	if request.IntentID == "" || !ok {
+		writeError(w, http.StatusBadRequest, "execution account or intent is invalid")
 		return
 	}
-	tx, err := s.client.GetCancelOrderTransaction(&types.CancelOrderTxReq{
+	tx, err := client.GetCancelOrderTransaction(&types.CancelOrderTxReq{
 		MarketIndex: request.MarketIndex,
 		Index:       request.OrderIndex,
 	}, txOptions(request.TransactOptions))
-	writeSigned(w, request.IntentID, tx, err)
+	writeSigned(w, account, request.IntentID, tx, err)
 }
 
 func (s *signerServer) cancelAll(w http.ResponseWriter, r *http.Request) {
@@ -333,8 +350,9 @@ func (s *signerServer) cancelAll(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
-	if request.IntentID == "" {
-		writeError(w, http.StatusBadRequest, "intentId is required")
+	client, account, ok := s.account(request.ExecutionAccountID)
+	if request.IntentID == "" || !ok {
+		writeError(w, http.StatusBadRequest, "execution account or intent is invalid")
 		return
 	}
 	var mode uint8
@@ -351,11 +369,11 @@ func (s *signerServer) cancelAll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid cancel-all mode")
 		return
 	}
-	tx, err := s.client.GetCancelAllOrdersTransaction(&types.CancelAllOrdersTxReq{
+	tx, err := client.GetCancelAllOrdersTransaction(&types.CancelAllOrdersTxReq{
 		TimeInForce: mode,
 		Time:        request.ExecuteAtMS,
 	}, txOptions(request.TransactOptions))
-	writeSigned(w, request.IntentID, tx, err)
+	writeSigned(w, account, request.IntentID, tx, err)
 }
 
 func (s *signerServer) authToken(w http.ResponseWriter, r *http.Request) {
@@ -363,19 +381,25 @@ func (s *signerServer) authToken(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
+	client, account, ok := s.account(request.ExecutionAccountID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "execution account is invalid")
+		return
+	}
 	now := time.Now().Unix()
 	if request.ExpiresAtUnix <= now || request.ExpiresAtUnix > now+8*60*60 {
 		writeError(w, http.StatusBadRequest, "expiry must be within eight hours")
 		return
 	}
-	token, err := s.client.GetAuthToken(time.Unix(request.ExpiresAtUnix, 0))
+	token, err := client.GetAuthToken(time.Unix(request.ExpiresAtUnix, 0))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "unable to create auth token")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token":         token,
-		"expiresAtUnix": request.ExpiresAtUnix,
+		"executionAccountId": account.ExecutionAccountID,
+		"token":              token,
+		"expiresAtUnix":      request.ExpiresAtUnix,
 	})
 }
 
@@ -384,7 +408,7 @@ func txOptions(value transactOptions) *types.TransactOpts {
 	return &types.TransactOpts{Nonce: &nonce, ExpiredAt: value.ExpiresAtMS}
 }
 
-func writeSigned(w http.ResponseWriter, intentID string, tx txtypes.TxInfo, err error) {
+func writeSigned(w http.ResponseWriter, account lighterAccountConfig, intentID string, tx txtypes.TxInfo, err error) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "transaction declined")
 		return
@@ -395,11 +419,20 @@ func writeSigned(w http.ResponseWriter, intentID string, tx txtypes.TxInfo, err 
 		return
 	}
 	writeJSON(w, http.StatusOK, signedTransaction{
-		IntentID: intentID,
-		TxType:   tx.GetTxType(),
-		TxHash:   tx.GetTxHash(),
-		TxInfo:   json.RawMessage(info),
+		ExecutionAccountID: account.ExecutionAccountID,
+		AccountIndex:       account.AccountIndex,
+		APIKeyIndex:        account.APIKeyIndex,
+		IntentID:           intentID,
+		TxType:             tx.GetTxType(),
+		TxHash:             tx.GetTxHash(),
+		TxInfo:             json.RawMessage(info),
 	})
+}
+
+func (s *signerServer) account(executionAccountID string) (*client.TxClient, lighterAccountConfig, bool) {
+	client, exists := s.clients[executionAccountID]
+	account, configured := s.accounts[executionAccountID]
+	return client, account, exists && configured
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, target any) error {

@@ -1,11 +1,15 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const USD_SCALE: u64 = 1_000_000;
 pub const CANARY_LEG_CAP_MICROS: u64 = 25 * USD_SCALE;
 pub const CANARY_GROSS_CAP_MICROS: u64 = 50 * USD_SCALE;
-const LEG_NAV_DENOMINATOR: u64 = 400;
-const GROSS_NAV_DENOMINATOR: u64 = 200;
+pub const CANARY_DAILY_TURNOVER_CAP_MICROS: u64 = 50 * USD_SCALE;
+pub const PAIR_INTENT_VERSION: u8 = 2;
+pub const CANARY_RISK_VERSION: &str = "basis-aapl-v1";
+const PAIR_INTENT_DOMAIN: &[u8] = b"robin.execution.pair-intent.v2\0";
+const SPOT_UNWIND_DOMAIN: &[u8] = b"robin.execution.spot-unwind.v2\0";
 const MIN_ORDER_EXPIRY_MS: u64 = 5 * 60 * 1_000;
 const MAX_ORDER_EXPIRY_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const MAX_CLIENT_ORDER_INDEX: u64 = (1 << 48) - 1;
@@ -42,8 +46,17 @@ pub struct FrozenEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairIntent {
+    pub version: u8,
     pub id: String,
     pub spot_unwind_intent_id: String,
+    pub execution_account_id: String,
+    pub agent_id: String,
+    pub source_evaluation_id: String,
+    pub risk_version: String,
+    pub lighter_account_index: u64,
+    pub lighter_api_key_index: u8,
+    pub robinhood_vault: String,
+    pub robinhood_signer: String,
     pub symbol: String,
     pub spot_token: String,
     pub lighter_market_index: u32,
@@ -88,8 +101,16 @@ pub struct SpotAmounts {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PairIntentError {
+    #[error("only PairIntent v2 is accepted")]
+    InvalidVersion,
     #[error("intent identity and market fields are required")]
     MissingIdentity,
+    #[error("intent identifiers are not the canonical v2 derivation")]
+    IdentityMismatch,
+    #[error("execution account binding is invalid")]
+    InvalidAccountBinding,
+    #[error("risk policy is not the approved AAPL v1 policy")]
+    InvalidRiskPolicy,
     #[error("v1 supports long spot and short perp only")]
     UnsupportedDirection,
     #[error("both legs must be positive")]
@@ -111,10 +132,35 @@ pub enum PairIntentError {
 }
 
 impl PairIntent {
+    pub fn derive_identifiers(&mut self) -> Result<(), PairIntentError> {
+        self.id = self.calculate_id()?;
+        self.spot_unwind_intent_id = self.calculate_spot_unwind_id();
+        Ok(())
+    }
+
+    pub fn calculate_id(&self) -> Result<String, PairIntentError> {
+        let mut material = self.clone();
+        material.id.clear();
+        material.spot_unwind_intent_id.clear();
+        let encoded =
+            serde_json::to_vec(&material).map_err(|_| PairIntentError::MissingIdentity)?;
+        Ok(domain_hash(PAIR_INTENT_DOMAIN, &encoded))
+    }
+
+    pub fn calculate_spot_unwind_id(&self) -> String {
+        domain_hash(SPOT_UNWIND_DOMAIN, self.id.as_bytes())
+    }
+
     pub fn validate(&self) -> Result<(), PairIntentError> {
+        if self.version != PAIR_INTENT_VERSION {
+            return Err(PairIntentError::InvalidVersion);
+        }
         if !valid_bytes32(&self.id)
             || !valid_bytes32(&self.spot_unwind_intent_id)
             || self.spot_unwind_intent_id == self.id
+            || !valid_execution_id(&self.execution_account_id)
+            || !valid_execution_id(&self.agent_id)
+            || !valid_bytes32(&self.source_evaluation_id)
             || self.symbol.is_empty()
             || !valid_address(&self.spot_token)
             || !valid_bytes32(&self.evidence.dataset_manifest)
@@ -123,6 +169,25 @@ impl PairIntent {
             || !valid_bytes32(&self.evidence.quote_block_hash)
         {
             return Err(PairIntentError::MissingIdentity);
+        }
+        if self.calculate_id().as_deref() != Ok(self.id.as_str())
+            || self.calculate_spot_unwind_id() != self.spot_unwind_intent_id
+        {
+            return Err(PairIntentError::IdentityMismatch);
+        }
+        if self.lighter_account_index == 0
+            || !(2..=254).contains(&self.lighter_api_key_index)
+            || !valid_address(&self.robinhood_vault)
+            || !valid_address(&self.robinhood_signer)
+            || self.robinhood_vault == self.robinhood_signer
+        {
+            return Err(PairIntentError::InvalidAccountBinding);
+        }
+        if self.risk_version != CANARY_RISK_VERSION
+            || self.evidence.strategy_version != CANARY_RISK_VERSION
+            || self.symbol != "AAPL"
+        {
+            return Err(PairIntentError::InvalidRiskPolicy);
         }
         if self.spot_side != SpotSide::Buy || self.perp_side != PerpSide::Short {
             return Err(PairIntentError::UnsupportedDirection);
@@ -143,11 +208,8 @@ impl PairIntent {
         if self.spot_notional_micros != self.perp_notional_micros {
             return Err(PairIntentError::InvalidExecution);
         }
-        let nav_leg_cap = self.nav_micros / LEG_NAV_DENOMINATOR;
-        let leg_cap = CANARY_LEG_CAP_MICROS.min(nav_leg_cap);
-        if leg_cap == 0
-            || self.spot_notional_micros > leg_cap
-            || self.perp_notional_micros > leg_cap
+        if self.spot_notional_micros > CANARY_LEG_CAP_MICROS
+            || self.perp_notional_micros > CANARY_LEG_CAP_MICROS
         {
             return Err(PairIntentError::LegCapExceeded);
         }
@@ -155,8 +217,7 @@ impl PairIntent {
             .spot_notional_micros
             .checked_add(self.perp_notional_micros)
             .ok_or(PairIntentError::GrossCapExceeded)?;
-        let gross_cap = CANARY_GROSS_CAP_MICROS.min(self.nav_micros / GROSS_NAV_DENOMINATOR);
-        if gross_cap == 0 || gross > gross_cap {
+        if gross > CANARY_GROSS_CAP_MICROS {
             return Err(PairIntentError::GrossCapExceeded);
         }
         if self.leverage_micros == 0 || self.leverage_micros > USD_SCALE {
@@ -314,6 +375,20 @@ fn valid_address(value: &str) -> bool {
         && value[2..].bytes().any(|byte| byte != b'0')
 }
 
+fn valid_execution_id(value: &str) -> bool {
+    (8..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn domain_hash(domain: &[u8], payload: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update(payload);
+    format!("0x{}", hex::encode(digest.finalize()))
+}
+
 pub(crate) mod u128_string {
     use serde::{de::Error, Deserialize, Deserializer, Serializer};
 
@@ -361,11 +436,20 @@ mod tests {
     use super::*;
 
     fn intent() -> PairIntent {
-        PairIntent {
-            id: "0x1111111111111111111111111111111111111111111111111111111111111111".into(),
-            spot_unwind_intent_id:
-                "0x2222222222222222222222222222222222222222222222222222222222222222".into(),
-            symbol: "NVDA".into(),
+        let mut intent = PairIntent {
+            version: PAIR_INTENT_VERSION,
+            id: String::new(),
+            spot_unwind_intent_id: String::new(),
+            execution_account_id: "account-canary-1".into(),
+            agent_id: "agent-canary-1".into(),
+            source_evaluation_id:
+                "0x3333333333333333333333333333333333333333333333333333333333333333".into(),
+            risk_version: CANARY_RISK_VERSION.into(),
+            lighter_account_index: 7,
+            lighter_api_key_index: 2,
+            robinhood_vault: "0x0000000000000000000000000000000000000002".into(),
+            robinhood_signer: "0x0000000000000000000000000000000000000003".into(),
+            symbol: "AAPL".into(),
             spot_token: "0x0000000000000000000000000000000000000001".into(),
             lighter_market_index: 101,
             spot_side: SpotSide::Buy,
@@ -396,7 +480,7 @@ mod tests {
             evidence: FrozenEvidence {
                 dataset_manifest:
                     "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into(),
-                strategy_version: "strategy".into(),
+                strategy_version: CANARY_RISK_VERSION.into(),
                 market_manifest:
                     "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 quote_block_hash:
@@ -407,7 +491,9 @@ mod tests {
                 perp_mark_price: 25_000,
                 estimated_total_cost_micros: 10_000,
             },
-        }
+        };
+        intent.derive_identifiers().unwrap();
+        intent
     }
 
     #[test]
@@ -419,6 +505,7 @@ mod tests {
     fn short_spot_is_rejected() {
         let mut value = intent();
         value.spot_side = SpotSide::Sell;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::UnsupportedDirection));
     }
 
@@ -426,6 +513,7 @@ mod tests {
     fn multiplier_mismatch_is_rejected() {
         let mut value = intent();
         value.evidence.ui_multiplier_e18 = 400_000_000_000_000_000;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::ExposureMismatch));
     }
 
@@ -434,9 +522,11 @@ mod tests {
         let mut value = intent();
         value.perp_base_amount = 1_000;
         value.perp_base_decimals = 3;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Ok(()));
 
         value.raw_spot_amount = 2_000_001;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::ExposureMismatch));
     }
 
@@ -444,14 +534,17 @@ mod tests {
     fn execution_bounds_are_enforced() {
         let mut value = intent();
         value.minimum_spot_amount_out = value.raw_spot_amount + 1;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::InvalidExecution));
 
         let mut value = intent();
         value.perp_order_expiry_ms = value.created_at_ms + MIN_ORDER_EXPIRY_MS - 1;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::InvalidExecution));
 
         let mut value = intent();
         value.client_order_index = MAX_CLIENT_ORDER_INDEX + 1;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::InvalidExecution));
     }
 
@@ -487,10 +580,12 @@ mod tests {
         value.spot_notional_micros = 25_001_000;
         value.perp_notional_micros = 25_001_000;
         value.settlement_amount_in = 25_001_000;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::LegCapExceeded));
 
         let mut value = intent();
         value.leverage_micros += 1;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::InvalidLeverage));
     }
 
@@ -498,6 +593,7 @@ mod tests {
     fn perp_notional_is_derived_from_executable_quantity_and_price() {
         let mut value = intent();
         value.perp_notional_micros = 1;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::InvalidExecution));
 
         let value = intent();
@@ -509,10 +605,12 @@ mod tests {
         let mut value = intent();
         value.spot_notional_micros = 1;
         value.settlement_amount_in = 1;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::InvalidExecution));
 
         let mut value = intent();
         value.raw_spot_amount += 1;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::ExposureMismatch));
     }
 
@@ -524,18 +622,23 @@ mod tests {
     }
 
     #[test]
-    fn nav_relative_caps_are_enforced() {
+    fn account_nav_does_not_reduce_fixed_canary_caps() {
         let mut value = intent();
-        value.nav_micros = 4_000_000_000;
-        assert_eq!(value.validate(), Err(PairIntentError::LegCapExceeded));
-
-        value.spot_notional_micros = 10_000_000;
-        value.perp_notional_micros = 10_000_000;
-        value.settlement_amount_in = 10_000_000;
-        value.minimum_unwind_settlement_out = 9_600_000;
-        value.raw_spot_amount = 800_000;
-        value.minimum_spot_amount_out = 796_000;
-        value.perp_base_amount = 400_000;
+        value.nav_micros = 1;
+        value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Ok(()));
+    }
+
+    #[test]
+    fn identifiers_are_domain_separated_and_cover_account_binding() {
+        let value = intent();
+        assert_ne!(value.id, value.spot_unwind_intent_id);
+        let mut other = value.clone();
+        other.execution_account_id = "account-canary-2".into();
+        other.derive_identifiers().unwrap();
+        assert_ne!(value.id, other.id);
+
+        other.robinhood_vault = "0x0000000000000000000000000000000000000004".into();
+        assert_eq!(other.validate(), Err(PairIntentError::IdentityMismatch));
     }
 }

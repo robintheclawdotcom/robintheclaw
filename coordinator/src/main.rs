@@ -21,14 +21,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.store.clone().expect("validated execution store"),
                 state.signers.clone().expect("validated signer clients"),
                 state.config.worker_id.clone().expect("validated worker ID"),
-                state
-                    .config
-                    .lighter_account_index
-                    .expect("validated Lighter account"),
-                state
-                    .config
-                    .lighter_api_key_index
-                    .expect("validated Lighter API key"),
             )
             .run(shutdown_rx),
         ))

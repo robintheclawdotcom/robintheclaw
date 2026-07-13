@@ -206,6 +206,18 @@ func TestSignerConcurrencyLimit(t *testing.T) {
 	}
 }
 
+func TestUnknownExecutionAccountIsRejectedBeforeSigning(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	server := authTestServer(now)
+	body := []byte(`{"executionAccountId":"account-canary-2","intentId":"intent-1","marketIndex":1,"clientOrderIndex":1,"baseAmount":1,"price":1,"isAsk":true,"orderType":0,"timeInForce":0,"reduceOnly":false,"triggerPrice":0,"orderExpiryMs":0,"transaction":{"nonce":1,"expiresAtMs":1800000300000}}`)
+	request := signedRequest(server.config, body, strings.Repeat("u", 32), now)
+	response := httptest.NewRecorder()
+	server.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown account got status %d", response.Code)
+	}
+}
+
 func TestSecurityHeaders(t *testing.T) {
 	server, err := newSignerServer(config{})
 	if err != nil {
@@ -227,6 +239,7 @@ func TestLoadConfigRequiresHMACAuthentication(t *testing.T) {
 	t.Setenv("LIGHTER_SIGNER_HMAC_KEY", strings.Repeat("61", 32))
 	t.Setenv("SIGNER_CALLER_ID", "execution-coordinator")
 	t.Setenv("LIGHTER_API_PRIVATE_KEY", "test-private-key")
+	t.Setenv("LIGHTER_EXECUTION_ACCOUNT_ID", "account-canary-1")
 	t.Setenv("LIGHTER_CHAIN_ID", "300")
 	t.Setenv("LIGHTER_ACCOUNT_INDEX", "1")
 	t.Setenv("LIGHTER_API_KEY_INDEX", "2")
@@ -253,8 +266,15 @@ func authTestServer(now time.Time) *signerServer {
 		maxConcurrentRequests: 1,
 	}
 	return &signerServer{
-		config: value,
-		client: &client.TxClient{},
+		config:  value,
+		clients: map[string]*client.TxClient{"account-canary-1": {}},
+		accounts: map[string]lighterAccountConfig{
+			"account-canary-1": {
+				ExecutionAccountID: "account-canary-1",
+				AccountIndex:       7,
+				APIKeyIndex:        2,
+			},
+		},
 		now:    func() time.Time { return now },
 		slots:  make(chan struct{}, value.maxConcurrentRequests),
 		nonces: authNonces{expires: make(map[string]time.Time)},

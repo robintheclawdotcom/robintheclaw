@@ -176,9 +176,15 @@ func (writer *Writer) Submit(ctx context.Context, request ExecuteRequest) (Submi
 	if err != nil {
 		return Submission{}, err
 	}
+	if request.ExecutionAccountID != writer.config.ExecutionAccountID {
+		return Submission{}, errors.New("execution account does not match writer binding")
+	}
 	if existing, err := writer.journal.Existing(ctx, request.RequestID, digest); err != nil {
 		return Submission{}, err
 	} else if existing != nil {
+		existing.ExecutionAccountID = writer.config.ExecutionAccountID
+		existing.VaultAddress = strings.ToLower(writer.config.VaultAddress.Hex())
+		existing.SignerAddress = strings.ToLower(writer.config.SignerAddress.Hex())
 		return *existing, nil
 	}
 	if !writer.Ready() {
@@ -302,11 +308,14 @@ func (writer *Writer) Submit(ctx context.Context, request ExecuteRequest) (Submi
 		return Submission{}, errors.New("encode signed transaction")
 	}
 	submission := Submission{
-		RequestID: request.RequestID,
-		IntentID:  strings.ToLower(common.BytesToHash(intent.ID[:]).Hex()),
-		TxHash:    strings.ToLower(signed.Hash().Hex()),
-		Nonce:     nonce,
-		Status:    SubmissionSigned,
+		ExecutionAccountID: writer.config.ExecutionAccountID,
+		VaultAddress:       strings.ToLower(writer.config.VaultAddress.Hex()),
+		SignerAddress:      strings.ToLower(writer.config.SignerAddress.Hex()),
+		RequestID:          request.RequestID,
+		IntentID:           strings.ToLower(common.BytesToHash(intent.ID[:]).Hex()),
+		TxHash:             strings.ToLower(signed.Hash().Hex()),
+		Nonce:              nonce,
+		Status:             SubmissionSigned,
 	}
 	record := signedRecord{
 		Submission:     submission,

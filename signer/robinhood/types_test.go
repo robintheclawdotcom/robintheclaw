@@ -10,7 +10,8 @@ import (
 
 func validRequest() ExecuteRequest {
 	return ExecuteRequest{
-		RequestID: "request-1",
+		ExecutionAccountID: "account-canary-1",
+		RequestID:          "request-1",
 		Intent: SpotIntentRequest{
 			ID:            "0x" + "11" + string(bytes.Repeat([]byte{'0'}, 62)),
 			StockToken:    "0x0000000000000000000000000000000000000001",

@@ -19,11 +19,12 @@ import (
 )
 
 type Server struct {
-	config Config
-	writer *Writer
-	once   sync.Once
-	slots  chan struct{}
-	rate   requestRate
+	config  Config
+	writer  *Writer
+	writers map[string]*Writer
+	once    sync.Once
+	slots   chan struct{}
+	rate    requestRate
 }
 
 type requestRate struct {
@@ -45,7 +46,7 @@ func (server *Server) live(response http.ResponseWriter, _ *http.Request) {
 }
 
 func (server *Server) ready(response http.ResponseWriter, _ *http.Request) {
-	if !server.config.Enabled || server.writer == nil || !server.writer.Ready() {
+	if !server.config.Enabled || !server.anyWriterReady() {
 		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"status": "unready"})
 		return
 	}
@@ -53,7 +54,7 @@ func (server *Server) ready(response http.ResponseWriter, _ *http.Request) {
 }
 
 func (server *Server) executeSpot(response http.ResponseWriter, request *http.Request) {
-	if !server.config.Enabled || server.writer == nil {
+	if !server.config.Enabled || (server.writer == nil && len(server.writers) == 0) {
 		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "signer unavailable"})
 		return
 	}
@@ -95,7 +96,12 @@ func (server *Server) executeSpot(response http.ResponseWriter, request *http.Re
 		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
-	submission, err := server.writer.Submit(ctx, payload)
+	writer := server.writerFor(payload.ExecutionAccountID)
+	if writer == nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "execution account is not registered"})
+		return
+	}
+	submission, err := writer.Submit(ctx, payload)
 	if err != nil {
 		var tracked *journaledSubmissionError
 		if errors.As(err, &tracked) {
@@ -160,7 +166,44 @@ func (server *Server) authorized(request *http.Request, body []byte) bool {
 		return false
 	}
 	expiresAt := signedAt.Add(time.Minute)
-	return server.writer.journal.ClaimAuthNonce(request.Context(), nonce, expiresAt) == nil
+	var binding struct {
+		ExecutionAccountID string `json:"execution_account_id"`
+	}
+	if json.Unmarshal(body, &binding) != nil {
+		return false
+	}
+	writer := server.writerFor(binding.ExecutionAccountID)
+	if writer == nil {
+		return false
+	}
+	return writer.journal.ClaimAuthNonce(request.Context(), nonce, expiresAt) == nil
+}
+
+func (server *Server) writerFor(executionAccountID string) *Writer {
+	if writer := server.writers[executionAccountID]; writer != nil {
+		return writer
+	}
+	if server.writer != nil && executionAccountID == server.config.ExecutionAccountID {
+		return server.writer
+	}
+	return nil
+}
+
+func (server *Server) anyWriterReady() bool {
+	configured := 0
+	if server.writer != nil {
+		configured++
+		if !server.writer.Ready() {
+			return false
+		}
+	}
+	for _, writer := range server.writers {
+		configured++
+		if !writer.Ready() {
+			return false
+		}
+	}
+	return configured > 0
 }
 
 func validNonce(value string) bool {

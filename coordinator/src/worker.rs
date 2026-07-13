@@ -24,8 +24,6 @@ pub struct Worker {
     store: Store,
     signers: SignerClients,
     worker_id: String,
-    lighter_account_index: i64,
-    lighter_api_key_index: u8,
 }
 
 #[derive(Debug, Error)]
@@ -56,19 +54,11 @@ struct ExitAuthority {
 }
 
 impl Worker {
-    pub fn new(
-        store: Store,
-        signers: SignerClients,
-        worker_id: String,
-        lighter_account_index: i64,
-        lighter_api_key_index: u8,
-    ) -> Self {
+    pub fn new(store: Store, signers: SignerClients, worker_id: String) -> Self {
         Self {
             store,
             signers,
             worker_id,
-            lighter_account_index,
-            lighter_api_key_index,
         }
     }
 
@@ -219,9 +209,12 @@ impl Worker {
         let signed = match recovered_signed {
             Some(signed) => signed,
             None => {
+                let account_index = i64::try_from(action.intent.lighter_account_index)
+                    .map_err(|_| WorkerError::InvalidPayload)?;
+                let api_key_index = action.intent.lighter_api_key_index;
                 let observed = match self
                     .signers
-                    .fetch_lighter_nonce(self.lighter_account_index, self.lighter_api_key_index)
+                    .fetch_lighter_nonce(account_index, api_key_index)
                     .await
                 {
                     Ok(nonce) => nonce,
@@ -236,14 +229,30 @@ impl Worker {
                         &action.id,
                         &self.worker_id,
                         &action.lease_token,
-                        self.lighter_account_index,
-                        self.lighter_api_key_index,
+                        account_index,
+                        api_key_index,
                         observed,
                     )
                     .await?;
                 let request = lighter_request(&action, nonce, unwind)?;
                 match self.signers.sign_lighter_create_order(&request).await {
                     Ok(signed) => {
+                        if signed.execution_account_id != action.intent.execution_account_id
+                            || u64::try_from(signed.account_index).ok()
+                                != Some(action.intent.lighter_account_index)
+                            || signed.api_key_index != action.intent.lighter_api_key_index
+                        {
+                            self.store
+                                .fail_safe_action(
+                                    &action.id,
+                                    &self.worker_id,
+                                    &action.lease_token,
+                                    "lighter_signer_account_mismatch",
+                                    json!({"stage": "lighter_signing"}),
+                                )
+                                .await?;
+                            return Ok(());
+                        }
                         self.store
                             .record_action_result(
                                 &action.id,
@@ -291,8 +300,9 @@ impl Worker {
             .store
             .validate_lighter_nonce_binding(
                 &action.id,
-                self.lighter_account_index,
-                self.lighter_api_key_index,
+                i64::try_from(action.intent.lighter_account_index)
+                    .map_err(|_| WorkerError::InvalidPayload)?,
+                action.intent.lighter_api_key_index,
             )
             .await
         {
@@ -311,6 +321,7 @@ impl Worker {
                     &self.worker_id,
                     &action.lease_token,
                     action.control_version,
+                    action.account_control_version,
                 )
                 .await
             {
@@ -747,6 +758,7 @@ impl Worker {
             return Ok(());
         };
         let expected = RobinhoodExecuteRequest {
+            execution_account_id: action.intent.execution_account_id.clone(),
             request_id: recovered_request
                 .as_ref()
                 .map_or_else(|| action.id.clone(), |request| request.request_id.clone()),
@@ -766,6 +778,20 @@ impl Worker {
             .await?;
         match self.signers.execute_robinhood_spot(&request).await {
             Ok(submission) => {
+                if submission.vault_address != action.intent.robinhood_vault
+                    || submission.signer_address != action.intent.robinhood_signer
+                {
+                    self.store
+                        .fail_safe_action(
+                            &action.id,
+                            &self.worker_id,
+                            &action.lease_token,
+                            "robinhood_signer_account_mismatch",
+                            json!({"stage": "spot_signing"}),
+                        )
+                        .await?;
+                    return Ok(());
+                }
                 let result =
                     serde_json::to_value(&submission).map_err(|_| WorkerError::InvalidPayload)?;
                 self.store
@@ -1173,6 +1199,7 @@ impl Worker {
         }
         let minimum = unwind_minimum_out(&action, spot_amount)?;
         let expected = RobinhoodExecuteRequest {
+            execution_account_id: action.intent.execution_account_id.clone(),
             request_id: recovered_request
                 .as_ref()
                 .map_or_else(|| action.id.clone(), |request| request.request_id.clone()),
@@ -1192,6 +1219,20 @@ impl Worker {
             .await?;
         match self.signers.execute_robinhood_spot(&request).await {
             Ok(submission) => {
+                if submission.vault_address != action.intent.robinhood_vault
+                    || submission.signer_address != action.intent.robinhood_signer
+                {
+                    self.store
+                        .fail_safe_action(
+                            &action.id,
+                            &self.worker_id,
+                            &action.lease_token,
+                            "robinhood_signer_account_mismatch",
+                            json!({"stage": "spot_unwind_signing"}),
+                        )
+                        .await?;
+                    return Ok(());
+                }
                 let result =
                     serde_json::to_value(&submission).map_err(|_| WorkerError::InvalidPayload)?;
                 self.store
@@ -1592,6 +1633,7 @@ fn lighter_request(
         action.intent.client_order_index
     };
     Ok(LighterCreateOrderRequest {
+        execution_account_id: action.intent.execution_account_id.clone(),
         intent_id: action.intent.id.clone(),
         market_index: i16::try_from(action.intent.lighter_market_index)
             .map_err(|_| WorkerError::InvalidPayload)?,
@@ -1980,11 +2022,20 @@ mod tests {
     }
 
     fn action(kind: ActionKind, payload: Value) -> ClaimedAction {
-        let intent = PairIntent {
-            id: "0x1111111111111111111111111111111111111111111111111111111111111111".into(),
-            spot_unwind_intent_id:
-                "0x2222222222222222222222222222222222222222222222222222222222222222".into(),
-            symbol: "NVDA".into(),
+        let mut intent = PairIntent {
+            version: execution::PAIR_INTENT_VERSION,
+            id: String::new(),
+            spot_unwind_intent_id: String::new(),
+            execution_account_id: "account-canary-1".into(),
+            agent_id: "agent-canary-1".into(),
+            source_evaluation_id:
+                "0x3333333333333333333333333333333333333333333333333333333333333333".into(),
+            risk_version: execution::CANARY_RISK_VERSION.into(),
+            lighter_account_index: 7,
+            lighter_api_key_index: 2,
+            robinhood_vault: "0x0000000000000000000000000000000000000002".into(),
+            robinhood_signer: "0x0000000000000000000000000000000000000003".into(),
+            symbol: "AAPL".into(),
             spot_token: "0x0000000000000000000000000000000000000001".into(),
             lighter_market_index: 101,
             spot_side: SpotSide::Buy,
@@ -2015,7 +2066,7 @@ mod tests {
             evidence: FrozenEvidence {
                 dataset_manifest:
                     "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into(),
-                strategy_version: "strategy".into(),
+                strategy_version: execution::CANARY_RISK_VERSION.into(),
                 market_manifest:
                     "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 quote_block_hash:
@@ -2027,6 +2078,7 @@ mod tests {
                 estimated_total_cost_micros: 10_000,
             },
         };
+        intent.derive_identifiers().unwrap();
         ClaimedAction {
             id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             lease_token: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
@@ -2037,6 +2089,7 @@ mod tests {
             result: None,
             attempts: 1,
             control_version: 1,
+            account_control_version: 1,
         }
     }
 

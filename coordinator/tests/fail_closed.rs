@@ -14,6 +14,8 @@ fn disabled_config() -> Config {
         exit_caller_id: None,
         venue_hmac_key: None,
         venue_caller_id: None,
+        account_hmac_key: None,
+        account_caller_id: None,
         market_hmac_key: None,
         market_caller_id: None,
         lighter_signer_url: None,
@@ -22,8 +24,6 @@ fn disabled_config() -> Config {
         lighter_signer_hmac_key: None,
         robinhood_signer_hmac_key: None,
         lighter_api_url: None,
-        lighter_account_index: None,
-        lighter_api_key_index: None,
         worker_id: None,
     }
 }

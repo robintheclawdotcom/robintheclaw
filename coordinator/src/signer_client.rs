@@ -22,6 +22,7 @@ pub struct SignerClients {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LighterCreateOrderRequest {
+    pub execution_account_id: String,
     pub intent_id: String,
     pub market_index: i16,
     pub client_order_index: i64,
@@ -46,6 +47,9 @@ pub struct LighterTransactionOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedLighterTransaction {
+    pub execution_account_id: String,
+    pub account_index: i64,
+    pub api_key_index: u8,
     pub intent_id: String,
     pub tx_type: u8,
     pub tx_hash: String,
@@ -63,6 +67,7 @@ pub struct LighterSubmission {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RobinhoodExecuteRequest {
+    pub execution_account_id: String,
     pub request_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replaces_request_id: Option<String>,
@@ -82,6 +87,9 @@ pub struct RobinhoodSpotIntent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RobinhoodSubmission {
+    pub execution_account_id: String,
+    pub vault_address: String,
+    pub signer_address: String,
     pub request_id: String,
     pub intent_id: String,
     pub tx_hash: String,
@@ -147,7 +155,10 @@ impl SignerClients {
                 request,
             )
             .await?;
-        if signed.intent_id != request.intent_id
+        if signed.execution_account_id != request.execution_account_id
+            || signed.account_index <= 0
+            || !(2..=254).contains(&signed.api_key_index)
+            || signed.intent_id != request.intent_id
             || !valid_hash(&signed.tx_hash)
             || !signed.tx_info.is_object()
         {
@@ -244,7 +255,11 @@ impl SignerClients {
                 request,
             )
             .await?;
-        if submission.request_id != request.request_id
+        if submission.execution_account_id != request.execution_account_id
+            || !valid_address(&submission.vault_address)
+            || !valid_address(&submission.signer_address)
+            || submission.vault_address == submission.signer_address
+            || submission.request_id != request.request_id
             || submission.intent_id != request.intent.id
             || !valid_hash(&submission.tx_hash)
         {
@@ -351,6 +366,15 @@ fn valid_hash(value: &str) -> bool {
         && value[2..].bytes().any(|byte| byte != b'0')
 }
 
+fn valid_address(value: &str) -> bool {
+    value.len() == 42
+        && value.starts_with("0x")
+        && value[2..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && value[2..].bytes().any(|byte| byte != b'0')
+}
+
 fn accepted_robinhood_submission(status: &str) -> bool {
     matches!(
         status,
@@ -435,6 +459,9 @@ mod tests {
                      body: Bytes| async move {
                         *state.lock().unwrap() = Some((headers, body));
                         Json(serde_json::json!({
+                            "executionAccountId": "account-canary-1",
+                            "accountIndex": 7,
+                            "apiKeyIndex": 2,
                             "intentId": "intent-1",
                             "txType": 14,
                             "txHash": HASH,
@@ -481,6 +508,9 @@ mod tests {
         let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
         let result = clients
             .broadcast_lighter(&SignedLighterTransaction {
+                execution_account_id: "account-canary-1".into(),
+                account_index: 7,
+                api_key_index: 2,
                 intent_id: "intent-1".into(),
                 tx_type: 14,
                 tx_hash: HASH.into(),
@@ -505,6 +535,9 @@ mod tests {
         let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
         let result = clients
             .broadcast_lighter(&SignedLighterTransaction {
+                execution_account_id: "account-canary-1".into(),
+                account_index: 7,
+                api_key_index: 2,
                 intent_id: "intent-1".into(),
                 tx_type: 14,
                 tx_hash: HASH.into(),
@@ -529,6 +562,9 @@ mod tests {
         let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
         let result = clients
             .broadcast_lighter(&SignedLighterTransaction {
+                execution_account_id: "account-canary-1".into(),
+                account_index: 7,
+                api_key_index: 2,
                 intent_id: "intent-1".into(),
                 tx_type: 14,
                 tx_hash: HASH.into(),
@@ -627,6 +663,7 @@ mod tests {
 
     fn lighter_request() -> LighterCreateOrderRequest {
         LighterCreateOrderRequest {
+            execution_account_id: "account-canary-1".into(),
             intent_id: "intent-1".into(),
             market_index: 101,
             client_order_index: 1,
@@ -647,6 +684,7 @@ mod tests {
 
     fn robinhood_request() -> RobinhoodExecuteRequest {
         RobinhoodExecuteRequest {
+            execution_account_id: "account-canary-1".into(),
             request_id: "action-1".into(),
             replaces_request_id: None,
             intent: RobinhoodSpotIntent {
@@ -671,6 +709,9 @@ mod tests {
                     (
                         status_code,
                         Json(serde_json::json!({
+                            "execution_account_id": "account-canary-1",
+                            "vault_address": "0x0000000000000000000000000000000000000002",
+                            "signer_address": "0x0000000000000000000000000000000000000003",
                             "request_id": "action-1",
                             "intent_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
                             "tx_hash": HASH,

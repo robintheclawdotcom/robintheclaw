@@ -1,4 +1,7 @@
-use execution::{ExecutionEvent, ExecutionSaga, ExecutionState, PairIntent, SagaError};
+use execution::{
+    ExecutionEvent, ExecutionSaga, ExecutionState, PairIntent, SagaError,
+    CANARY_DAILY_TURNOVER_CAP_MICROS,
+};
 use research::PromotionEvidence;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -89,6 +92,7 @@ pub struct ClaimedAction {
     pub result: Option<Value>,
     pub attempts: u32,
     pub control_version: i64,
+    pub account_control_version: i64,
 }
 
 struct ClaimedActionRow {
@@ -102,6 +106,7 @@ struct ClaimedActionRow {
     saga: Value,
     saga_version: i64,
     control_version: i64,
+    account_control_version: i64,
 }
 
 struct RecoveryActionRow {
@@ -147,6 +152,7 @@ pub struct VenueEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewVenueEvent {
+    pub execution_account_id: String,
     pub source: String,
     pub source_session: String,
     pub source_event_id: String,
@@ -156,6 +162,41 @@ pub struct NewVenueEvent {
     pub payload: Value,
     pub publisher_at_ms: i64,
     pub received_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewAccountSnapshot {
+    pub execution_account_id: String,
+    pub source: String,
+    pub source_session: String,
+    pub source_sequence: i64,
+    pub payload: Value,
+    pub observed_at_ms: i64,
+    pub received_at_ms: i64,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LighterAccountSnapshot {
+    account_index: u64,
+    api_key_index: u8,
+    nonce_aligned: bool,
+    no_unknown_orders: bool,
+    no_unknown_positions: bool,
+    collateral_ready: bool,
+    maintenance_margin_ratio_micros: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RobinhoodAccountSnapshot {
+    vault_address: String,
+    signer_address: String,
+    funding_ready: bool,
+    wiring_verified: bool,
+    finality_healthy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,6 +375,12 @@ pub enum StoreError {
     LighterConfigDrift,
     #[error("execution coordinator is not active")]
     CoordinatorHalted,
+    #[error("execution account is not active or does not match the intent")]
+    ExecutionAccountUnavailable,
+    #[error("execution account readiness or authenticated state is stale")]
+    AccountReadinessUnavailable,
+    #[error("daily entry turnover cap exceeded")]
+    DailyTurnoverExceeded,
     #[error("execution identity or active episode already exists")]
     Conflict,
 }
@@ -374,6 +421,11 @@ impl Store {
             "public.execution_venue_source_sessions",
             "public.execution_venue_event_routes",
             "public.execution_lighter_nonce_reservations",
+            "public.execution_accounts",
+            "public.execution_account_control",
+            "public.execution_account_readiness",
+            "public.execution_account_snapshots",
+            "public.execution_account_daily_turnover",
         ] {
             let exists = sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
                 .bind(table)
@@ -405,7 +457,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         if !matches!(
             scope,
-            "intent" | "exit" | "recovery" | "venue_event" | "market_quote"
+            "intent" | "exit" | "recovery" | "venue_event" | "market_quote" | "account_snapshot"
         ) || nonce.len() < 32
             || nonce.len() > 128
             || expires_at_unix <= 0
@@ -433,6 +485,100 @@ impl Store {
         }
         transaction.commit().await?;
         Ok(())
+    }
+
+    pub async fn record_account_snapshot(
+        &self,
+        snapshot: &NewAccountSnapshot,
+    ) -> Result<bool, StoreError> {
+        if !valid_account_snapshot(snapshot) {
+            return Err(StoreError::InvalidAction);
+        }
+        let payload =
+            serde_json::to_vec(&snapshot.payload).map_err(|_| StoreError::InvalidAction)?;
+        let payload_sha256 = hex::encode(Sha256::digest(payload));
+        let mut transaction = self.pool.begin().await?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO execution_account_snapshots
+                (execution_account_id, source, source_session, source_sequence, payload,
+                 payload_sha256, observed_at, received_at, expires_at)
+            SELECT $1, $2, $3, $4, $5, $6,
+                   TIMESTAMPTZ 'epoch' + $7 * interval '1 millisecond',
+                   TIMESTAMPTZ 'epoch' + $8 * interval '1 millisecond',
+                   TIMESTAMPTZ 'epoch' + $9 * interval '1 millisecond'
+            FROM execution_accounts
+            WHERE execution_account_id = $1 AND status IN ('active', 'blocked')
+            ON CONFLICT (execution_account_id, source, source_session, source_sequence)
+                DO NOTHING
+            "#,
+        )
+        .bind(&snapshot.execution_account_id)
+        .bind(&snapshot.source)
+        .bind(&snapshot.source_session)
+        .bind(snapshot.source_sequence)
+        .bind(Json(&snapshot.payload))
+        .bind(&payload_sha256)
+        .bind(snapshot.observed_at_ms)
+        .bind(snapshot.received_at_ms)
+        .bind(snapshot.expires_at_ms)
+        .execute(&mut *transaction)
+        .await?;
+        if inserted.rows_affected() == 1 {
+            transaction.commit().await?;
+            return Ok(true);
+        }
+        let existing = sqlx::query_as::<_, (String, i64, i64, i64)>(
+            r#"
+            SELECT payload_sha256,
+                   (EXTRACT(EPOCH FROM observed_at) * 1000)::bigint,
+                   (EXTRACT(EPOCH FROM received_at) * 1000)::bigint,
+                   (EXTRACT(EPOCH FROM expires_at) * 1000)::bigint
+            FROM execution_account_snapshots
+            WHERE execution_account_id = $1 AND source = $2
+              AND source_session = $3 AND source_sequence = $4
+            FOR SHARE
+            "#,
+        )
+        .bind(&snapshot.execution_account_id)
+        .bind(&snapshot.source)
+        .bind(&snapshot.source_session)
+        .bind(snapshot.source_sequence)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if existing.is_some_and(|row| {
+            row.0 == payload_sha256
+                && row.1 == snapshot.observed_at_ms
+                && row.2 == snapshot.received_at_ms
+                && row.3 == snapshot.expires_at_ms
+        }) {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        halt_account(
+            &mut transaction,
+            &snapshot.execution_account_id,
+            "account_snapshot_identity_conflict",
+        )
+        .await?;
+        halt_execution(&mut transaction, "account_snapshot_identity_conflict").await?;
+        sqlx::query(
+            r#"
+            INSERT INTO execution_incidents
+                (execution_account_id, severity, kind, details)
+            VALUES ($1, 'critical', 'account_snapshot_identity_conflict', $2)
+            "#,
+        )
+        .bind(&snapshot.execution_account_id)
+        .bind(Json(serde_json::json!({
+            "source": snapshot.source,
+            "source_session": snapshot.source_session,
+            "source_sequence": snapshot.source_sequence,
+        })))
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Err(StoreError::VenueEventConflict)
     }
 
     pub async fn record_market_quote(&self, quote: &NewMarketQuote) -> Result<bool, StoreError> {
@@ -614,6 +760,8 @@ impl Store {
             _ => false,
         };
         if !source_matches_kind
+            || event.execution_account_id.len() < 8
+            || event.execution_account_id.len() > 64
             || event.source_session.is_empty()
             || event.source_session.len() > 128
             || event.source_event_id.is_empty()
@@ -645,18 +793,29 @@ impl Store {
             serde_json::to_vec(&event.payload).map_err(|_| StoreError::InvalidAction)?;
         let payload_sha256 = hex::encode(Sha256::digest(payload_bytes));
         let mut transaction = self.pool.begin().await?;
+        let intent_account = sqlx::query_scalar::<_, String>(
+            "SELECT execution_account_id FROM execution_intents WHERE id = $1 FOR SHARE",
+        )
+        .bind(&event.intent_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StoreError::MissingIntent)?;
+        if intent_account != event.execution_account_id {
+            return Err(StoreError::ExecutionAccountUnavailable);
+        }
 
         let new_session = sqlx::query(
             r#"
             INSERT INTO execution_venue_source_sessions
-                (source, source_session, first_sequence, last_sequence,
+                (execution_account_id, source, source_session, first_sequence, last_sequence,
                  first_received_at, last_received_at)
-            VALUES ($1, $2, $3, $3,
-                    TIMESTAMPTZ 'epoch' + $4 * interval '1 millisecond',
-                    TIMESTAMPTZ 'epoch' + $4 * interval '1 millisecond')
-            ON CONFLICT (source, source_session) DO NOTHING
+            VALUES ($1, $2, $3, $4, $4,
+                    TIMESTAMPTZ 'epoch' + $5 * interval '1 millisecond',
+                    TIMESTAMPTZ 'epoch' + $5 * interval '1 millisecond')
+            ON CONFLICT (execution_account_id, source, source_session) DO NOTHING
             "#,
         )
+        .bind(&event.execution_account_id)
         .bind(&event.source)
         .bind(&event.source_session)
         .bind(event.source_sequence)
@@ -672,10 +831,11 @@ impl Store {
                 r#"
                 SELECT last_sequence
                 FROM execution_venue_source_sessions
-                WHERE source = $1 AND source_session = $2
+                WHERE execution_account_id = $1 AND source = $2 AND source_session = $3
                 FOR UPDATE
                 "#,
             )
+            .bind(&event.execution_account_id)
             .bind(&event.source)
             .bind(&event.source_session)
             .fetch_one(&mut *transaction)
@@ -688,14 +848,15 @@ impl Store {
         let inserted = sqlx::query(
             r#"
             INSERT INTO execution_venue_events
-                (source, source_session, source_event_id, source_sequence, intent_id, kind,
+                (execution_account_id, source, source_session, source_event_id, source_sequence, intent_id, kind,
                  payload, payload_sha256, publisher_at, received_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                    TIMESTAMPTZ 'epoch' + $9 * interval '1 millisecond',
-                    TIMESTAMPTZ 'epoch' + $10 * interval '1 millisecond')
-            ON CONFLICT (source, source_session, source_event_id) DO NOTHING
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                    TIMESTAMPTZ 'epoch' + $10 * interval '1 millisecond',
+                    TIMESTAMPTZ 'epoch' + $11 * interval '1 millisecond')
+            ON CONFLICT (execution_account_id, source, source_session, source_event_id) DO NOTHING
             "#,
         )
+        .bind(&event.execution_account_id)
         .bind(&event.source)
         .bind(&event.source_session)
         .bind(&event.source_event_id)
@@ -715,10 +876,12 @@ impl Store {
                        (EXTRACT(EPOCH FROM publisher_at) * 1000)::bigint,
                        (EXTRACT(EPOCH FROM received_at) * 1000)::bigint
                 FROM execution_venue_events
-                WHERE source = $1 AND source_session = $2 AND source_event_id = $3
+                WHERE execution_account_id = $1 AND source = $2
+                  AND source_session = $3 AND source_event_id = $4
                 FOR SHARE
                 "#,
             )
+            .bind(&event.execution_account_id)
             .bind(&event.source)
             .bind(&event.source_session)
             .bind(&event.source_event_id)
@@ -733,6 +896,7 @@ impl Store {
             if identical {
                 advance_venue_session(
                     &mut transaction,
+                    &event.execution_account_id,
                     &event.source,
                     &event.source_session,
                     last_sequence,
@@ -742,10 +906,17 @@ impl Store {
                 return Ok(false);
             }
             halt_execution(&mut transaction, "venue_event_identity_conflict").await?;
+            halt_account(
+                &mut transaction,
+                &event.execution_account_id,
+                "venue_event_identity_conflict",
+            )
+            .await?;
             sqlx::query(
-                "INSERT INTO execution_incidents (intent_id, severity, kind, details) VALUES ($1, 'critical', 'venue_event_identity_conflict', $2)",
+                "INSERT INTO execution_incidents (intent_id, execution_account_id, severity, kind, details) VALUES ($1, $2, 'critical', 'venue_event_identity_conflict', $3)",
             )
             .bind(&existing.0)
+            .bind(&event.execution_account_id)
             .bind(Json(serde_json::json!({
                 "source": event.source,
                 "source_session": event.source_session,
@@ -760,6 +931,7 @@ impl Store {
         if sequence_contiguous {
             advance_venue_session(
                 &mut transaction,
+                &event.execution_account_id,
                 &event.source,
                 &event.source_session,
                 last_sequence,
@@ -769,9 +941,11 @@ impl Store {
             let event_id = sqlx::query_scalar::<_, i64>(
                 r#"
                 SELECT id FROM execution_venue_events
-                WHERE source = $1 AND source_session = $2 AND source_event_id = $3
+                WHERE execution_account_id = $1 AND source = $2
+                  AND source_session = $3 AND source_event_id = $4
                 "#,
             )
+            .bind(&event.execution_account_id)
             .bind(&event.source)
             .bind(&event.source_session)
             .bind(&event.source_event_id)
@@ -808,18 +982,25 @@ impl Store {
         if mode != "ACTIVE" {
             return Err(StoreError::CoordinatorHalted);
         }
+        verify_execution_account(&mut transaction, intent, now_ms).await?;
         verify_market_authority(&mut transaction, intent).await?;
         verify_promotion(&mut transaction, &intent.evidence.strategy_version).await?;
+        reserve_daily_turnover(&mut transaction, intent, now_ms).await?;
         let mut saga = ExecutionSaga::new(&intent.id)?;
         saga.apply(ExecutionEvent::PrecheckPassed)?;
         sqlx::query(
             r#"
             INSERT INTO execution_intents
-                (id, strategy_version, symbol, direction, payload, saga, saga_version)
-            VALUES ($1, $2, $3, 'long_spot_short_perp', $4, $5, 1)
+                (id, execution_account_id, agent_id, source_evaluation_id, risk_version,
+                 strategy_version, symbol, direction, payload, saga, saga_version)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'long_spot_short_perp', $8, $9, 1)
             "#,
         )
         .bind(&intent.id)
+        .bind(&intent.execution_account_id)
+        .bind(&intent.agent_id)
+        .bind(&intent.source_evaluation_id)
+        .bind(&intent.risk_version)
         .bind(&intent.evidence.strategy_version)
         .bind(&intent.symbol)
         .bind(Json(intent))
@@ -850,8 +1031,9 @@ impl Store {
             ),
         ] {
             sqlx::query(
-                "INSERT INTO execution_identifiers (namespace, value, intent_id) VALUES ($1, $2, $3)",
+                "INSERT INTO execution_identifiers (execution_account_id, namespace, value, intent_id) VALUES ($1, $2, $3, $4)",
             )
+            .bind(&intent.execution_account_id)
             .bind(namespace)
             .bind(value)
             .bind(&intent.id)
@@ -866,8 +1048,9 @@ impl Store {
                 .ok_or(StoreError::InvalidAction)?
                 .to_string();
             sqlx::query(
-                "INSERT INTO execution_identifiers (namespace, value, intent_id) VALUES ('lighter_client_order', $1, $2)",
+                "INSERT INTO execution_identifiers (execution_account_id, namespace, value, intent_id) VALUES ($1, 'lighter_client_order', $2, $3)",
             )
+            .bind(&intent.execution_account_id)
             .bind(value)
             .bind(&intent.id)
             .execute(&mut *transaction)
@@ -1294,6 +1477,7 @@ impl Store {
                 Value,
                 i64,
                 i64,
+                i64,
             ),
         >(
             r#"
@@ -1310,6 +1494,13 @@ impl Store {
                     result ? 'send_authorized' OR
                     EXISTS (
                       SELECT 1 FROM execution_control WHERE singleton AND mode = 'ACTIVE'
+                    ) AND EXISTS (
+                      SELECT 1
+                      FROM execution_intents intent
+                      JOIN execution_accounts account USING (execution_account_id)
+                      JOIN execution_account_control account_control USING (execution_account_id)
+                      WHERE intent.id = execution_actions.intent_id
+                        AND account.status = 'active' AND account_control.mode = 'ACTIVE'
                     )
                   )
                 ORDER BY available_at, created_at
@@ -1328,9 +1519,11 @@ impl Store {
             )
             SELECT claimed.id, claimed.intent_id, claimed.kind, claimed.payload, claimed.result,
                    claimed.attempts, intent.payload, intent.saga, intent.saga_version,
-                   control.version
+                   control.version, account_control.version
             FROM claimed
             JOIN execution_intents intent ON intent.id = claimed.intent_id
+            JOIN execution_account_control account_control
+              ON account_control.execution_account_id = intent.execution_account_id
             CROSS JOIN execution_control control
             WHERE control.singleton
             "#,
@@ -1351,6 +1544,7 @@ impl Store {
             saga,
             saga_version,
             control_version,
+            account_control_version,
         )) = row
         else {
             transaction.commit().await?;
@@ -1367,6 +1561,7 @@ impl Store {
             saga,
             saga_version,
             control_version,
+            account_control_version,
         };
         let action = match decode_claimed_action(&row, lease_token.clone()) {
             Ok(action) => action,
@@ -1425,15 +1620,17 @@ impl Store {
         worker: &str,
         lease_token: &str,
         claimed_control_version: i64,
+        claimed_account_control_version: i64,
     ) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin().await?;
-        let eligible = sqlx::query_scalar::<_, bool>(
+        let eligible = sqlx::query_as::<_, (bool, String)>(
             r#"
-            SELECT kind = 'submit_perp'
-            FROM execution_actions
-            WHERE id = $1 AND status = 'leased' AND lease_owner = $2
-              AND lease_token = $3 AND lease_expires_at > now()
-            FOR UPDATE
+            SELECT action.kind = 'submit_perp', intent.execution_account_id
+            FROM execution_actions action
+            JOIN execution_intents intent ON intent.id = action.intent_id
+            WHERE action.id = $1 AND action.status = 'leased' AND action.lease_owner = $2
+              AND action.lease_token = $3 AND action.lease_expires_at > now()
+            FOR UPDATE OF action, intent
             "#,
         )
         .bind(action_id)
@@ -1442,7 +1639,7 @@ impl Store {
         .fetch_optional(&mut *transaction)
         .await?
         .ok_or(StoreError::LeaseLost)?;
-        if !eligible {
+        if !eligible.0 {
             return Err(StoreError::InvalidAction);
         }
         let (mode, control_version) = sqlx::query_as::<_, (String, i64)>(
@@ -1454,13 +1651,30 @@ impl Store {
             transaction.commit().await?;
             return Err(StoreError::CoordinatorHalted);
         }
+        let (account_mode, account_control_version) = sqlx::query_as::<_, (String, i64)>(
+            r#"
+            SELECT mode, version FROM execution_account_control
+            WHERE execution_account_id = $1 FOR UPDATE
+            "#,
+        )
+        .bind(&eligible.1)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if account_mode != "ACTIVE" || account_control_version != claimed_account_control_version {
+            transaction.commit().await?;
+            return Err(StoreError::CoordinatorHalted);
+        }
         let updated = sqlx::query(
             r#"
             UPDATE execution_actions
             SET result = jsonb_set(
                     COALESCE(result, '{}'::jsonb),
                     '{send_authorized}',
-                    jsonb_build_object('control_version', $4::bigint, 'authorized_at', now()),
+                    jsonb_build_object(
+                        'control_version', $4::bigint,
+                        'account_control_version', $5::bigint,
+                        'authorized_at', now()
+                    ),
                     true
                 ),
                 updated_at = now()
@@ -1472,6 +1686,7 @@ impl Store {
         .bind(worker)
         .bind(lease_token)
         .bind(control_version)
+        .bind(account_control_version)
         .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
@@ -1610,27 +1825,43 @@ impl Store {
             return Err(StoreError::InvalidAction);
         }
         let mut transaction = self.pool.begin().await?;
-        let (kind, intent_id) = sqlx::query_as::<_, (String, String)>(
-            r#"
-            SELECT kind, intent_id FROM execution_actions
-            WHERE id = $1 AND status = 'leased' AND lease_owner = $2
-              AND lease_token = $3 AND lease_expires_at > now()
-            FOR UPDATE
+        let (kind, intent_id, execution_account_id, bound_account, bound_api_key) =
+            sqlx::query_as::<_, (String, String, String, Option<i64>, Option<i16>)>(
+                r#"
+            SELECT action.kind, action.intent_id, intent.execution_account_id,
+                   account.lighter_account_index, account.lighter_api_key_index
+            FROM execution_actions action
+            JOIN execution_intents intent ON intent.id = action.intent_id
+            JOIN execution_accounts account USING (execution_account_id)
+            WHERE action.id = $1 AND action.status = 'leased' AND action.lease_owner = $2
+              AND action.lease_token = $3 AND action.lease_expires_at > now()
+            FOR UPDATE OF action, intent, account
             "#,
-        )
-        .bind(action_id)
-        .bind(worker)
-        .bind(lease_token)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(StoreError::LeaseLost)?;
+            )
+            .bind(action_id)
+            .bind(worker)
+            .bind(lease_token)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StoreError::LeaseLost)?;
         if kind != "submit_perp" && kind != "unwind_perp" {
             return Err(StoreError::InvalidAction);
         }
-        if let Some((reserved_account, reserved_api_key, nonce)) =
-            sqlx::query_as::<_, (i64, i16, i64)>(
+        if bound_account != Some(account_index) || bound_api_key != Some(i16::from(api_key_index)) {
+            halt_account(
+                &mut transaction,
+                &execution_account_id,
+                "lighter_account_binding_mismatch",
+            )
+            .await?;
+            halt_execution(&mut transaction, "lighter_account_binding_mismatch").await?;
+            transaction.commit().await?;
+            return Err(StoreError::LighterConfigDrift);
+        }
+        if let Some((reserved_execution_account, reserved_account, reserved_api_key, nonce)) =
+            sqlx::query_as::<_, (String, i64, i16, i64)>(
                 r#"
-                SELECT account_index, api_key_index, nonce
+                SELECT execution_account_id, account_index, api_key_index, nonce
                 FROM execution_lighter_nonce_reservations
                 WHERE action_id = $1
                 FOR SHARE
@@ -1640,7 +1871,10 @@ impl Store {
             .fetch_optional(&mut *transaction)
             .await?
         {
-            if reserved_account != account_index || reserved_api_key != i16::from(api_key_index) {
+            if reserved_execution_account != execution_account_id
+                || reserved_account != account_index
+                || reserved_api_key != i16::from(api_key_index)
+            {
                 record_lighter_config_drift(
                     &mut transaction,
                     &intent_id,
@@ -1659,11 +1893,13 @@ impl Store {
         }
         sqlx::query(
             r#"
-            INSERT INTO execution_venue_nonces (venue, account_index, api_key_index, next_nonce)
-            VALUES ('lighter', $1, $2, $3)
-            ON CONFLICT (venue, account_index, api_key_index) DO NOTHING
+            INSERT INTO execution_venue_nonces
+                (execution_account_id, venue, account_index, api_key_index, next_nonce)
+            VALUES ($1, 'lighter', $2, $3, $4)
+            ON CONFLICT (execution_account_id, venue, account_index, api_key_index) DO NOTHING
             "#,
         )
+        .bind(&execution_account_id)
         .bind(account_index)
         .bind(i16::from(api_key_index))
         .bind(observed_next_nonce)
@@ -1672,10 +1908,12 @@ impl Store {
         let stored = sqlx::query_scalar::<_, i64>(
             r#"
             SELECT next_nonce FROM execution_venue_nonces
-            WHERE venue = 'lighter' AND account_index = $1 AND api_key_index = $2
+            WHERE execution_account_id = $1 AND venue = 'lighter'
+              AND account_index = $2 AND api_key_index = $3
             FOR UPDATE
             "#,
         )
+        .bind(&execution_account_id)
         .bind(account_index)
         .bind(i16::from(api_key_index))
         .fetch_one(&mut *transaction)
@@ -1685,10 +1923,12 @@ impl Store {
         sqlx::query(
             r#"
             UPDATE execution_venue_nonces
-            SET next_nonce = $3, version = version + 1, updated_at = now()
-            WHERE venue = 'lighter' AND account_index = $1 AND api_key_index = $2
+            SET next_nonce = $4, version = version + 1, updated_at = now()
+            WHERE execution_account_id = $1 AND venue = 'lighter'
+              AND account_index = $2 AND api_key_index = $3
             "#,
         )
+        .bind(&execution_account_id)
         .bind(account_index)
         .bind(i16::from(api_key_index))
         .bind(next)
@@ -1697,11 +1937,12 @@ impl Store {
         sqlx::query(
             r#"
             INSERT INTO execution_lighter_nonce_reservations
-                (action_id, account_index, api_key_index, nonce)
-            VALUES ($1, $2, $3, $4)
+                (action_id, execution_account_id, account_index, api_key_index, nonce)
+            VALUES ($1, $2, $3, $4, $5)
             "#,
         )
         .bind(action_id)
+        .bind(&execution_account_id)
         .bind(account_index)
         .bind(i16::from(api_key_index))
         .bind(nonce)
@@ -1745,23 +1986,39 @@ impl Store {
             return Err(StoreError::InvalidAction);
         }
         let mut transaction = self.pool.begin().await?;
-        let reservation = sqlx::query_as::<_, (String, i64, i16)>(
-            r#"
-            SELECT action.intent_id, reservation.account_index, reservation.api_key_index
+        let reservation =
+            sqlx::query_as::<_, (String, String, i64, i16, Option<i64>, Option<i16>)>(
+                r#"
+            SELECT action.intent_id, reservation.execution_account_id,
+                   reservation.account_index, reservation.api_key_index,
+                   account.lighter_account_index, account.lighter_api_key_index
             FROM execution_lighter_nonce_reservations reservation
             JOIN execution_actions action ON action.id = reservation.action_id
+            JOIN execution_accounts account USING (execution_account_id)
             WHERE reservation.action_id = $1
             FOR SHARE OF reservation
             "#,
-        )
-        .bind(action_id)
-        .fetch_optional(&mut *transaction)
-        .await?;
-        let Some((intent_id, reserved_account, reserved_api_key)) = reservation else {
+            )
+            .bind(action_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let Some((
+            intent_id,
+            execution_account_id,
+            reserved_account,
+            reserved_api_key,
+            bound_account,
+            bound_api_key,
+        )) = reservation
+        else {
             transaction.commit().await?;
             return Ok(());
         };
-        if reserved_account == account_index && reserved_api_key == i16::from(api_key_index) {
+        if reserved_account == account_index
+            && reserved_api_key == i16::from(api_key_index)
+            && bound_account == Some(account_index)
+            && bound_api_key == Some(i16::from(api_key_index))
+        {
             transaction.commit().await?;
             return Ok(());
         }
@@ -1773,6 +2030,12 @@ impl Store {
             reserved_api_key,
             account_index,
             api_key_index,
+        )
+        .await?;
+        halt_account(
+            &mut transaction,
+            &execution_account_id,
+            "lighter_nonce_scope_drift",
         )
         .await?;
         transaction.commit().await?;
@@ -1915,6 +2178,12 @@ impl Store {
         }
         let mut transaction = self.pool.begin().await?;
         let intent_id = lock_action(&mut transaction, action_id, worker, lease_token).await?;
+        let execution_account_id = sqlx::query_scalar::<_, String>(
+            "SELECT execution_account_id FROM execution_intents WHERE id = $1 FOR SHARE",
+        )
+        .bind(&intent_id)
+        .fetch_one(&mut *transaction)
+        .await?;
         let saga = if let Some(event) = transition {
             transition_saga(&mut transaction, &intent_id, event).await?
         } else {
@@ -1951,11 +2220,13 @@ impl Store {
         .await?;
         sqlx::query(
             r#"
-            INSERT INTO execution_incidents (intent_id, severity, kind, details)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO execution_incidents
+                (intent_id, execution_account_id, severity, kind, details)
+            VALUES ($1, $2, $3, $4, $5)
             "#,
         )
         .bind(&intent_id)
+        .bind(&execution_account_id)
         .bind(if stop == ActionStop::Rejected {
             "warning"
         } else {
@@ -1966,6 +2237,7 @@ impl Store {
         .execute(&mut *transaction)
         .await?;
         if stop != ActionStop::Rejected {
+            halt_account(&mut transaction, &execution_account_id, error_code).await?;
             halt_execution(&mut transaction, error_code).await?;
         }
         transaction.commit().await?;
@@ -1988,6 +2260,12 @@ impl Store {
         }
         let mut transaction = self.pool.begin().await?;
         let intent_id = lock_action(&mut transaction, action_id, worker, lease_token).await?;
+        let execution_account_id = sqlx::query_scalar::<_, String>(
+            "SELECT execution_account_id FROM execution_intents WHERE id = $1 FOR SHARE",
+        )
+        .bind(&intent_id)
+        .fetch_one(&mut *transaction)
+        .await?;
         let saga = if let Some(event) = transition {
             transition_saga(&mut transaction, &intent_id, event).await?
         } else {
@@ -2022,13 +2300,15 @@ impl Store {
         )
         .await?;
         sqlx::query(
-            "INSERT INTO execution_incidents (intent_id, severity, kind, details) VALUES ($1, 'critical', $2, $3)",
+            "INSERT INTO execution_incidents (intent_id, execution_account_id, severity, kind, details) VALUES ($1, $2, 'critical', $3, $4)",
         )
         .bind(&intent_id)
+        .bind(&execution_account_id)
         .bind(error_code)
         .bind(Json(details))
         .execute(&mut *transaction)
         .await?;
+        halt_account(&mut transaction, &execution_account_id, error_code).await?;
         halt_execution(&mut transaction, error_code).await?;
         enqueue_action(&mut transaction, &intent_id, &next).await?;
         transaction.commit().await?;
@@ -2073,7 +2353,8 @@ impl Store {
                    route.venue_event_id IS NOT NULL
             FROM execution_venue_events event
             JOIN execution_venue_source_sessions session
-              ON session.source = event.source AND session.source_session = event.source_session
+              ON session.execution_account_id = event.execution_account_id
+             AND session.source = event.source AND session.source_session = event.source_session
             LEFT JOIN execution_venue_event_routes route
               ON route.venue_event_id = event.id
             LEFT JOIN execution_applied_venue_events applied
@@ -2181,7 +2462,8 @@ impl Store {
             FROM execution_venue_events event
             JOIN execution_venue_event_routes route ON route.venue_event_id = event.id
             JOIN execution_venue_source_sessions session
-              ON session.source = event.source AND session.source_session = event.source_session
+              ON session.execution_account_id = event.execution_account_id
+             AND session.source = event.source AND session.source_session = event.source_session
             WHERE event.id = $1
             FOR SHARE OF event, route, session
             "#,
@@ -2296,6 +2578,7 @@ fn decode_claimed_action(
         result: row.result.clone(),
         attempts,
         control_version: row.control_version,
+        account_control_version: row.account_control_version,
     })
 }
 
@@ -2331,6 +2614,12 @@ async fn fail_safe_locked_action(
     error_code: &str,
     details: Value,
 ) -> Result<(), StoreError> {
+    let execution_account_id = sqlx::query_scalar::<_, String>(
+        "SELECT execution_account_id FROM execution_intents WHERE id = $1 FOR SHARE",
+    )
+    .bind(intent_id)
+    .fetch_one(&mut **transaction)
+    .await?;
     let updated = sqlx::query(
         r#"
         UPDATE execution_actions
@@ -2363,11 +2652,13 @@ async fn fail_safe_locked_action(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO execution_incidents (intent_id, severity, kind, details)
-        VALUES ($1, 'critical', $2, $3)
+        INSERT INTO execution_incidents
+            (intent_id, execution_account_id, severity, kind, details)
+        VALUES ($1, $2, 'critical', $3, $4)
         "#,
     )
     .bind(intent_id)
+    .bind(&execution_account_id)
     .bind(error_code)
     .bind(Json(serde_json::json!({
         "action_id": action_id,
@@ -2375,6 +2666,7 @@ async fn fail_safe_locked_action(
     })))
     .execute(&mut **transaction)
     .await?;
+    halt_account(transaction, &execution_account_id, error_code).await?;
     halt_execution(transaction, error_code).await?;
     Ok(())
 }
@@ -2416,6 +2708,7 @@ async fn quarantine_venue_event(
 
 async fn advance_venue_session(
     transaction: &mut Transaction<'_, Postgres>,
+    execution_account_id: &str,
     source: &str,
     source_session: &str,
     last_sequence: i64,
@@ -2428,16 +2721,18 @@ async fn advance_venue_session(
             FROM (
                 SELECT DISTINCT source_sequence
                 FROM execution_venue_events
-                WHERE source = $1 AND source_session = $2 AND source_sequence > $3
+                WHERE execution_account_id = $1 AND source = $2
+                  AND source_session = $3 AND source_sequence > $4
             ) sequences
         )
         SELECT COALESCE(
-            MAX(source_sequence) FILTER (WHERE source_sequence = $3 + ordinal),
-            $3
+            MAX(source_sequence) FILTER (WHERE source_sequence = $4 + ordinal),
+            $4
         )
         FROM ordered
         "#,
     )
+    .bind(execution_account_id)
     .bind(source)
     .bind(source_session)
     .bind(last_sequence)
@@ -2449,17 +2744,19 @@ async fn advance_venue_session(
     sqlx::query(
         r#"
         UPDATE execution_venue_source_sessions session
-        SET last_sequence = $3,
+        SET last_sequence = $4,
             last_received_at = GREATEST(
                 session.last_received_at,
                 (SELECT MAX(event.received_at)
                  FROM execution_venue_events event
-                 WHERE event.source = $1 AND event.source_session = $2
-                   AND event.source_sequence <= $3)
+                 WHERE event.execution_account_id = $1 AND event.source = $2
+                   AND event.source_session = $3 AND event.source_sequence <= $4)
             )
-        WHERE session.source = $1 AND session.source_session = $2
+        WHERE session.execution_account_id = $1 AND session.source = $2
+          AND session.source_session = $3
         "#,
     )
+    .bind(execution_account_id)
     .bind(source)
     .bind(source_session)
     .bind(frontier)
@@ -2477,19 +2774,33 @@ async fn record_lighter_config_drift(
     configured_account_index: i64,
     configured_api_key_index: u8,
 ) -> Result<(), StoreError> {
+    let execution_account_id = sqlx::query_scalar::<_, String>(
+        "SELECT execution_account_id FROM execution_intents WHERE id = $1 FOR SHARE",
+    )
+    .bind(intent_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    halt_account(
+        transaction,
+        &execution_account_id,
+        "lighter_nonce_scope_drift",
+    )
+    .await?;
     halt_execution(transaction, "lighter_nonce_scope_drift").await?;
     sqlx::query(
         r#"
-        INSERT INTO execution_incidents (intent_id, severity, kind, details)
-        SELECT $1, 'critical', 'lighter_nonce_scope_drift', $2
+        INSERT INTO execution_incidents
+            (intent_id, execution_account_id, severity, kind, details)
+        SELECT $1, $2, 'critical', 'lighter_nonce_scope_drift', $3
         WHERE NOT EXISTS (
             SELECT 1 FROM execution_incidents
             WHERE intent_id = $1 AND kind = 'lighter_nonce_scope_drift'
-              AND details ->> 'action_id' = $3 AND resolved_at IS NULL
+              AND details ->> 'action_id' = $4 AND resolved_at IS NULL
         )
         "#,
     )
     .bind(intent_id)
+    .bind(&execution_account_id)
     .bind(Json(serde_json::json!({
         "action_id": action_id,
         "reserved_account_index": reserved_account_index,
@@ -3142,8 +3453,10 @@ async fn allocate_operator_order_index(
                 .await?;
         let inserted = sqlx::query(
             r#"
-            INSERT INTO execution_identifiers (namespace, value, intent_id)
-            VALUES ('lighter_client_order', $1, $2)
+            INSERT INTO execution_identifiers
+                (execution_account_id, namespace, value, intent_id)
+            SELECT execution_account_id, 'lighter_client_order', $1, id
+            FROM execution_intents WHERE id = $2
             ON CONFLICT DO NOTHING
             "#,
         )
@@ -3195,6 +3508,85 @@ async fn halt_execution(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+async fn halt_account(
+    transaction: &mut Transaction<'_, Postgres>,
+    execution_account_id: &str,
+    reason: &str,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        r#"
+        UPDATE execution_account_control
+        SET mode = 'HALTED', reason = $2, version = version + 1, updated_at = now()
+        WHERE execution_account_id = $1
+        "#,
+    )
+    .bind(execution_account_id)
+    .bind(reason)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE execution_accounts
+        SET status = CASE WHEN status = 'active' THEN 'blocked' ELSE status END,
+            updated_at = now()
+        WHERE execution_account_id = $1
+        "#,
+    )
+    .bind(execution_account_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn valid_account_snapshot(snapshot: &NewAccountSnapshot) -> bool {
+    if snapshot.execution_account_id.len() < 8
+        || snapshot.execution_account_id.len() > 64
+        || snapshot.source_session.is_empty()
+        || snapshot.source_session.len() > 128
+        || snapshot.source_sequence < 0
+        || snapshot.observed_at_ms <= 0
+        || snapshot.received_at_ms <= 0
+        || snapshot.expires_at_ms <= snapshot.received_at_ms
+        || snapshot
+            .received_at_ms
+            .saturating_sub(snapshot.observed_at_ms)
+            > 5_000
+        || snapshot.observed_at_ms > snapshot.received_at_ms.saturating_add(1_000)
+        || snapshot
+            .expires_at_ms
+            .saturating_sub(snapshot.received_at_ms)
+            > 5_000
+    {
+        return false;
+    }
+    match snapshot.source.as_str() {
+        "lighter-auth" => serde_json::from_value::<LighterAccountSnapshot>(
+            snapshot.payload.clone(),
+        )
+        .is_ok_and(|value| {
+            value.account_index > 0
+                && (2..=254).contains(&value.api_key_index)
+                && value.maintenance_margin_ratio_micros > 0
+        }),
+        "robinhood-chain" => serde_json::from_value::<RobinhoodAccountSnapshot>(
+            snapshot.payload.clone(),
+        )
+        .is_ok_and(|value| {
+            valid_evm_address(&value.vault_address) && valid_evm_address(&value.signer_address)
+        }),
+        _ => false,
+    }
+}
+
+fn valid_evm_address(value: &str) -> bool {
+    value.len() == 42
+        && value.starts_with("0x")
+        && value[2..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && value[2..].bytes().any(|byte| byte != b'0')
 }
 
 fn valid_venue_payload(kind: &str, payload: &Value) -> bool {
@@ -3404,6 +3796,165 @@ async fn verify_market_authority(
         || !minimum_unwind_output_is_bounded
     {
         return Err(StoreError::MarketEvidenceMismatch);
+    }
+    Ok(())
+}
+
+async fn verify_execution_account(
+    transaction: &mut Transaction<'_, Postgres>,
+    intent: &PairIntent,
+    now_ms: u64,
+) -> Result<(), StoreError> {
+    type AccountRow = (
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+        Option<i16>,
+        Option<String>,
+        Option<String>,
+        String,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    );
+    let account = sqlx::query_as::<_, AccountRow>(
+        r#"
+        SELECT account.agent_id, account.strategy_version, account.risk_version,
+               account.status, account.lighter_account_index, account.lighter_api_key_index,
+               account.robinhood_vault, account.robinhood_signer, control.mode,
+               readiness.venue_approved, readiness.oracle_healthy,
+               readiness.sequencer_healthy, readiness.reconciliation_ready,
+               readiness.exit_authority_ready, readiness.alerting_ready,
+               readiness.safe_rotation_ready
+        FROM execution_accounts account
+        JOIN execution_account_control control USING (execution_account_id)
+        JOIN execution_account_readiness readiness USING (execution_account_id)
+        WHERE account.execution_account_id = $1
+        FOR SHARE OF account, control, readiness
+        "#,
+    )
+    .bind(&intent.execution_account_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(StoreError::ExecutionAccountUnavailable)?;
+    let account_index = i64::try_from(intent.lighter_account_index)
+        .map_err(|_| StoreError::ExecutionAccountUnavailable)?;
+    if account.0 != intent.agent_id
+        || account.1 != intent.evidence.strategy_version
+        || account.2 != intent.risk_version
+        || account.3 != "active"
+        || account.4 != Some(account_index)
+        || account.5 != Some(i16::from(intent.lighter_api_key_index))
+        || account.6.as_deref() != Some(intent.robinhood_vault.as_str())
+        || account.7.as_deref() != Some(intent.robinhood_signer.as_str())
+        || account.8 != "ACTIVE"
+    {
+        return Err(StoreError::ExecutionAccountUnavailable);
+    }
+    if ![
+        account.9, account.10, account.11, account.12, account.13, account.14, account.15,
+    ]
+    .into_iter()
+    .all(|ready| ready)
+    {
+        return Err(StoreError::AccountReadinessUnavailable);
+    }
+    let now = i64::try_from(now_ms).map_err(|_| StoreError::AccountReadinessUnavailable)?;
+    let snapshots = sqlx::query_as::<_, (String, Value)>(
+        r#"
+        SELECT DISTINCT ON (source) source, payload
+        FROM execution_account_snapshots
+        WHERE execution_account_id = $1
+          AND received_at <= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+          AND expires_at >= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+        ORDER BY source, received_at DESC, id DESC
+        "#,
+    )
+    .bind(&intent.execution_account_id)
+    .bind(now)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if snapshots.len() != 2 {
+        return Err(StoreError::AccountReadinessUnavailable);
+    }
+    let mut lighter_ready = false;
+    let mut robinhood_ready = false;
+    for (source, payload) in snapshots {
+        match source.as_str() {
+            "lighter-auth" => {
+                let snapshot: LighterAccountSnapshot = serde_json::from_value(payload)
+                    .map_err(|_| StoreError::AccountReadinessUnavailable)?;
+                lighter_ready = snapshot.account_index == intent.lighter_account_index
+                    && snapshot.api_key_index == intent.lighter_api_key_index
+                    && snapshot.nonce_aligned
+                    && snapshot.no_unknown_orders
+                    && snapshot.no_unknown_positions
+                    && snapshot.collateral_ready
+                    && snapshot.maintenance_margin_ratio_micros >= 2_000_000;
+            }
+            "robinhood-chain" => {
+                let snapshot: RobinhoodAccountSnapshot = serde_json::from_value(payload)
+                    .map_err(|_| StoreError::AccountReadinessUnavailable)?;
+                robinhood_ready = snapshot.vault_address == intent.robinhood_vault
+                    && snapshot.signer_address == intent.robinhood_signer
+                    && snapshot.funding_ready
+                    && snapshot.wiring_verified
+                    && snapshot.finality_healthy;
+            }
+            _ => return Err(StoreError::AccountReadinessUnavailable),
+        }
+    }
+    if !lighter_ready || !robinhood_ready {
+        return Err(StoreError::AccountReadinessUnavailable);
+    }
+    Ok(())
+}
+
+async fn reserve_daily_turnover(
+    transaction: &mut Transaction<'_, Postgres>,
+    intent: &PairIntent,
+    now_ms: u64,
+) -> Result<(), StoreError> {
+    let gross = intent
+        .spot_notional_micros
+        .checked_add(intent.perp_notional_micros)
+        .ok_or(StoreError::DailyTurnoverExceeded)?;
+    let gross = i64::try_from(gross).map_err(|_| StoreError::DailyTurnoverExceeded)?;
+    let cap = i64::try_from(CANARY_DAILY_TURNOVER_CAP_MICROS)
+        .map_err(|_| StoreError::DailyTurnoverExceeded)?;
+    let now = i64::try_from(now_ms).map_err(|_| StoreError::DailyTurnoverExceeded)?;
+    let updated = sqlx::query(
+        r#"
+        INSERT INTO execution_account_daily_turnover
+            (execution_account_id, trading_day, entry_gross_micros)
+        VALUES (
+            $1,
+            (TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond')::date,
+            $3
+        )
+        ON CONFLICT (execution_account_id, trading_day) DO UPDATE
+        SET entry_gross_micros = execution_account_daily_turnover.entry_gross_micros
+                                 + EXCLUDED.entry_gross_micros,
+            version = execution_account_daily_turnover.version + 1,
+            updated_at = now()
+        WHERE execution_account_daily_turnover.entry_gross_micros
+              + EXCLUDED.entry_gross_micros <= $4
+        "#,
+    )
+    .bind(&intent.execution_account_id)
+    .bind(now)
+    .bind(gross)
+    .bind(cap)
+    .execute(&mut **transaction)
+    .await?;
+    if updated.rows_affected() != 1 || gross > cap {
+        return Err(StoreError::DailyTurnoverExceeded);
     }
     Ok(())
 }
