@@ -33,6 +33,9 @@ req=(
   docs/production-audit-mainnet-live-execution.md
   liveexec/scripts/validate.sh
   ops/mainnet-live/validate.mjs
+  ops/mainnet-live/promotion-ledger/cli.mjs
+  ops/mainnet-live/promotion-ledger/ledger.mjs
+  ops/mainnet-live/promotion-ledger/ledger.test.mjs
   publisher/cmd/account-publisher/main.go
   provisioner/lighter/main.go
   provisioner/robinhood/main.go
