@@ -7,8 +7,8 @@ authenticated product API; it is not an operational read model and must not rece
 coordinator, signer, KMS, venue, or treasury credentials. Treating it as the operator API would
 collapse user-facing and capital-bearing trust boundaries.
 
-Technical mainnet readiness requires a separate private, read-only service. It must be backed by
-runtime and coordinator evidence, placed behind identity-aware access, and excluded from every
+Staged activation includes a separate private, read-only service backed by runtime and coordinator
+evidence. It sits behind identity-aware access and remains excluded from every
 transaction-broadcast or signing path.
 
 ## Required boundary

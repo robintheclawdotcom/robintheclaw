@@ -2,8 +2,8 @@
 
 ## Assets to protect
 
-- Custodied ERC-20 balances in `StrategyVault`.
-- Owner and agent signing authority.
+- Custodied USDG balances in `RwaStrategyVault` and testnet balances in personal vaults.
+- Safe, timelock, guardian, agent, and personal-vault owner authority.
 - Venue credentials and any collateral held outside the vault.
 - Integrity of the disclosed trade-log record.
 - Availability of the owner halt action and public verification path.
@@ -20,9 +20,16 @@ of unobserved market data.
 
 ## Controls in place
 
-- Explicit production asset/router inputs; no silent testnet defaults.
-- Separate owner, agent, and funder addresses.
-- Target and selector allowlist, bytecode check, rolling notional cap, and halt flag.
+- Source-verified typed mainnet contract graph deployed halted and unfunded with a zero agent.
+- Canonical 2-of-3 Safe treasury, 48-hour timelock config authority, and restrict-only guardian.
+- No agent-selected target, selector, route, recipient, arbitrary calldata, or declared notional.
+- Intent replay protection and binding to asset, side, amounts, deadline, config version, multiplier,
+  and minimum oracle round.
+- Fail-closed sequencer, oracle freshness, oracle pause, corporate-action, slippage, inventory,
+  turnover, fresh gross-exposure, market-count, and operating-mode checks.
+- Canonical Universal Router and Permit2 runtime code-hash pinning.
+- Exact temporary approvals, mandatory allowance cleanup, measured vault deltas, and zero adapter retention.
+- Safe-only funding and terminal recovery; Safe-only immediate agent revocation.
 - One-time vault anchor configuration and strict append-only anchor sequence.
 - Canonical integer-scaled records with finite/range validation before hashing.
 - Testnet proof vault with no execution target.
@@ -40,15 +47,20 @@ of unobserved market data.
 
 ## Known limitations
 
-The current vault does not implement public deposits, shares, NAV, allowances for a router, fill
-reconciliation, margin management, or a perp adapter. It is therefore not a complete live-trading
-custody system. A malicious or compromised owner can change the mandate; this is a deliberate
-human-control boundary, not a decentralized governance model.
+The production vault does not implement public deposits, shares, pooled NAV, a perp adapter, or
+off-chain fill reconciliation. USDG treasury funding is Safe-controlled, and the deployed spot
+adapter has no configured market. Perpetual execution, margin management, paired-leg repair, and
+continuous reconciliation remain in the private execution layer.
+
+The Safe owner set is still bootstrap custody and must move to device-separated operational owners
+before capital activation. The one-time sequencer gate remains unbound until a reviewed official
+source exists. USDG is treated as one settlement dollar by the contract; depeg handling is an
+operational halt condition.
 
 The anchor cannot force record publication. It can prove a published batch was committed, and it
 can make an absence of a matching publication visible to observers.
 
-## Required controls before live trading
+## Required controls for capital activation
 
 1. Verified venue contract/API specification and authenticated testnet order lifecycle.
 2. Simulate-before-send, explicit slippage, partial-fill hedge/unwind, and reconciliation logic.
@@ -57,8 +69,9 @@ can make an absence of a matching publication visible to observers.
 5. Independent smart-contract audit and an operational key-management review.
 6. Human per-trade approval for the first capped mainnet experiments.
 
-Until all six exist, the correct production mode is no execution.
+The typed mainnet boundary already enforces the onchain portion of this list. The remaining controls
+govern its staged transition from a halted deployment to a separately approved canary.
 
-The generic vault call path is not a production venue adapter. Before any live deployment it must
-be replaced with typed, venue-specific intent enforcement that binds asset, route, recipient,
-maximum input, minimum output, deadline, and slippage to each call.
+The generic `MandateGuard`/personal-vault call path is testnet-only and is not a production venue
+adapter. Mainnet custody uses only `RwaStrategyVault`, `MandateRiskManagerV1`,
+`UniswapV4SpotAdapter`, and the associated Safe/timelock governance boundary.

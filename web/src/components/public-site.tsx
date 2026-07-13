@@ -3,7 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { testnetProof } from "../lib/testnet-proof";
 
-type DocId = "overview" | "experience" | "signal" | "contracts" | "verifier" | "engine" | "testnet" | "application" | "methodology" | "readiness" | "architecture" | "developer" | "operations" | "security" | "venues";
+const mainnetDeployment = {
+  explorer: "https://robinhoodchain.blockscout.com",
+  transaction: "0xe8b7ca77feaf117e287eab146d7e79bdef83737a93453534bc9077da0e0ac961",
+};
+
+type DocId = "overview" | "experience" | "signal" | "contracts" | "verifier" | "engine" | "mainnet" | "testnet" | "application" | "methodology" | "readiness" | "architecture" | "developer" | "operations" | "security" | "venues";
 
 const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }> = {
   overview: {
@@ -59,8 +64,8 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
         </p>
         <h2>Built for expansion</h2>
         <p>
-          The current testnet deployment establishes the contract relationships and operating
-          controls that future venue adapters and position workflows will build on.
+          The source-verified mainnet contract layer establishes typed custody, risk, routing, and
+          governance boundaries for staged strategy activation.
         </p>
         <div className="code-block"><span>$</span> cd contracts && forge test -vv</div>
       </>
@@ -130,6 +135,11 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
         <div className="code-block"><span>$</span> cd engine && cargo test</div>
       </>
     ),
+  },
+  mainnet: {
+    file: "docs/mainnet-deployment.md",
+    title: "Mainnet deployment",
+    body: <PublishedDoc file="mainnet-deployment.md" />,
   },
   methodology: {
     file: "docs/research-methodology.md",
@@ -317,7 +327,7 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
                 <div>
                   <h1><span>✻</span> Robin the Claw</h1>
                   <p>Delta-neutral market intelligence and execution for tokenized markets.</p>
-                  <small>status: market intelligence → personal vaults → execution stack</small>
+                  <small>status: mainnet contract layer live → staged activation</small>
                 </div>
               </section>
 
@@ -345,6 +355,20 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
               </section>
 
               <section className="proof-status">
+                <Prompt>robin mainnet --status</Prompt>
+                <div className="proof-panel">
+                  <div>
+                    <span className="proof-label">execution mainnet</span>
+                    <strong>typed contract layer live · staged activation</strong>
+                    <p>Source-verified governance, custody, risk, and routing contracts are live on Robinhood Chain mainnet.</p>
+                  </div>
+                  <a href={`${mainnetDeployment.explorer}/tx/${mainnetDeployment.transaction}`} target="_blank" rel="noreferrer">
+                    inspect onchain ↗
+                  </a>
+                </div>
+              </section>
+
+              <section className="proof-status">
                 <Prompt>robin testnet --status</Prompt>
                 <div className="proof-panel">
                   <div>
@@ -365,7 +389,7 @@ export default function PublicSite({ view }: { view: "home" | "docs" }) {
                   <article><span>[ app ]</span><h2>No-code strategy access</h2><p>Opens a personal strategy account, linked wallets, real balances, controls, and activity in one dashboard.</p></article>
                   <article><span>[ engine ]</span><h2>Trade planning</h2><p>Combines spread quality, Kelly sizing, portfolio awareness, and neutrality into a coordinated plan.</p></article>
                   <article><span>[ research ]</span><h2>Adaptive research</h2><p>Builds a compounding event store for convergence, regime, hedge-ratio, and routing models.</p></article>
-                  <article><span>[ contracts ]</span><h2>Execution foundation</h2><p>Custody, delegated execution, and venue policy establish the base for the Robin execution layer.</p></article>
+                  <article><span>[ contracts ]</span><h2>Execution foundation</h2><p>Source-verified mainnet custody, risk, routing, and governance establish the Robin execution layer.</p></article>
                   <article><span>[ verifier ]</span><h2>Record integrity</h2><p>Onchain records support inspection, research, and a durable history of strategy operations.</p></article>
                 </div>
               </section>

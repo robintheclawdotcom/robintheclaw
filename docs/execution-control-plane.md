@@ -2,10 +2,10 @@
 
 ## Status
 
-The execution services are capital-disabled by default. Their presence in the repository is not
-an authorization to deploy contracts, enable signing, fund an account, or submit an order.
-Activation remains subject to the promotion, audit, legal, key-review, and operating gates defined
-by the mainnet-readiness program.
+The typed production contract layer is deployed, source-verified, halted, and unfunded on Robinhood
+Chain mainnet. Execution services remain capital-disabled by default. Their presence does not
+authorize signing, funding, market activation, or order submission; those transitions follow the
+promotion, audit, legal, key-review, and operating controls defined by the activation program.
 
 ## Authority boundaries
 
@@ -29,12 +29,13 @@ selector, calldata, intent ID, and fee policy is quarantined.
 
 ## Deployment binding
 
-The writer derives a deployment identifier from the following manifest:
+The writer derives a deployment identifier from the canonical
+[`deployments/mainnet.json`](../deployments/mainnet.json) manifest:
 
 - chain ID and KMS-derived agent address;
 - timelock, recovery Safe, and guardian addresses;
-- vault, risk-manager, and adapter addresses;
-- expected runtime code hashes for all three contracts.
+- vault, risk-manager, adapter, sequencer-gate, factory, and anchor addresses;
+- expected runtime code hashes for the complete project contract graph.
 
 The journal scopes requests, transaction hashes, replacement links, and reconciliation queries to
 that identifier. Startup fails closed if the same chain and signer have unresolved transactions
@@ -45,9 +46,9 @@ Both RPC providers independently verify, at a pinned block:
 
 - configured chain ID;
 - contract runtime code hashes;
-- vault agent, risk manager, adapter, timelock, recovery recipient, and settlement asset;
-- risk-manager executor, administrator, guardian, and settlement asset;
-- adapter vault, administrator, and settlement asset.
+- vault agent, risk manager, adapter, config administrator, treasury, and settlement asset;
+- risk-manager executor, config administrator, guardian, and settlement asset;
+- adapter vault, config administrator, and settlement asset.
 
 Every signed journal record stores the primary and secondary verification block numbers and hashes.
 The primary provider is an authenticated production endpoint. The secondary provider is

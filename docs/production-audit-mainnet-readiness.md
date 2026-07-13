@@ -1,14 +1,30 @@
-# Production audit: mainnet readiness
+# Production audit: mainnet activation readiness
 
 ## Executive summary
 
-The repository is not ready to custody or trade mainnet capital. The obsolete generic execution
-surface has been replaced by typed contracts, durable signer journals, authoritative market gates,
-and a fail-closed execution saga with operator recovery. Those are necessary controls, not proof of
-production readiness. The authenticated venue streams, canonical chain observations, executable
-quote authority, margin verification, operational infrastructure, independent reviews, and elapsed
-research evidence required to close the control loop do not yet exist as verified production
-evidence. Deploying or funding now would be unsafe.
+Robin's typed production contract layer is live and source-verified on Robinhood Chain mainnet. It
+launched halted and unfunded under a canonical 2-of-3 Safe and 48-hour timelock, with no agent,
+market, route, or sequencer source installed. This completes the onchain deployment milestone and
+creates a controlled base for staged activation.
+
+Capital activation is a separate promotion decision. Authenticated venue streams, canonical chain
+observations, executable quote authority, margin verification, operational infrastructure,
+independent reviews, and elapsed research evidence must close the full control loop before the
+deployment receives capital or execution authority.
+
+## Mainnet deployment milestone
+
+- [x] Deploy the typed, non-upgradeable v1 contract graph halted and unfunded.
+- [x] Configure the Safe as timelock proposer, canceller, and executor without direct admin power.
+- [x] Set the timelock as config authority and the Safe as treasury and immediate revocation authority.
+- [x] Start with a zero agent, zero balances, no markets, no routes, and a fail-closed sequencer gate.
+- [x] Re-read all contracts after deployment and verify provenance, roles, code hashes, limits, and state.
+- [x] Source-verify the factory, gate, risk manager, adapter, vault, anchor, and timelock on Blockscout.
+- [x] Confirm the deployment batch commitment was finalized on Ethereum.
+- [ ] Rotate the Safe from bootstrap custody to device-separated operational owners.
+
+See [mainnet-deployment.md](mainnet-deployment.md) for addresses, code hashes, review evidence, and
+the canonical activation state.
 
 ## Critical issues (P0 - block capital activation)
 
@@ -27,7 +43,7 @@ evidence. Deploying or funding now would be unsafe.
   Lighter mark and block-pinned, reviewed Uniswap v4 exact-input quote required before every unwind
   send.
 
-## High priority (P1 - block technical mainnet readiness)
+## High priority (P1 - complete activation infrastructure)
 
 - [x] Replace caller-selected target and calldata execution with typed spot intents, a typed risk
   manager, and an internally constructed reviewed route.
@@ -113,13 +129,13 @@ exposure, margin deterioration, code-hash drift, storage pressure, and missing h
 3. Complete the release, telemetry, retention, backup, restore, and incident infrastructure.
 4. Close contract verification and independent audit findings.
 5. Run the benchmark, chaos, soak, replay, and recovery evidence programme.
-6. Complete the operational key review, then deploy the audited typed contracts halted, unfunded,
-   source-verified, and verify them after Ethereum finality.
+6. Complete the Safe owner rotation, operational key review, and independent audit against the
+   deployed source-verified contract graph.
 7. Accumulate the mandatory capture and shadow windows and pass statistical promotion.
 8. Obtain legal, venue, and capital-activation approval before funding or authorizing a canary.
 
 ## Release decision
 
-**No mainnet deployment or funding in this release.** A halted and unfunded deployment becomes
-permissible after the technical, audit, and key-review gates above. Funding and canary execution
-remain blocked until every empirical, legal, venue, and operational activation gate passes.
+**Mainnet contract deployment is complete.** The release establishes the production governance and
+custody boundary but does not activate trading capital. Funding and canary execution require a
+separate promotion after every empirical, legal, venue, audit, key, and operational gate passes.

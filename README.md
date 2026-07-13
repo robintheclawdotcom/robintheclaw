@@ -17,8 +17,8 @@ that can recognize relative-value opportunities and act on them with precision.
   spot/perp legs into deterministic strategy plans.
 - **Research models:** develops convergence, regime, and hedge-ratio models from the growing
   proprietary event store, then promotes the strongest ideas into the strategy stack.
-- **Execution foundation:** pairs custody and delegated execution contracts with a clean path to
-  venue adapters, position workflows, and operational control.
+- **Execution foundation:** runs a source-verified typed vault, risk manager, spot adapter, Safe,
+  and timelock on Robinhood Chain mainnet, ready for staged market activation.
 - **Personal strategy accounts:** email, passkey, social, and wallet login lead to a stable smart
   account, a personal vault, a unified dashboard, and one-operation testnet onboarding.
 - **Record integrity:** commits strategy records onchain as a supporting tool for research,
@@ -61,10 +61,12 @@ cd signal && node src/basis.mjs
 cd contracts && forge test -vv
 ```
 
-The personal-vault factory, test asset, and faucet are deployed on Robinhood Chain testnet. The
-paid application service, private API, and dedicated product database are live on Render. Venue
-adapters and the full execution lifecycle are the next major build-out. The initial universe is
-the 21 Stock Tokens that also have a live perp.
+Robin's typed production contracts are deployed and source-verified on Robinhood Chain mainnet.
+The system launched halted and unfunded with no installed agent or configured market, establishing
+the production governance and custody boundary for staged activation. The personal-vault factory,
+test asset, and faucet remain live on Robinhood Chain testnet, while the paid application service,
+private API, and dedicated product database run on Render. The initial research universe is the 21
+Stock Tokens that also have a live perp.
 
 ## Website and application
 
@@ -91,6 +93,8 @@ system boundaries. The [user experience specification](docs/user-experience.md) 
 account model, onboarding state machine, dashboard, and multi-wallet behavior. The
 [edge research methodology](docs/research-methodology.md) defines the
 model hierarchy, RWA-specific data requirements, and evidence needed to promote a strategy.
+The [mainnet deployment record](docs/mainnet-deployment.md) documents the live contract graph,
+governance, runtime code hashes, review evidence, and staged-activation controls.
 
 ## Direction
 

@@ -69,5 +69,5 @@ requires frozen data, embargoed walk-forward tests, realistic net costs, bounded
 reproducible results.
 
 Six months of capture and sixty continuous shadow days are the minimum evidence required to argue
-for a durable edge. Mainnet deployment remains blocked until the complete execution, audit, and
-operational-review gates pass.
+for a durable edge. That evidence supports the staged promotion of the deployed mainnet contract
+layer into controlled capital activation.

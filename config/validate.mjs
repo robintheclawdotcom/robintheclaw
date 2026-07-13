@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const config = JSON.parse(readFileSync(join(root, "config", "addresses.json"), "utf8"));
+const mainnetRecord = JSON.parse(readFileSync(join(root, "deployments", "mainnet.json"), "utf8"));
 const address = /^0x[\da-fA-F]{40}$/;
 
 function fail(message) {
@@ -26,8 +27,11 @@ for (const network of ["mainnet", "testnet"]) {
 
 const mainnet = config.deployment.mainnet;
 if (mainnet.venueStatus !== "verified") fail("mainnet venue configuration must be verified");
-if (mainnet.contractStatus !== "blocked" || mainnet.capitalStatus !== "blocked") {
-  fail("mainnet contracts and capital must remain blocked before audited deployment");
+if (mainnet.contractStatus !== "deployed-halted-unfunded") {
+  fail("mainnet contract status must match the canonical halted deployment");
+}
+if (mainnet.capitalStatus !== "staged" || mainnet.capitalActivationAllowed !== false) {
+  fail("mainnet capital activation must remain staged");
 }
 if (!address.test(mainnet.asset) || !address.test(mainnet.universalRouter)) {
   fail("mainnet asset and router are required");
@@ -37,6 +41,43 @@ if (mainnet.asset.toLowerCase() !== config.core.USDG.toLowerCase()) {
 }
 if (mainnet.universalRouter.toLowerCase() !== config.uniswapV4.UniversalRouter.toLowerCase()) {
   fail("mainnet router must match uniswapV4.UniversalRouter");
+}
+for (const field of [
+  "safe",
+  "timelock",
+  "factory",
+  "sequencerGate",
+  "riskManager",
+  "spotAdapter",
+  "vault",
+  "attestationAnchor",
+]) {
+  if (!address.test(mainnet[field])) fail(`mainnet.${field} is not an address`);
+}
+if (config.chain.mainnet.onchainSequencerUptimeFeed !== null) {
+  fail("mainnet onchain sequencer uptime feed is not yet published");
+}
+
+if (mainnetRecord.chainId !== config.chain.mainnet.chainId) {
+  fail("canonical mainnet record chain ID mismatch");
+}
+if (mainnetRecord.status !== "halted-unfunded" || mainnetRecord.capitalActivationAllowed !== false) {
+  fail("canonical mainnet record must describe the staged deployment");
+}
+const canonicalAddresses = {
+  safe: mainnetRecord.governance?.safe,
+  timelock: mainnetRecord.governance?.timelock,
+  factory: mainnetRecord.contracts?.factory?.address,
+  sequencerGate: mainnetRecord.contracts?.sequencerGate?.address,
+  riskManager: mainnetRecord.contracts?.riskManager?.address,
+  spotAdapter: mainnetRecord.contracts?.spotAdapter?.address,
+  vault: mainnetRecord.contracts?.vault?.address,
+  attestationAnchor: mainnetRecord.contracts?.attestationAnchor?.address,
+};
+for (const [field, value] of Object.entries(canonicalAddresses)) {
+  if (!address.test(value) || value.toLowerCase() !== mainnet[field].toLowerCase()) {
+    fail(`mainnet.${field} does not match deployments/mainnet.json`);
+  }
 }
 
 if (config.perp?.venue !== "lighter") fail("perp venue must be lighter");

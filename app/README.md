@@ -59,5 +59,5 @@ fully configured.
   the tradable universe, evaluates each through the `engine`, records the observation, and emits on
   the event bus. Its shape mirrors the indexer loop.
 - **Signer and execution**: a key-isolated signer and the two-leg neutral executor, gated by the
-  onchain `MandateGuard`.
+  mainnet `MandateRiskManagerV1` and typed `RwaStrategyVault` intent boundary.
 - **Metered access**: x402 in front of the paid data endpoints.

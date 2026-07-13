@@ -11,6 +11,7 @@ onchain execution, continuous event capture, research models, and a no-code stra
 - [Developer guide](developer-guide.md): local setup, validation commands, and configuration.
 - [Operations](operations.md): roles, release procedure, and operational response.
 - [Security model](security-model.md): assets, trust boundaries, and controls.
+- [Mainnet contract deployment](mainnet-deployment.md): live typed contracts, governance, verification, and staged activation.
 - [Testnet foundation](testnet-proof.md): the deployed onchain contract and record pipeline.
 - [Application testnet](ux-testnet.md): the deployed personal-vault factory, faucet, and no-code onboarding path.
 - [Venue integration](venue-gates.md): the path from market data to live venue support.
@@ -25,10 +26,14 @@ onchain execution, continuous event capture, research models, and a no-code stra
 2. Market intelligence, continuous event capture, and trade planning run as independent components.
 3. The model roadmap covers cointegration, Ornstein-Uhlenbeck spreads, Kalman hedge ratios,
    hidden-Markov regimes, and portfolio covariance.
-4. Venue adapters and the complete position lifecycle are the next execution milestone.
-5. Records are available as a supporting tool for research and operations.
-6. Secrets belong in ignored local files or managed secret storage.
+4. The typed production vault, risk manager, spot adapter, Safe, and timelock are live and
+   source-verified on Robinhood Chain mainnet.
+5. The production deployment remains halted and unfunded while market configuration, execution
+   authority, and operational evidence progress through staged activation.
+6. Records are available as a supporting tool for research and operations.
+7. Secrets belong in ignored local files or managed secret storage.
 
 The public web service, private Rust API, dedicated product database, PAYG chain access, and
-personal-vault contracts are live for production testnet work. Gas-sponsored onboarding activates
-when the restricted Alchemy policy is attached.
+personal-vault contracts are live for production testnet work. The separate typed mainnet contract
+layer is live at the addresses in [`deployments/mainnet.json`](../deployments/mainnet.json).
+Gas-sponsored onboarding activates when the restricted Alchemy policy is attached.

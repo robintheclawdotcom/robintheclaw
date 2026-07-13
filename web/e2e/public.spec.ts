@@ -4,9 +4,15 @@ test("homepage leads with no-code strategy access", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByText("Open your strategy account", { exact: true })).toBeVisible();
+  await expect(page.getByText("typed contract layer live", { exact: false })).toBeVisible();
+  await expect(page.getByText("Source-verified governance, custody, risk, and routing", { exact: false })).toBeVisible();
   await expect(page.getByText("No extension, seed phrase, CLI", { exact: false })).toBeVisible();
   await expect(page.getByText("git clone", { exact: false })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "open app", exact: false }).first()).toHaveAttribute("href", "/app");
+  await expect(page.getByRole("link", { name: "inspect onchain", exact: false }).first()).toHaveAttribute(
+    "href",
+    "https://robinhoodchain.blockscout.com/tx/0xe8b7ca77feaf117e287eab146d7e79bdef83737a93453534bc9077da0e0ac961",
+  );
 });
 
 test("documentation has a dedicated route", async ({ page }) => {

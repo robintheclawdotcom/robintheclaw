@@ -5,6 +5,8 @@
       "chainId": 4663,
       "rpc": "https://rpc.mainnet.chain.robinhood.com",
       "sequencerFeed": "wss://feed.mainnet.chain.robinhood.com",
+      "sequencerFeedType": "websocket-reference-not-uptime-oracle",
+      "onchainSequencerUptimeFeed": null,
       "explorer": "https://robinhoodchain.blockscout.com"
     },
     "testnet": {
@@ -18,10 +20,20 @@
       "chainId": 4663,
       "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
       "universalRouter": "0x8876789976decbfcbbbe364623c63652db8c0904",
+      "safe": "0xac82b88be9a7a35f869bc94611e0e36ed7d444fd",
+      "timelock": "0xc4887b9f12fe6f98c77de986ca8c4c17bf5b46b5",
+      "factory": "0x0fD95bD301b65f4F6Cc3354315793194941EeF77",
+      "sequencerGate": "0x57Df357Dec949eB2B5202143F1557Db4eB38B46D",
+      "riskManager": "0x111449D0C87469e64b8B92ba384c129d70c36A97",
+      "spotAdapter": "0xD111F04a69714031eA5772534F24747C2f67d00c",
+      "vault": "0xCE9aA8B21d0385A1A5df20d9a567C8cfe3Ba3C96",
+      "attestationAnchor": "0xee78aCD24B5B7a10885d92D863e41f3814b4B366",
       "venueStatus": "verified",
-      "contractStatus": "blocked",
-      "capitalStatus": "blocked",
-      "reason": "Typed v1 contracts are not independently audited or deployed."
+      "marketStatus": "unconfigured",
+      "contractStatus": "deployed-halted-unfunded",
+      "capitalStatus": "staged",
+      "capitalActivationAllowed": false,
+      "reason": "The source-verified typed v1 contract layer is live and progressing through staged activation."
     },
     "testnet": {
       "chainId": 46630,

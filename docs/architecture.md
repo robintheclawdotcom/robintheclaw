@@ -14,7 +14,7 @@ independently.
 | `signal/` | Reads Uniswap v4 and Lighter public market data; writes local JSONL observations. | Untrusted input | No |
 | `runtime/` | Captures high-frequency market and chain evidence, stores immutable raw payloads, and creates only shadow lifecycles. | Private research input | No |
 | `engine/` | Produces deterministic approved/declined plans from supplied JSON. | Pure computation | No |
-| `contracts/` | Holds each user's asset in a personal vault and bounds calls made by the configured agent. | Onchain enforcement | Only after the owner enables the mandate and selectors |
+| `contracts/` | Provides the typed production strategy vault and the separate personal-vault testnet application path. | Onchain enforcement | Only after the relevant governance boundary activates an execution path |
 | `verifier/` | Canonicalizes disclosed records, computes Merkle roots, and compares roots with chain state. | Public verification | No |
 | `app/` | Authenticates users, persists account state, verifies receipts, and assembles dashboards. | Private product API | No signing authority |
 | `web/` | Public site and authenticated no-code application. | User interface | Submits user-signed operations |
@@ -34,7 +34,7 @@ signal observation ----------------------------> deterministic engine
                                       venue integration layer
                                                     |
                                                     v
-                     StrategyVault -> MandateGuard -> allowlisted venue call
+             RwaStrategyVault -> MandateRiskManagerV1 -> UniswapV4SpotAdapter
 
 published records -> verifier -> Merkle root -> StrategyVault.anchorBatch -> AttestationAnchor
 ```
@@ -62,26 +62,33 @@ The Privy DID is the durable application identity. Its embedded EVM wallet suppl
 Alchemy smart-account address that owns one versioned personal vault. External wallets are linked
 portfolio and funding sources; selecting or unlinking one cannot change vault ownership.
 
-The runtime expands the research layer with high-frequency market evidence. The current testnet
-foundation connects planning and contracts; the live execution path will add a venue adapter while
-preserving the same custody and strategy-role relationships.
+The runtime expands the research layer with high-frequency market evidence. The typed production
+contract graph is live on Robinhood Chain mainnet and progressing through staged activation. The
+separate application testnet connects identity, personal vaults, sponsorship, and the dashboard
+without becoming a substitute for the production execution boundary.
 
 ## Contract relationships
 
-`MandateGuard` owns the execution policy. It stores a human owner, one executor, a rolling
-notional cap, a halt flag, and an allowlist keyed by target and selector. Only its executor can
-consume notional; only its owner can change policy.
+`RwaStrategyVault` is the production custody boundary. It accepts USDG from the Safe treasury and
+exposes only typed spot intents. The agent cannot select a target, selector, recipient, route,
+calldata payload, or declared notional. Actual vault balance deltas determine settlement.
 
-`StrategyVault` is the executor. It has an immutable asset, guard, and owner, plus a rotatable
-agent. The agent can invoke `execute` only after the guard approves the target, selector, and
-notional. The vault rejects selector-less payloads and externally owned account targets. The owner
-alone can fund, defund, rotate the agent, and set the one-time anchor.
+`MandateRiskManagerV1` authorizes each intent against a one-time ID, deadline, configuration
+version, operating mode, sequencer state, oracle round and heartbeat, oracle pause, Stock Token
+multiplier, slippage floor, order cap, inventory cap, turnover, freshly marked gross exposure, and
+active-market count. Entry and exit permissions are independent; the Safe and guardian can
+restrict mode immediately, while only the timelock can loosen or configure policy.
 
-`AttestationAnchor` accepts roots only from the vault. The agent calls `StrategyVault.anchorBatch`,
-which forwards to the anchor. Strict sequencing makes a previous root immutable once the next
-sequence has been accepted.
+`UniswapV4SpotAdapter` builds one configured exact-input, zero-hook route internally. It pins the
+canonical Universal Router and Permit2 code hashes, grants exact temporary approvals, clears them
+after use, retains no incremental balance, and returns output to the vault. `SequencerGate` starts
+unbound and reports down until the timelock binds a reviewed source.
 
-`PersonalStrategyVaultFactory` adds the application path without changing the proof contracts.
+The production `AttestationAnchor` accepts roots only from `RwaStrategyVault`. Strict sequencing
+makes a previous root immutable once the next sequence has been accepted.
+
+`PersonalStrategyVaultFactory` is the separate Robinhood testnet application path. It does not
+replace or administer the typed mainnet graph. The factory
 It derives one CREATE2 vault address per owner and factory version. Each `PersonalStrategyVault`
 deploys its own guard and anchor during construction, accepts deposits from a selected funding
 wallet, and reserves withdrawals, mandate control, and agent rotation for the smart-account owner.
@@ -97,10 +104,14 @@ provider-side target, selector, quota, and spend controls.
 
 ## Required invariants
 
-- Owner and agent roles are distinct at deployment.
-- Guard executor is the vault; anchor publisher is the vault; vault anchor is the anchor.
-- A target must contain bytecode and a selector must be nonzero before it can be allowed.
-- A halted guard or exhausted rolling cap prevents execution before the target call.
+- Production config authority is the timelock; treasury and recovery authority is the Safe; the
+  guardian can only restrict; the agent can only submit typed intents.
+- The production vault starts with agent zero, zero balances, halted mode, and no market or route.
+- Risk-manager executor and adapter vault are the production vault; anchor publisher is the vault.
+- Every production intent binds one asset, side, input, minimum output, deadline, config version,
+  multiplier, and minimum oracle round.
+- A halted mode, stale source, paused oracle, multiplier transition, slippage breach, or exhausted
+  limit prevents execution before value can leave the vault.
 - A record batch is order-preserving. Reordering, changing a field, or changing the batch length
   changes the root.
 - Gross risk is measured across both neutral legs, not one leg in isolation.

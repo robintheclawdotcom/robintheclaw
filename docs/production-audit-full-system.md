@@ -5,10 +5,11 @@
 This audit is subordinate to [production-audit-mainnet-readiness.md](production-audit-mainnet-readiness.md),
 which contains the current release decision and gate inventory.
 
-The repository is not ready to trade or custody mainnet capital. It now contains typed strategy
-contracts, durable execution-state machinery, restricted signer services, a production-oriented
-research collector, and an authenticated product application. These components do not yet form a
-closed, independently verified trading system.
+The typed strategy contracts are deployed halted and unfunded on Robinhood Chain mainnet. The
+repository also contains durable execution-state machinery, restricted signer services, a
+production-oriented research collector, and an authenticated product application. Capital
+activation remains a separate promotion after these components form a closed, independently
+verified trading system.
 
 ## Trust-boundary assessment
 
@@ -22,7 +23,7 @@ authenticated user workflows and personal-vault preparation. The operator contro
 yet exist; when implemented, it must be private, read-only, identity-aware, and incapable of
 transaction or order submission.
 
-## Blocking gaps
+## Activation workstreams
 
 - Authenticated Lighter account, order, fill, collateral, and position events are not yet wired into
   the durable reconciliation ledger.
@@ -60,6 +61,6 @@ evidence.
 
 ## Release decision
 
-Do not deploy or fund capital-bearing components in this release. Audited typed contracts may be
-deployed halted and unfunded after the technical, audit, and key-review gates pass. Funding and a
-canary remain separately blocked by the complete empirical, legal, venue, and operational gate set.
+The halted, unfunded typed contract deployment is complete and source-verified. Funding and a canary
+remain a separate promotion governed by the complete empirical, legal, venue, audit, key, and
+operational gate set.

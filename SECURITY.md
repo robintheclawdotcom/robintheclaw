@@ -20,7 +20,8 @@ aim to acknowledge within 72 hours and will keep you updated as we investigate.
 
 In scope:
 
-- `contracts/` (StrategyVault, MandateGuard, AttestationAnchor and future contracts)
+- `contracts/` (`RwaStrategyVault`, `MandateRiskManagerV1`, `UniswapV4SpotAdapter`,
+  `SequencerGate`, governance/deployment scripts, personal testnet vaults, and anchors)
 - `verifier/` (record hashing, Merkle construction, onchain verification)
 - key handling and any code path that signs or submits transactions
 

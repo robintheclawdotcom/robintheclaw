@@ -6,7 +6,7 @@
 - Rust stable for `engine/` and `app/`.
 - Rust stable for the private `runtime/` collector.
 - Foundry with Solidity 0.8.28 for `contracts/`.
-- A provider Robinhood Chain testnet RPC for authenticated application work.
+- Provider RPCs for Robinhood Chain mainnet contract verification and testnet application work.
 
 Never place private keys, exchange credentials, or deployment tokens in tracked files. Local
 credentials belong under ignored `keys/` files with restrictive file permissions.
@@ -26,8 +26,8 @@ node config/validate.mjs
 ./scripts/check-no-leaks.sh
 ```
 
-`config/validate.mjs` validates chain IDs, address shapes, the mainnet address cross-checks, and
-the testnet readiness gate. It does not grant permission to deploy.
+`config/validate.mjs` validates chain IDs, address shapes, the canonical mainnet deployment
+references, and the testnet readiness gate. It does not activate a market or authorize capital.
 
 ## Market intelligence
 
@@ -75,9 +75,24 @@ without implementing its documented validation and fail-closed behavior.
 
 ## Contract deployment modes
 
-`Deploy.s.sol` is production-oriented and requires explicit `OWNER`, `AGENT`, and `ASSET` values.
-It defaults to chain 4663 and rejects an asset or router with no bytecode. It is intentionally
-unable to select a testnet asset automatically.
+`DeployGovernance.s.sol` verifies a canonical Safe proxy, SafeL2 singleton, Safe version, owner set,
+threshold, and code hashes before creating a self-administered OpenZeppelin timelock.
+
+`Deploy.s.sol` is fixed to Robinhood Chain mainnet, chain ID 4663. It verifies the Safe and
+timelock roles, USDG decimals, canonical Universal Router and Permit2 addresses and code hashes,
+explicit risk limits, and distinct governance roles before deploying the typed v1 graph. The
+factory always creates the vault with a zero agent, halted risk mode, zero balances, no market,
+no route, and an unbound fail-closed sequencer gate.
+
+`VerifyDeployment.s.sol` is the mandatory read-only post-deployment check. It validates
+factory-child provenance, all internal references and governance roles, runtime code hashes,
+external contract hashes, exact limits, zero balances, empty market state, zero agent, halted mode,
+and the unbound gate. The canonical release record is
+[`deployments/mainnet.json`](../deployments/mainnet.json); do not update it until the verifier and
+source verification both pass.
+
+The live addresses and exact environment surface are documented in
+[mainnet contract deployment](mainnet-deployment.md) and [`contracts/README.md`](../contracts/README.md).
 
 `DeployTestnet.s.sol` is the proof-path deployment. It is fixed to chain 46630, deploys a named
 `tUSDG` fixture, and configures no execution target. It validates role separation and establishes

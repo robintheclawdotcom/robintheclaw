@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "network": "robinhood-mainnet",
+  "chainId": 4663,
+  "deployedAt": "2026-07-13T16:59:50Z",
+  "status": "halted-unfunded",
+  "capitalActivationAllowed": false,
+  "deploymentTransaction": "0xe8b7ca77feaf117e287eab146d7e79bdef83737a93453534bc9077da0e0ac961",
+  "deploymentBlock": 8829911,
+  "settlement": {
+    "batchNumber": 19509,
+    "dataContainer": "eip-4844-blob",
+    "commitmentTransaction": "0x12ff5f4df0152e1fcbefa96e22eec91e2f7ecaf02e439dcb2be69605016fbced",
+    "commitmentStatus": "finalized",
+    "rollupStatus": "sent-to-base"
+  },
+  "governance": {
+    "safe": "0xac82b88be9a7a35f869bc94611e0e36ed7d444fd",
+    "safeVersion": "1.5.0",
+    "safeThreshold": 2,
+    "safeOwnerCount": 3,
+    "safeDeploymentTransaction": "0x23d9a8efdf75ebf1e03cd2f28b94616c4fa3e12b93e0d9ac383eb64c546cab01",
+    "safeDeploymentBlock": 8822118,
+    "timelock": "0xc4887b9f12fe6f98c77de986ca8c4c17bf5b46b5",
+    "timelockDelaySeconds": 172800,
+    "timelockDeploymentTransaction": "0x3e414ee409d726ab22401cd694752b8a32f602d726994b645c69ddbc30ccd190",
+    "timelockDeploymentBlock": 8824460,
+    "guardian": "0x263ee67fbff4c4b5423b556e9034bbb9934b8969",
+    "ownerRotationRequiredBeforeActivation": true
+  },
+  "contracts": {
+    "factory": {
+      "address": "0x0fd95bd301b65f4f6cc3354315793194941eef77",
+      "runtimeCodeHash": "0x411c0fa898a47a95d4cb0abce5260f26fcac7f160bb34926bec4610170e988f7",
+      "sourceVerified": true
+    },
+    "sequencerGate": {
+      "address": "0x57df357dec949eb2b5202143f1557db4eb38b46d",
+      "runtimeCodeHash": "0xbc5cf65f2e5b24b72c3f1c154fc90a2a6720aab9d1b41f50eb2b6b92605c7c71",
+      "sourceVerified": true,
+      "source": null,
+      "status": "down"
+    },
+    "riskManager": {
+      "address": "0x111449d0c87469e64b8b92ba384c129d70c36a97",
+      "runtimeCodeHash": "0xa7babcdffce8865b609dc388403f6253739e5716d095dbf5f057ac1afc4f43a4",
+      "sourceVerified": true,
+      "mode": "HALTED"
+    },
+    "spotAdapter": {
+      "address": "0xd111f04a69714031ea5772534f24747c2f67d00c",
+      "runtimeCodeHash": "0xb05af79220d2c70a6ad44fd6cbabc03b7c149b2f6525c8828666a77e05648025",
+      "sourceVerified": true,
+      "configuredMarkets": 0
+    },
+    "vault": {
+      "address": "0xce9aa8b21d0385a1a5df20d9a567c8cfe3ba3c96",
+      "runtimeCodeHash": "0xb7da9cd076cc7752c944707ce589a7ab9083f5ea5dadd557634c534cd6787ff8",
+      "sourceVerified": true,
+      "agent": "0x0000000000000000000000000000000000000000",
+      "settlementBalance": "0"
+    },
+    "attestationAnchor": {
+      "address": "0xee78acd24b5b7a10885d92d863e41f3814b4b366",
+      "runtimeCodeHash": "0x1cdb4afe9b8da1c3dd95c02aa21e9fcec66c9c81af10c94e41e58fa62c0306ac",
+      "sourceVerified": true
+    }
+  },
+  "externalContracts": {
+    "usdg": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+    "universalRouter": "0x8876789976decbfcbbbe364623c63652db8c0904",
+    "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+    "safeL2Singleton": "0xedd160febbd92e350d4d398fb636302fccd67c7e"
+  },
+  "initialLimits": {
+    "grossNotionalUsd": "50.00",
+    "turnoverUsd": "50.00",
+    "turnoverWindowSeconds": 86400,
+    "maxDeadlineDelaySeconds": 300,
+    "sequencerGracePeriodSeconds": 3600,
+    "maxActiveMarkets": 1
+  },
+  "verification": {
+    "postDeploymentScript": "passed",
+    "foundryTests": 60,
+    "internalContractReview": "completed",
+    "independentExternalAudit": "required-before-capital-activation"
+  },
+  "activationRequirements": [
+    "sequencer-source-unbound",
+    "no-reviewed-market-route",
+    "agent-not-installed",
+    "safe-owner-rotation-incomplete",
+    "independent-audit-incomplete",
+    "operational-key-review-incomplete",
+    "empirical-promotion-window-incomplete",
+    "legal-and-venue-approval-incomplete"
+  ]
+}

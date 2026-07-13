@@ -33,8 +33,8 @@ if any of them declines:
    a drawdown circuit breaker. The penalties apply after the cap on purpose: a drawdown must
    shrink the position even when Kelly wanted more.
 3. **risk** (`risk.rs`): per-entry, bankroll-fraction, and gross-exposure limits, plus a daily and
-   weekly drawdown kill switch. In-memory here; the onchain `MandateGuard` enforces the same
-   spirit at the contract boundary.
+   weekly drawdown kill switch. In-memory here; the mainnet `MandateRiskManagerV1` independently
+   enforces the execution mandate at the contract boundary.
 4. **neutral** (`neutral.rs`): build the two matched legs. Share quantity is matched across legs
    (not notional), so a move in the underlying cancels and the captured edge is the basis on those
    shares. Perp rich means long spot and short perp; perp cheap means the reverse. The residual

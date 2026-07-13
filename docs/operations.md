@@ -4,30 +4,39 @@
 
 | Role | Responsibility | Required authority |
 | --- | --- | --- |
-| Owner | Funds/defunds custody, changes mandate, halts execution, rotates agent. | Owner key only |
-| Agent | Submits guarded calls and batches attestations. | Agent key only |
-| Funder | Distributes test ETH to role wallets. It must not be configured as owner or agent. | Funder key only |
+| Safe treasury | Funds and recovers the production vault, revokes the agent immediately, restricts mode, and operates the timelock. | Canonical 2-of-3 Safe |
+| Timelock | Installs the agent, loosens mode, configures limits, markets and routes, binds the sequencer source, and rotates the guardian. | Safe-proposed and Safe-executed after 48 hours |
+| Guardian | Moves production mode only toward `REDUCE_ONLY` or `HALTED`. | Separate guardian key; no activation or withdrawal authority |
+| Agent | Submits typed spot intents and record batches. | Dedicated KMS-backed execution key; currently zero |
+| Deployer | Broadcasts immutable contract creation and receives no role. | Temporary fee-paying key only |
+| Testnet owner | Controls one personal application vault and guard. | User smart account on chain 46630 |
 | Operator | Runs read-only measurement and verification commands. | No signing key |
 
-Keep role keys separate. A signer used to deploy core contracts must be the configured owner,
-because owner-only wiring occurs in the same broadcast. Do not use a browser profile as key storage.
+Keep production roles separate. The mainnet deployer is not a Safe owner, timelock administrator,
+guardian, agent, or vault beneficiary. Do not use a browser profile as key storage. Rotate the
+bootstrap Safe owner set to device-separated operational owners before capital activation.
 
 ## Deployment procedure
 
-1. Run the repository checks in the developer guide.
-2. Confirm `config/addresses.json` has the expected chain status and current contract code at each
-   configured mainnet address.
-3. For testnet proof deployments, use `DeployTestnet.s.sol`; record generated addresses in
+1. Run the repository checks in the developer guide and freeze the exact commit and compiler settings.
+2. Confirm `config/addresses.json` and `deployments/mainnet.json` match the expected chain, roles,
+   external contracts, runtime code hashes, and staged-activation state.
+3. For a new production generation, verify or deploy the canonical Safe and timelock first, then
+   rehearse `Deploy.s.sol` against a pinned current mainnet fork before broadcast.
+4. Run `VerifyDeployment.s.sol` after inclusion, verify every source on Blockscout, confirm the
+   Robinhood batch commitment is finalized on Ethereum, and retain the release evidence.
+5. For testnet proof deployments, use `DeployTestnet.s.sol`; record generated addresses in
    `deployments/testnet-proof.json` only after onchain confirmation.
-4. Fund the agent only with enough test ETH for attestation operations. The agent must not receive
+6. Fund the testnet agent only with enough test ETH for attestation operations. The agent must not receive
    owner authority.
-5. Run `npm run verify:testnet-proof` after each proof deployment.
-6. Publish only after the local check suite, identity leak scan, and a review of staged files.
+7. Run `npm run verify:testnet-proof` after each proof deployment.
+8. Publish only after the local check suite, identity leak scan, and a review of staged files.
 
-`Deploy.s.sol` creates a halted, no-venue core. It is not authorization to fund or enable
-execution. Immediately run `VerifyDeployment.s.sol` against the confirmed addresses and retain its
-output with the deployment record. A future typed venue adapter requires its own reviewed release
-and cannot be substituted with a generic Universal Router call.
+The current production deployment completed this procedure at block `8829911`. It is halted and
+unfunded, has a zero agent, and has no market, route, or sequencer source. Its addresses and
+verification state are in [`deployments/mainnet.json`](../deployments/mainnet.json). Staged market
+activation is a separate Safe and timelock release; a generic Universal Router call cannot
+substitute for the typed adapter path.
 
 ## Render release procedure
 
@@ -93,9 +102,10 @@ source-health incident; do not substitute a local persistent disk for the immuta
 
 | Event | Immediate action | Follow-up |
 | --- | --- | --- |
-| Unexpected agent call | Owner sets `MandateGuard.setHalted(true)`; preserve transaction evidence. | Rotate agent and investigate allowlist history. |
-| Agent key exposure | Halt, rotate agent, and revoke any venue-specific credentials. | Reconcile all pending orders and anchors. |
-| Owner key exposure | Treat custody as compromised; move assets only after a reviewed incident plan. | Deploy a new owner/vault boundary. |
+| Unexpected production agent call | Guardian or Safe sets `HALTED`; Safe revokes the agent; preserve transaction evidence. | Reconcile the vault, signer journal, venue orders, and intent history before any timelocked replacement. |
+| Agent key exposure | Safe revokes the agent and sets `HALTED`; revoke venue-specific credentials. | Reconcile every pending order and transaction, then install a replacement only through the timelock. |
+| Safe owner exposure | Preserve quorum with uncompromised owners and replace the affected owner through a reviewed Safe transaction. | Review timelock operations, vault balances, agent state, and recovery readiness. |
+| Guardian exposure | Safe sets `HALTED`; timelock rotates the guardian. | Confirm no unauthorized restriction event or governance operation occurred. |
 | Signal API outage or stale feed | Do not create plans or orders. | Restore source health and document the gap. |
 | Runtime archive or database failure | Stop treating captures as complete; preserve logs and mark the source degraded. | Restore both stores, reconcile gaps, and create a new dataset boundary. |
 | Verifier mismatch | Stop publication claims and preserve the raw records. | Identify canonicalization, batch, or deployment mismatch before resuming. |
@@ -104,4 +114,5 @@ source-health incident; do not substitute a local persistent disk for the immuta
 | Included call, API delay | Do not prepare another vault. | Replay `vaults/confirm` from the saved call ID. |
 | Wallet account conflict | Keep both user records separate. | Recover the account already linked to the wallet. |
 
-No process may clear a chain halt without the owner. A software restart is not an incident remedy.
+Only the timelock can loosen production mode. A software restart, service flag, or environment
+change cannot clear the onchain halt.

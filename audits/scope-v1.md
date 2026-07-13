@@ -5,22 +5,27 @@
 - `contracts/src/RwaStrategyVault.sol`
 - `contracts/src/MandateRiskManagerV1.sol`
 - `contracts/src/UniswapV4SpotAdapter.sol`
+- `contracts/src/SequencerGate.sol`
 - `contracts/src/RwaDeploymentFactory.sol`
 - `contracts/src/AttestationAnchor.sol`
 - `contracts/src/interfaces/`
 - `contracts/script/Deploy.s.sol`
+- `contracts/script/DeployGovernance.s.sol`
 - `contracts/script/VerifyDeployment.s.sol`
 
-The target is an immutable commit, compiler `0.8.28`, Shanghai EVM, optimizer enabled with 200 runs,
-and IR compilation. `SyntheticProofVault`, `TestUSDG`, and `DeployTestnet.s.sol` are excluded because
-they cannot execute trades and exist only for the synthetic testnet proof.
+The deployed source is commit `2a3aef84fda01c4f58088eafb04502cf8c27662d`, compiler `0.8.28`,
+Shanghai EVM, optimizer enabled with 200 runs, and IR compilation. The deployment transaction and
+runtime hashes are frozen in [`deployments/mainnet.json`](../deployments/mainnet.json).
+`SyntheticProofVault`, `TestUSDG`, and `DeployTestnet.s.sol` are excluded because they cannot execute
+trades and exist only for the synthetic testnet proof.
 
 ## Deployment profile
 
-The deployment target is Robinhood Chain mainnet, chain ID 4663. The factory atomically creates a
+The deployed target is Robinhood Chain mainnet, chain ID 4663. The factory atomically created a
 halted, unfunded vault, risk manager, zero-market adapter, and vault-owned attestation anchor. The
-factory retains no authority. Administration is timelocked, emergency recovery pays a separate Safe,
-the guardian can only restrict operation, and the agent can submit only typed spot intents.
+factory retains no authority. A one-time-bind sequencer gate starts unbound and reports down.
+Administration is timelocked, emergency recovery pays a separate Safe, the guardian can only
+restrict operation, and the agent can submit only typed spot intents. The initial agent is zero.
 
 V1 permits long-spot entry and spot sale for reduction or exit. Short-spot entry is unsupported. The
 off-chain perpetual leg and saga coordinator are outside this contract audit but require a separate
@@ -63,8 +68,8 @@ execution and key-management review.
 
 ## Explicit blockers
 
-- No mainnet deployment until independent audit findings are closed and retested.
-- No funding until the separate execution/key review and empirical promotion gates pass.
+- No funding or execution-authority installation until independent audit findings are closed and retested.
+- No capital activation until the separate execution/key review and empirical promotion gates pass.
 - No activation if the deployed Universal Router ABI or runtime code hash differs from the pinned
   fork target.
 - Emergency recovery permanently disables deposits and execution for the affected vault.
