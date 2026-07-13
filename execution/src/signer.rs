@@ -40,7 +40,6 @@ pub enum LighterCommand {
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum RobinhoodCommand {
     ExecuteSpot { intent: Box<PairIntent> },
-    Halt,
 }
 
 #[cfg(test)]
@@ -63,6 +62,14 @@ mod tests {
             let rendered = format!("{command:?}").to_ascii_lowercase();
             assert!(!rendered.contains("withdraw"));
             assert!(!rendered.contains("transfer"));
+        }
+    }
+
+    #[test]
+    fn robinhood_surface_contains_only_typed_spot_execution() {
+        for command in ["halt", "recover", "transfer", "set_agent", "execute"] {
+            let payload = format!(r#"{{"command":"{command}"}}"#);
+            assert!(serde_json::from_str::<RobinhoodCommand>(&payload).is_err());
         }
     }
 }
