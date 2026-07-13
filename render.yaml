@@ -1,18 +1,54 @@
+envVarGroups:
+  - name: robin-lighter-signer-auth
+    envVars:
+      - key: LIGHTER_SIGNER_HMAC_KEY
+        sync: false
+      - key: LIGHTER_ACCOUNT_INDEX
+        sync: false
+      - key: LIGHTER_API_KEY_INDEX
+        sync: false
+  - name: robin-robinhood-signer-auth
+    envVars:
+      - key: ROBINHOOD_SIGNER_HMAC_KEY
+        sync: false
+  - name: robin-coordinator-intent-auth
+    envVars:
+      - key: COORDINATOR_INTENT_HMAC_KEY
+        sync: false
+  - name: robin-coordinator-exit-auth
+    envVars:
+      - key: COORDINATOR_EXIT_HMAC_KEY
+        sync: false
+  - name: robin-coordinator-venue-auth
+    envVars:
+      - key: COORDINATOR_VENUE_HMAC_KEY
+        sync: false
+  - name: robin-coordinator-market-auth
+    envVars:
+      - key: COORDINATOR_MARKET_HMAC_KEY
+        sync: false
+
 services:
   - type: web
     name: robintheclaw
     runtime: node
     plan: starter
     region: virginia
-    rootDir: web
-    buildCommand: npm ci && npm run build
-    startCommand: npm run start
+    buildCommand: cd web && npm ci && npm run build
+    startCommand: cd web && npm run start
     healthCheckPath: /
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
     renderSubdomainPolicy: disabled
     domains:
       - robintheclaw.com
     previews:
       generation: automatic
+    buildFilter:
+      paths:
+        - web/**
+        - docs/**
+        - render.yaml
     envVars:
       - key: APP_API_BASE_URL
         fromService:
@@ -25,16 +61,23 @@ services:
         sync: false
       - key: NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
         sync: false
+
   - type: pserv
     name: robin-api
     runtime: rust
     plan: starter
     region: virginia
-    rootDir: app
-    buildCommand: cargo build --release --bin app
-    startCommand: ./target/release/app
+    buildCommand: cargo build --locked --release --manifest-path app/Cargo.toml --bin app
+    startCommand: ./app/target/release/app
     healthCheckPath: /health
-    autoDeploy: yes
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    buildFilter:
+      paths:
+        - app/**
+        - contracts/**
+        - config/**
+        - render.yaml
     envVars:
       - key: HOST
         value: 0.0.0.0
@@ -74,22 +117,36 @@ services:
         value: "false"
       - key: CORS_ORIGINS
         value: https://robintheclaw.com
+
   - type: worker
     name: robin-research-collector
     runtime: rust
     plan: starter
     region: virginia
-    rootDir: runtime
-    buildCommand: cargo build --release --bin collector
-    startCommand: ./target/release/collector
-    autoDeploy: yes
+    buildCommand: cargo build --locked --release --manifest-path runtime/Cargo.toml --bin collector
+    startCommand: ./runtime/target/release/collector
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 120
+    buildFilter:
+      paths:
+        - runtime/**
+        - config/**
+        - render.yaml
     envVars:
       - key: DATABASE_URL
         fromDatabase:
           name: robin-research
-          property: connectionString
+          property: connectionPoolString
       - key: RUNTIME_CONFIG
-        value: ../config/addresses.json
+        value: config/addresses.json
+      - fromGroup: robin-coordinator-venue-auth
+      - key: VENUE_EVENT_CALLER_ID
+        value: runtime-collector
+      - key: COORDINATOR_HOSTPORT
+        fromService:
+          name: robin-execution-coordinator
+          type: pserv
+          property: hostport
       - key: RUST_LOG
         value: info
       - key: R2_BUCKET
@@ -102,6 +159,173 @@ services:
         sync: false
       - key: AWS_REGION
         value: auto
+
+  - type: pserv
+    name: robin-execution-coordinator
+    runtime: rust
+    plan: starter
+    region: virginia
+    buildCommand: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./coordinator/target/release/coordinator
+    healthCheckPath: /livez
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    buildFilter:
+      paths:
+        - coordinator/**
+        - execution/**
+        - research/**
+        - render.yaml
+    envVars:
+      - key: COORDINATOR_ENABLED
+        value: "false"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: robin-research
+          property: connectionPoolString
+      - fromGroup: robin-coordinator-intent-auth
+      - fromGroup: robin-coordinator-exit-auth
+      - fromGroup: robin-coordinator-venue-auth
+      - fromGroup: robin-coordinator-market-auth
+      - key: INTENT_CALLER_ID
+        value: shadow-processor
+      - key: EXIT_CALLER_ID
+        value: risk-operator
+      - key: VENUE_EVENT_CALLER_ID
+        value: runtime-collector
+      - key: MARKET_QUOTE_CALLER_ID
+        value: execution-authority
+      - key: COORDINATOR_WORKER_ID
+        value: coordinator-1
+      - key: SIGNER_CALLER_ID
+        value: execution-coordinator
+      - fromGroup: robin-lighter-signer-auth
+      - fromGroup: robin-robinhood-signer-auth
+      - key: LIGHTER_API_URL
+        value: https://mainnet.zklighter.elliot.ai
+      - key: LIGHTER_SIGNER_HOSTPORT
+        fromService:
+          name: robin-lighter-signer
+          type: pserv
+          property: hostport
+      - key: ROBINHOOD_SIGNER_HOSTPORT
+        fromService:
+          name: robin-robinhood-signer
+          type: pserv
+          property: hostport
+      - key: RUST_LOG
+        value: info
+
+  - type: pserv
+    name: robin-lighter-signer
+    runtime: go
+    plan: starter
+    region: virginia
+    buildCommand: cd signer/lighter && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/lighter-signer .
+    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./signer/lighter/bin/lighter-signer
+    healthCheckPath: /livez
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    buildFilter:
+      paths:
+        - signer/lighter/**
+        - render.yaml
+    envVars:
+      - key: LIGHTER_SIGNER_ENABLED
+        value: "false"
+      - key: GO_VERSION
+        value: "1.26.5"
+      - fromGroup: robin-lighter-signer-auth
+      - key: SIGNER_CALLER_ID
+        value: execution-coordinator
+      - key: SIGNER_MAX_REQUESTS_PER_MINUTE
+        value: "60"
+      - key: SIGNER_MAX_CONCURRENT_REQUESTS
+        value: "4"
+      - key: LIGHTER_API_PRIVATE_KEY
+        sync: false
+      - key: LIGHTER_CHAIN_ID
+        value: "304"
+
+  - type: pserv
+    name: robin-robinhood-signer
+    runtime: go
+    plan: starter
+    region: virginia
+    buildCommand: cd signer/robinhood && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/robinhood-signer .
+    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./signer/robinhood/bin/robinhood-signer
+    healthCheckPath: /livez
+    autoDeployTrigger: checksPass
+    maxShutdownDelaySeconds: 30
+    buildFilter:
+      paths:
+        - signer/robinhood/**
+        - render.yaml
+    envVars:
+      - key: ROBINHOOD_SIGNER_ENABLED
+        value: "false"
+      - key: GO_VERSION
+        value: "1.26.5"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: robin-research
+          property: connectionPoolString
+      - fromGroup: robin-robinhood-signer-auth
+      - key: SIGNER_CALLER_ID
+        value: execution-coordinator
+      - key: ROBINHOOD_RPC_URL
+        sync: false
+      - key: ROBINHOOD_RECONCILIATION_RPC_URL
+        sync: false
+      - key: ROBINHOOD_CHAIN_ID
+        value: "4663"
+      - key: AWS_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_KMS_KEY_ID
+        sync: false
+      - key: ROBINHOOD_SIGNER_ADDRESS
+        sync: false
+      - key: ROBINHOOD_TIMELOCK_ADDRESS
+        sync: false
+      - key: ROBINHOOD_RECOVERY_ADDRESS
+        sync: false
+      - key: ROBINHOOD_GUARDIAN_ADDRESS
+        sync: false
+      - key: ROBINHOOD_VAULT_ADDRESS
+        sync: false
+      - key: ROBINHOOD_VAULT_CODE_HASH
+        sync: false
+      - key: ROBINHOOD_RISK_MANAGER_ADDRESS
+        sync: false
+      - key: ROBINHOOD_RISK_MANAGER_CODE_HASH
+        sync: false
+      - key: ROBINHOOD_SPOT_ADAPTER_ADDRESS
+        sync: false
+      - key: ROBINHOOD_SPOT_ADAPTER_CODE_HASH
+        sync: false
+      - key: ROBINHOOD_MAX_GAS_LIMIT
+        sync: false
+      - key: ROBINHOOD_MAX_PRIORITY_FEE_WEI
+        sync: false
+      - key: ROBINHOOD_MAX_FEE_PER_GAS_WEI
+        sync: false
+      - key: ROBINHOOD_MAX_TRANSACTION_COST_WEI
+        sync: false
+      - key: ROBINHOOD_MINIMUM_GAS_RESERVE_WEI
+        sync: false
+      - key: ROBINHOOD_MAX_REPLACEMENTS
+        sync: false
+      - key: ROBINHOOD_MAX_REPLACEMENT_AGE
+        sync: false
+      - key: SIGNER_MAX_REQUESTS_PER_MINUTE
+        sync: false
+      - key: SIGNER_MAX_CONCURRENT_REQUESTS
+        sync: false
+
 databases:
   - name: robin-app
     databaseName: robin_app
@@ -112,8 +336,15 @@ databases:
   - name: robin-research
     databaseName: robin_research
     user: robin_runtime
-    plan: basic-1gb
+    plan: pro-4gb
+    diskSizeGB: 100
+    storageAutoscalingEnabled: true
+    postgresMajorVersion: "18"
     region: virginia
+    connectionPool: pgbouncer
+    highAvailability:
+      enabled: true
     ipAllowList: []
+
 previews:
-  generation: none
+  generation: "off"

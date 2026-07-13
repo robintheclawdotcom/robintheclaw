@@ -43,7 +43,7 @@ pub struct LighterTransactionOptions {
     pub expires_at_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedLighterTransaction {
     pub intent_id: String,
@@ -52,7 +52,7 @@ pub struct SignedLighterTransaction {
     pub tx_info: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LighterSubmission {
     pub code: i32,
     pub message: Option<String>,
@@ -61,7 +61,7 @@ pub struct LighterSubmission {
     pub volume_quota_remaining: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RobinhoodExecuteRequest {
     pub request_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,7 +69,7 @@ pub struct RobinhoodExecuteRequest {
     pub intent: RobinhoodSpotIntent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RobinhoodSpotIntent {
     pub id: String,
     pub stock_token: String,
@@ -80,7 +80,7 @@ pub struct RobinhoodSpotIntent {
     pub config_version: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RobinhoodSubmission {
     pub request_id: String,
     pub intent_id: String,
@@ -97,6 +97,8 @@ pub enum SignerClientError {
     SignerTransport,
     #[error("signer rejected request with status {0}")]
     SignerRejected(u16),
+    #[error("Robinhood writer returned terminal journal state {0}")]
+    RobinhoodJournalRejected(String),
     #[error("signer returned an invalid response")]
     InvalidSignerResponse,
     #[error("Lighter submission outcome is ambiguous")]
@@ -105,6 +107,8 @@ pub enum SignerClientError {
     LighterRejected(i32),
     #[error("Lighter returned an inconsistent transaction hash")]
     LighterHashMismatch,
+    #[error("Lighter nonce query failed")]
+    LighterNonceQuery,
     #[error("system clock is unavailable")]
     Clock,
 }
@@ -174,9 +178,15 @@ impl SignerClients {
             .await
             .map_err(|_| SignerClientError::AmbiguousLighterSubmission)?;
         if !status.is_success() {
+            if status.is_server_error()
+                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            {
+                return Err(SignerClientError::AmbiguousLighterSubmission);
+            }
             let code = serde_json::from_slice::<ResultCode>(&body)
                 .map(|result| result.code)
-                .unwrap_or(i32::from(status.as_u16()));
+                .map_err(|_| SignerClientError::AmbiguousLighterSubmission)?;
             return Err(SignerClientError::LighterRejected(code));
         }
         let submission: LighterSubmission = serde_json::from_slice(&body)
@@ -190,6 +200,36 @@ impl SignerClients {
             return Err(SignerClientError::LighterHashMismatch);
         }
         Ok(submission)
+    }
+
+    pub async fn fetch_lighter_nonce(
+        &self,
+        account_index: i64,
+        api_key_index: u8,
+    ) -> Result<i64, SignerClientError> {
+        let response = self
+            .client
+            .get(format!("{}/api/v1/nextNonce", self.lighter_api_url))
+            .query(&[
+                ("account_index", account_index.to_string()),
+                ("api_key_index", api_key_index.to_string()),
+            ])
+            .send()
+            .await
+            .map_err(|_| SignerClientError::LighterNonceQuery)?;
+        let status = response.status();
+        let body = read_limited(response)
+            .await
+            .map_err(|_| SignerClientError::LighterNonceQuery)?;
+        if !status.is_success() {
+            return Err(SignerClientError::LighterNonceQuery);
+        }
+        let result: NextNonce =
+            serde_json::from_slice(&body).map_err(|_| SignerClientError::LighterNonceQuery)?;
+        if result.code != 200 || result.nonce < 0 {
+            return Err(SignerClientError::LighterNonceQuery);
+        }
+        Ok(result.nonce)
     }
 
     pub async fn execute_robinhood_spot(
@@ -207,8 +247,15 @@ impl SignerClients {
         if submission.request_id != request.request_id
             || submission.intent_id != request.intent.id
             || !valid_hash(&submission.tx_hash)
-            || submission.status != "submitted"
         {
+            return Err(SignerClientError::InvalidSignerResponse);
+        }
+        if rejected_robinhood_submission(&submission.status) {
+            return Err(SignerClientError::RobinhoodJournalRejected(
+                submission.status,
+            ));
+        }
+        if !accepted_robinhood_submission(&submission.status) {
             return Err(SignerClientError::InvalidSignerResponse);
         }
         Ok(submission)
@@ -298,12 +345,40 @@ async fn read_limited(mut response: Response) -> Result<Vec<u8>, reqwest::Error>
 fn valid_hash(value: &str) -> bool {
     value.len() == 66
         && value.starts_with("0x")
-        && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        && value[2..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && value[2..].bytes().any(|byte| byte != b'0')
+}
+
+fn accepted_robinhood_submission(status: &str) -> bool {
+    matches!(
+        status,
+        "signed"
+            | "submitted"
+            | "soft_confirmed"
+            | "l1_posted"
+            | "ethereum_final"
+            | "ambiguous"
+            | "replaced"
+            | "superseded"
+            | "quarantined"
+    )
+}
+
+fn rejected_robinhood_submission(status: &str) -> bool {
+    status == "reverted"
 }
 
 #[derive(Deserialize)]
 struct ResultCode {
     code: i32,
+}
+
+#[derive(Deserialize)]
+struct NextNonce {
+    code: i32,
+    nonce: i64,
 }
 
 #[cfg(test)]
@@ -439,6 +514,117 @@ mod tests {
         assert_eq!(result, Err(SignerClientError::LighterRejected(21100)));
     }
 
+    #[tokio::test]
+    async fn lighter_server_failure_is_ambiguous() {
+        let app = Router::new().route(
+            "/api/v1/sendTx",
+            post(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"code": 503})),
+                )
+            }),
+        );
+        let base_url = serve(app).await;
+        let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
+        let result = clients
+            .broadcast_lighter(&SignedLighterTransaction {
+                intent_id: "intent-1".into(),
+                tx_type: 14,
+                tx_hash: HASH.into(),
+                tx_info: serde_json::json!({"Nonce": 1}),
+            })
+            .await;
+        assert_eq!(result, Err(SignerClientError::AmbiguousLighterSubmission));
+    }
+
+    #[tokio::test]
+    async fn next_nonce_query_is_scoped_to_account_and_key() {
+        let captured = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/api/v1/nextNonce",
+                axum::routing::get(
+                    |State(state): State<Arc<Mutex<Option<String>>>>,
+                     request: axum::extract::Request| async move {
+                        *state.lock().unwrap() = request.uri().query().map(str::to_owned);
+                        Json(serde_json::json!({"code": 200, "nonce": 42}))
+                    },
+                ),
+            )
+            .with_state(captured.clone());
+        let base_url = serve(app).await;
+        let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
+        assert_eq!(clients.fetch_lighter_nonce(7, 3).await, Ok(42));
+        let query = captured.lock().unwrap().take().unwrap();
+        assert!(query.contains("account_index=7"));
+        assert!(query.contains("api_key_index=3"));
+    }
+
+    #[tokio::test]
+    async fn robinhood_accepts_states_that_require_chain_reconciliation() {
+        for status in [
+            "signed",
+            "submitted",
+            "soft_confirmed",
+            "l1_posted",
+            "ethereum_final",
+            "ambiguous",
+            "replaced",
+            "superseded",
+            "quarantined",
+        ] {
+            let app = robinhood_app(StatusCode::ACCEPTED, status);
+            let base_url = serve(app).await;
+            let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
+            let submission = clients
+                .execute_robinhood_spot(&robinhood_request())
+                .await
+                .unwrap();
+            assert_eq!(submission.status, status);
+        }
+    }
+
+    #[tokio::test]
+    async fn robinhood_rejects_terminal_failure_states() {
+        let app = robinhood_app(StatusCode::ACCEPTED, "reverted");
+        let base_url = serve(app).await;
+        let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
+        let result = clients.execute_robinhood_spot(&robinhood_request()).await;
+        assert_eq!(
+            result,
+            Err(SignerClientError::RobinhoodJournalRejected(
+                "reverted".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn transaction_hashes_must_be_nonzero() {
+        assert!(valid_hash(HASH));
+        assert!(!valid_hash(
+            "0x0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+    }
+
+    #[tokio::test]
+    async fn robinhood_rejects_unknown_journal_state() {
+        let app = robinhood_app(StatusCode::ACCEPTED, "unknown");
+        let base_url = serve(app).await;
+        let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
+        let result = clients.execute_robinhood_spot(&robinhood_request()).await;
+        assert_eq!(result, Err(SignerClientError::InvalidSignerResponse));
+    }
+
+    #[tokio::test]
+    async fn robinhood_conflict_is_a_deterministic_signer_rejection() {
+        let app = Router::new().route("/v1/spot-intents", post(|| async { StatusCode::CONFLICT }));
+        let base_url = serve(app).await;
+        let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
+        let result = clients.execute_robinhood_spot(&robinhood_request()).await;
+        assert_eq!(result, Err(SignerClientError::SignerRejected(409)));
+    }
+
     fn lighter_request() -> LighterCreateOrderRequest {
         LighterCreateOrderRequest {
             intent_id: "intent-1".into(),
@@ -451,12 +637,50 @@ mod tests {
             time_in_force: 0,
             reduce_only: false,
             trigger_price: 0,
-            order_expiry_ms: 1_800_000_000_000,
+            order_expiry_ms: 0,
             transaction: LighterTransactionOptions {
                 nonce: 1,
                 expires_at_ms: 1_800_000_000_000,
             },
         }
+    }
+
+    fn robinhood_request() -> RobinhoodExecuteRequest {
+        RobinhoodExecuteRequest {
+            request_id: "action-1".into(),
+            replaces_request_id: None,
+            intent: RobinhoodSpotIntent {
+                id: "0x1111111111111111111111111111111111111111111111111111111111111111".into(),
+                stock_token: "0x0000000000000000000000000000000000000001".into(),
+                side: "buy_spot".into(),
+                amount_in: "25000000".into(),
+                min_amount_out: "1990000".into(),
+                deadline: 1_800_000_001,
+                config_version: 1,
+            },
+        }
+    }
+
+    fn robinhood_app(status_code: StatusCode, status: &str) -> Router {
+        let status = status.to_owned();
+        Router::new().route(
+            "/v1/spot-intents",
+            post(move || {
+                let status = status.clone();
+                async move {
+                    (
+                        status_code,
+                        Json(serde_json::json!({
+                            "request_id": "action-1",
+                            "intent_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                            "tx_hash": HASH,
+                            "nonce": 7,
+                            "status": status,
+                        })),
+                    )
+                }
+            }),
+        )
     }
 
     fn clients(

@@ -45,7 +45,9 @@ Changing an enable flag is a release operation, not routine configuration. It re
 7. an operator record identifying the approver, release, configuration digest, and rollback owner.
 
 Enabling one signer does not enable the coordinator. Enabling the coordinator does not authorize an
-intent without `canary_eligible` evidence. Contract deployment does not authorize funding.
+intent without `canary_eligible` evidence. The durable coordinator mode is independently initialized
+to `HALTED`; changing an environment flag does not change it. Contract deployment does not authorize
+funding.
 
 ## Database connections
 
@@ -86,14 +88,21 @@ authorization window in memory; the coordinator remains responsible for durable 
 nonce journals across restarts. Signer concurrency and per-minute request rates are bounded before
 private-key operations begin.
 
+Coordinator writers are separated again by scope: shadow intent admission, operator exit and
+recovery, runtime venue events, and execution-authority quotes use distinct callers and HMAC keys.
+Their nonces are claimed durably before a request reaches the store. Recovery shares the operator
+exit credential, cannot be called by the shadow or collector services, and can enqueue only a
+successor derived from an ambiguous or failed-safe durable action record.
+
 Environment changes are treated as deployment changes. After a change, readiness remains off until
 the service has revalidated its dependency identities and persisted configuration digest.
 
 ## Build and release controls
 
 Every service builds from the repository root without a Blueprint `rootDir`. Rust builds use locked
-Cargo resolution, Node uses `npm ci`, and Go verifies its module cache before compiling. Automatic
-deployment is `checksPass` for every service.
+Cargo resolution, Node uses `npm ci`, and Go verifies its module cache before compiling. Both signer
+modules, CI, and Render pin the same security-patched Go toolchain. Automatic deployment is
+`checksPass` for every service.
 
 The release sequence is:
 
@@ -116,7 +125,13 @@ activation remains blocked while any of the following is true:
 - there is no independently operated shadow/research processor binary;
 - collector production RPC, sequencer verification, archive reconciliation, or soak evidence is
   incomplete;
-- the coordinator does not durably submit and reconcile both legs of the execution saga;
+- runtime collectors do not yet deliver authenticated Lighter account and Robinhood chain
+  observations into the coordinator's durable reconciliation stream;
+- the execution-authority publisher does not yet deliver contemporaneous Lighter marks and
+  block-pinned Uniswap v4 exact-input spot-exit quotes, including reviewed pool, hook, and runtime
+  code-hash evidence;
+- the coordinator does not yet verify live Lighter collateral, margin, and account position before
+  signing, so the declared leverage field is not a capital-safety control;
 - either signer relies on an authentication or nonce design with an unresolved audit finding;
 - R2 retention locks, database recovery exports, telemetry sinks, or alert routes are unverified;
 - contract, executor, key, legal, venue, or empirical promotion evidence is incomplete.

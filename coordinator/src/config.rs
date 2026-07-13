@@ -6,13 +6,23 @@ pub struct Config {
     pub enabled: bool,
     pub listen: SocketAddr,
     pub database_url: Option<String>,
-    pub api_token: Option<String>,
+    pub intent_hmac_key: Option<[u8; 32]>,
+    pub intent_caller_id: Option<String>,
+    pub exit_hmac_key: Option<[u8; 32]>,
+    pub exit_caller_id: Option<String>,
+    pub venue_hmac_key: Option<[u8; 32]>,
+    pub venue_caller_id: Option<String>,
+    pub market_hmac_key: Option<[u8; 32]>,
+    pub market_caller_id: Option<String>,
     pub lighter_signer_url: Option<String>,
     pub robinhood_signer_url: Option<String>,
     pub signer_caller_id: Option<String>,
     pub lighter_signer_hmac_key: Option<[u8; 32]>,
     pub robinhood_signer_hmac_key: Option<[u8; 32]>,
     pub lighter_api_url: Option<String>,
+    pub lighter_account_index: Option<i64>,
+    pub lighter_api_key_index: Option<u8>,
+    pub worker_id: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -21,16 +31,20 @@ pub enum ConfigError {
     InvalidListen,
     #[error("{0} is required when execution is enabled")]
     Missing(&'static str),
-    #[error("COORDINATOR_API_TOKEN must contain at least 32 bytes")]
-    WeakToken,
     #[error("signer URLs must use HTTPS or Render private-network HTTP")]
     InvalidSignerUrl,
-    #[error("signer HMAC keys must be 32-byte hex values")]
+    #[error("HMAC keys must be 32-byte hex values")]
     InvalidHmacKey,
+    #[error("HMAC keys must be pairwise distinct")]
+    DuplicateHmacKey,
     #[error("SIGNER_CALLER_ID must be a lowercase service identifier")]
     InvalidCallerId,
     #[error("LIGHTER_API_URL must be an official HTTPS endpoint")]
     InvalidLighterApiUrl,
+    #[error("Lighter account and API-key indices are invalid")]
+    InvalidLighterIdentity,
+    #[error("COORDINATOR_WORKER_ID must be a lowercase service identifier")]
+    InvalidWorkerId,
 }
 
 impl Config {
@@ -46,26 +60,46 @@ impl Config {
                 enabled,
                 listen,
                 database_url: None,
-                api_token: None,
+                intent_hmac_key: None,
+                intent_caller_id: None,
+                exit_hmac_key: None,
+                exit_caller_id: None,
+                venue_hmac_key: None,
+                venue_caller_id: None,
+                market_hmac_key: None,
+                market_caller_id: None,
                 lighter_signer_url: None,
                 robinhood_signer_url: None,
                 signer_caller_id: None,
                 lighter_signer_hmac_key: None,
                 robinhood_signer_hmac_key: None,
                 lighter_api_url: None,
+                lighter_account_index: None,
+                lighter_api_key_index: None,
+                worker_id: None,
             });
         }
         let config = Self {
             enabled,
             listen,
             database_url: env::var("DATABASE_URL").ok(),
-            api_token: env::var("COORDINATOR_API_TOKEN").ok(),
+            intent_hmac_key: hmac_key("COORDINATOR_INTENT_HMAC_KEY")?,
+            intent_caller_id: env::var("INTENT_CALLER_ID").ok(),
+            exit_hmac_key: hmac_key("COORDINATOR_EXIT_HMAC_KEY")?,
+            exit_caller_id: env::var("EXIT_CALLER_ID").ok(),
+            venue_hmac_key: hmac_key("COORDINATOR_VENUE_HMAC_KEY")?,
+            venue_caller_id: env::var("VENUE_EVENT_CALLER_ID").ok(),
+            market_hmac_key: hmac_key("COORDINATOR_MARKET_HMAC_KEY")?,
+            market_caller_id: env::var("MARKET_QUOTE_CALLER_ID").ok(),
             lighter_signer_url: signer_url("LIGHTER_SIGNER_URL", "LIGHTER_SIGNER_HOSTPORT")?,
             robinhood_signer_url: signer_url("ROBINHOOD_SIGNER_URL", "ROBINHOOD_SIGNER_HOSTPORT")?,
             signer_caller_id: env::var("SIGNER_CALLER_ID").ok(),
             lighter_signer_hmac_key: hmac_key("LIGHTER_SIGNER_HMAC_KEY")?,
             robinhood_signer_hmac_key: hmac_key("ROBINHOOD_SIGNER_HMAC_KEY")?,
             lighter_api_url: env::var("LIGHTER_API_URL").ok(),
+            lighter_account_index: positive_i64("LIGHTER_ACCOUNT_INDEX")?,
+            lighter_api_key_index: api_key_index("LIGHTER_API_KEY_INDEX")?,
+            worker_id: env::var("COORDINATOR_WORKER_ID").ok(),
         };
         config.validate()?;
         Ok(config)
@@ -77,7 +111,6 @@ impl Config {
         }
         let required = [
             (self.database_url.as_deref(), "DATABASE_URL"),
-            (self.api_token.as_deref(), "COORDINATOR_API_TOKEN"),
             (self.lighter_signer_url.as_deref(), "LIGHTER_SIGNER_URL"),
             (self.robinhood_signer_url.as_deref(), "ROBINHOOD_SIGNER_URL"),
             (self.signer_caller_id.as_deref(), "SIGNER_CALLER_ID"),
@@ -88,12 +121,22 @@ impl Config {
                 return Err(ConfigError::Missing(name));
             }
         }
-        if self
-            .api_token
-            .as_deref()
-            .is_none_or(|value| value.len() < 32)
+        if self.intent_hmac_key.is_none()
+            || self.exit_hmac_key.is_none()
+            || self.venue_hmac_key.is_none()
+            || self.market_hmac_key.is_none()
         {
-            return Err(ConfigError::WeakToken);
+            return Err(ConfigError::InvalidHmacKey);
+        }
+        for caller in [
+            self.intent_caller_id.as_deref(),
+            self.exit_caller_id.as_deref(),
+            self.venue_caller_id.as_deref(),
+            self.market_caller_id.as_deref(),
+        ] {
+            if caller.is_none_or(|value| !valid_caller_id(value)) {
+                return Err(ConfigError::InvalidCallerId);
+            }
         }
         for url in [
             self.lighter_signer_url.as_deref().unwrap(),
@@ -105,6 +148,17 @@ impl Config {
         }
         if self.lighter_signer_hmac_key.is_none() || self.robinhood_signer_hmac_key.is_none() {
             return Err(ConfigError::InvalidHmacKey);
+        }
+        let hmac_keys = [
+            self.intent_hmac_key.unwrap(),
+            self.exit_hmac_key.unwrap(),
+            self.venue_hmac_key.unwrap(),
+            self.market_hmac_key.unwrap(),
+            self.lighter_signer_hmac_key.unwrap(),
+            self.robinhood_signer_hmac_key.unwrap(),
+        ];
+        if !hmac_keys_are_distinct(&hmac_keys) {
+            return Err(ConfigError::DuplicateHmacKey);
         }
         if self
             .signer_caller_id
@@ -120,6 +174,16 @@ impl Config {
         {
             return Err(ConfigError::InvalidLighterApiUrl);
         }
+        if self.lighter_account_index.is_none() || self.lighter_api_key_index.is_none() {
+            return Err(ConfigError::InvalidLighterIdentity);
+        }
+        if self
+            .worker_id
+            .as_deref()
+            .is_none_or(|value| !valid_caller_id(value))
+        {
+            return Err(ConfigError::InvalidWorkerId);
+        }
         Ok(())
     }
 }
@@ -133,6 +197,38 @@ fn hmac_key(name: &'static str) -> Result<Option<[u8; 32]>, ConfigError> {
         .try_into()
         .map(Some)
         .map_err(|_| ConfigError::InvalidHmacKey)
+}
+
+fn hmac_keys_are_distinct(keys: &[[u8; 32]]) -> bool {
+    keys.iter()
+        .enumerate()
+        .all(|(index, key)| !keys[index + 1..].contains(key))
+}
+
+fn positive_i64(name: &'static str) -> Result<Option<i64>, ConfigError> {
+    let Ok(value) = env::var(name) else {
+        return Ok(None);
+    };
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| ConfigError::InvalidLighterIdentity)?;
+    if parsed <= 0 {
+        return Err(ConfigError::InvalidLighterIdentity);
+    }
+    Ok(Some(parsed))
+}
+
+fn api_key_index(name: &'static str) -> Result<Option<u8>, ConfigError> {
+    let Ok(value) = env::var(name) else {
+        return Ok(None);
+    };
+    let parsed = value
+        .parse::<u8>()
+        .map_err(|_| ConfigError::InvalidLighterIdentity)?;
+    if !(2..=254).contains(&parsed) {
+        return Err(ConfigError::InvalidLighterIdentity);
+    }
+    Ok(Some(parsed))
 }
 
 fn valid_caller_id(value: &str) -> bool {
@@ -203,13 +299,23 @@ mod tests {
             enabled: true,
             listen: "127.0.0.1:8080".parse().unwrap(),
             database_url: Some("postgres://db".into()),
-            api_token: Some("a".repeat(32)),
+            intent_hmac_key: Some([3; 32]),
+            intent_caller_id: Some("shadow-processor".into()),
+            exit_hmac_key: Some([6; 32]),
+            exit_caller_id: Some("risk-operator".into()),
+            venue_hmac_key: Some([4; 32]),
+            venue_caller_id: Some("runtime-collector".into()),
+            market_hmac_key: Some([5; 32]),
+            market_caller_id: Some("execution-authority".into()),
             lighter_signer_url: Some("http://lighter.internal:8080".into()),
             robinhood_signer_url: Some("https://signer.example".into()),
             signer_caller_id: Some("execution-coordinator".into()),
             lighter_signer_hmac_key: Some([1; 32]),
             robinhood_signer_hmac_key: Some([2; 32]),
             lighter_api_url: Some("https://mainnet.zklighter.elliot.ai".into()),
+            lighter_account_index: Some(1),
+            lighter_api_key_index: Some(2),
+            worker_id: Some("coordinator-1".into()),
         }
     }
 
@@ -218,13 +324,23 @@ mod tests {
         let mut config = enabled();
         config.enabled = false;
         config.database_url = None;
-        config.api_token = None;
+        config.intent_hmac_key = None;
+        config.intent_caller_id = None;
+        config.exit_hmac_key = None;
+        config.exit_caller_id = None;
+        config.venue_hmac_key = None;
+        config.venue_caller_id = None;
+        config.market_hmac_key = None;
+        config.market_caller_id = None;
         config.lighter_signer_url = None;
         config.robinhood_signer_url = None;
         config.signer_caller_id = None;
         config.lighter_signer_hmac_key = None;
         config.robinhood_signer_hmac_key = None;
         config.lighter_api_url = None;
+        config.lighter_account_index = None;
+        config.lighter_api_key_index = None;
+        config.worker_id = None;
         assert_eq!(config.validate(), Ok(()));
     }
 
@@ -256,5 +372,25 @@ mod tests {
         let mut config = enabled();
         config.lighter_api_url = Some("https://lighter.invalid".into());
         assert_eq!(config.validate(), Err(ConfigError::InvalidLighterApiUrl));
+    }
+
+    #[test]
+    fn shared_hmac_key_is_rejected() {
+        let mut config = enabled();
+        config.robinhood_signer_hmac_key = config.intent_hmac_key;
+        assert_eq!(config.validate(), Err(ConfigError::DuplicateHmacKey));
+    }
+
+    #[test]
+    fn hmac_key_distinctness_checks_every_pair() {
+        let unique = [[1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32]];
+        assert!(hmac_keys_are_distinct(&unique));
+        for left in 0..unique.len() {
+            for right in left + 1..unique.len() {
+                let mut keys = unique;
+                keys[right] = keys[left];
+                assert!(!hmac_keys_are_distinct(&keys));
+            }
+        }
     }
 }

@@ -2,6 +2,7 @@ pub mod api;
 pub mod config;
 pub mod signer_client;
 pub mod store;
+pub mod worker;
 
 use config::Config;
 use signer_client::SignerClients;

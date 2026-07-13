@@ -88,6 +88,134 @@ order state and fills must be reconciled from authenticated streams before the s
 [Lighter transaction signing](https://apidocs.lighter.xyz/docs/trading),
 [sendTx](https://apidocs.lighter.xyz/reference/sendtx).
 
+## Paired-entry saga
+
+Intent admission, venue-event ingestion, and market-authority publication are private,
+HMAC-authenticated interfaces with distinct keys and caller identities. Each signature binds the
+exact request body, and PostgreSQL claims each request nonce before processing, so replay remains
+blocked across coordinator restarts. Lifecycle events cannot be posted through the intent or quote
+interfaces. Only the authenticated venue-event path can advance reconciliation.
+
+The coordinator database starts in `HALTED`. Admission requires an operator-reviewed transition to
+`ACTIVE`, a latest promotion state of `canary_eligible`, current promotion evidence, and no unresolved
+episode anywhere in the deployment. A later `retired` or `rejected` transition revokes admission.
+`REDUCE_ONLY` and `HALTED` block new short orders but continue reconciliation, spot hedges, and
+emergency unwinds. An ambiguous or failed-safe action atomically returns the coordinator to
+`HALTED`.
+
+An admitted intent is current, long-spot/short-perp, multiplier-consistent, and within the absolute
+and NAV-relative canary caps. Admission resolves the referenced market manifest from an append-only,
+operator-reviewed configuration record and resolves the quote from the separately authenticated
+market-data path. Symbol, token, venue market, decimals, contract configuration version, multiplier,
+mark, quote block, quote timestamps, entry-price deviation, and minimum spot output must match
+reviewed policy. The
+coordinator then derives conservative perp notional from the reviewed precision and the greater of
+the authoritative mark and executable limit; the declared notional must match. An intent caller
+cannot select its own decimal scale or price evidence. Entry and every reserved unwind client-order
+index are globally unique for the deployment. Entry and unwind spot intent IDs share a global replay
+registry.
+
+Admission records `PrecheckPassed` and enqueues one durable `submit_perp` action. Every claim receives
+a random lease-fencing token. All state changes require the token and an unexpired lease, so an old
+process cannot complete or rebroadcast an action after a replacement worker has reclaimed it. Action
+keys prevent duplicate stages for the same intent. A `submit_perp` claim also captures the current
+execution-control version. Immediately before the first irreversible venue send, the worker locks
+the action and control record in one transaction and records authorization only if the mode remains
+`ACTIVE` at the claimed version. A halt increments the version, fencing every older claim. A
+persisted signature alone is not proof of a send and cannot cross an expired or halted authorization
+boundary. A signature paired with durable send authorization, or any recorded submission attempt, is
+treated as potentially live; it is reconciled after restart and cannot be converted to an expired
+no-exposure result.
+
+The entry path is:
+
+1. fetch Lighter's next nonce for the configured account and API-key index;
+2. reserve the greater of the observed and journaled nonce in the same transaction that binds it to
+   the action;
+3. request an IOC short signature, then persist the exact signed response;
+4. submit through `sendTx`, persist the accepted response, and reconcile any timeout, rejection, or
+   response-hash mismatch as an unknown outcome;
+5. wait for authenticated account-stream acceptance, rejection, partial-fill, and terminal-fill
+   events;
+6. scale settlement input, minimum output, and target Stock Token quantity to the terminal perp fill;
+7. submit the typed spot intent through the KMS writer and wait for canonical chain observation;
+8. enter `Hedged` only when the multiplier-adjusted spot fill exactly matches the perp exposure.
+
+A signer timeout before Lighter submission is retryable because signing has no venue side effect.
+After any `sendTx` attempt, the reserved nonce is never released. HTTP failures and explicit API
+rejections cannot prove that the sequencer did not accept an earlier identical submission, so the
+coordinator halts new entries and retains a reconciliation action keyed by transaction hash and
+client-order index.
+
+Authenticated observations carry stable native event identity, publisher and receiver timestamps,
+source sequence, order or intent identity, transaction hash, and authoritative cumulative fill.
+Identity is the source, source session, and native event ID tuple because venue sequences may reset
+after reconnect. Duplicates within that tuple must match byte-for-byte normalized evidence; conflicts
+halt the coordinator. Sequence continuity is enforced within each source session. A gap is
+quarantined, but the append-only raw stream can heal when the missing sequence arrives: the locked
+session frontier advances across every now-contiguous stored event and revalidates its action binding
+before eligibility. Late events behind the frontier remain quarantined. Lighter reconciliation binds
+the transaction hash, client-order index, market, and direction. Robinhood reconciliation binds the
+single-use typed intent ID and configuration version. A fee replacement can confirm under a different
+transaction hash, so a predecessor hash identifies family evidence rather than the spot intent.
+Unrelated late events are retained as warning evidence without failing the active recovery action.
+
+Historical observations remain admissible after an outage. Request authentication is current, while
+publisher and receiver timestamps retain the original venue or chain times and may predate ingestion.
+Future-dated evidence is rejected. The database creation timestamp records when the coordinator
+ingested the backfill.
+
+Robinhood submissions are idempotent by request ID and body digest in the writer journal. The
+coordinator persists the exact typed request before the call, reconstructs it from immutable intent
+data after restart, and rejects any mismatch before retrying. `signed`, `submitted`,
+`soft_confirmed`, `l1_posted`, `ethereum_final`, `ambiguous`, `replaced`, `superseded`, and
+`quarantined` all require chain reconciliation; none proves that the typed intent had no chain
+effect. Only an Ethereum-final reverted receipt proves that candidate did not execute. HTTP 409 is
+also ambiguous because it can refer to an earlier journal row under the same request ID, so it halts
+admission and creates a reconciliation action instead of triggering a perp unwind. Unknown statuses
+fail closed. Transaction submission deadlines and reconciliation deadlines are separate: an expired
+intent blocks a new transaction but does not stop recovery of an already journaled transaction or
+finality tracking. An overdue journaled or submitted transaction halts admission and leaves a durable
+recovery action; an unknown capital state is never terminalized merely because a wall-clock deadline
+passed.
+
+A hedged episode does not close implicitly. The strategy or operator submits a separately
+HMAC-authenticated `POST /v1/exits` request with one of the reviewed exit reasons and an exact
+reference to a fresh, append-only execution-authority quote. An operator may use the same path to
+close a terminal known perp fill before any spot acquisition; that authority binds zero spot input
+and zero expected spot output. The record binds the intent, reviewed
+market manifest, Lighter mark, exact spot inventory, expected settlement output, publisher and
+receiver times, quote block, and expiry. The request supplies the worst acceptable reduce-only buy
+price, minimum settlement output, submission deadline, and independent reconciliation deadline.
+The coordinator enforces direction-aware price deviation and spot slippage against the reviewed
+market configuration, then revalidates the same quote immediately before each signer send.
+
+The coordinator records `ExitStarted`, enters reduce-only unwind state, closes the actual perp fill
+through the bounded repair path, sells the exact recorded spot inventory, and requires
+Ethereum-final balance conservation before emitting `Closed`. Emergency actions cannot reuse the
+entry-time price or minimum output. They wait for the newest matching execution-authority quote;
+missing or expired authority halts the send. A fresh authorized exit can resume an `Unhedged` or
+incomplete `Unwinding` episode without releasing the global exposure lock. Automatic repair remains
+bounded by the intent. After that bound, only an authenticated operator exit can allocate another
+reduce-only order; its client-order index comes from a durable recovery sequence and is registered in
+the global identifier ledger before signing. Exit actions remain permitted while entry admission is
+halted.
+
+Spot rejection, deadline expiry after a known perp fill, or a mismatched spot fill schedules a
+reduce-only IOC perp unwind. Partial unwind fills update cumulative open exposure and schedule a
+bounded repair order with a separately reserved client-order index. If spot inventory exists, the
+coordinator then submits a separate typed sell intent with its own replay-protected contract intent
+ID and verifies input and output balance conservation at Ethereum finality. The saga closes only
+after every acquired leg is proven closed. `Unhedged` retains the global exposure lock and accepts
+only an authorized recovery unwind. A separately authenticated `POST /v1/recoveries` request cannot
+create a blind send: it derives a successor only from a failed or ambiguous action's persisted
+request, send authorization, transaction identity, and payload. It resumes reconciliation after a
+poisoned post-broadcast action or replays the exact Robinhood request when its response was lost. The
+action enters failed-safe status and halts admission, while the saga remains in its recoverable
+capital state. The legacy `FailedSafe` saga state remains terminal and retains the lock. Neither path
+can authorize a new episode. No worker action can invoke
+withdrawal, transfer, governance, arbitrary calldata, leverage changes, or an untyped route.
+
 ## Nonce and broadcast protocol
 
 For a new transaction, the writer opens a PostgreSQL transaction, locks the chain-and-signer nonce
@@ -193,6 +321,7 @@ The migration must be applied before the service starts. Application startup doe
 alter tables. Required tables hold:
 
 - immutable deployment manifests;
+- append-only reviewed market configurations and authenticated executable-price evidence;
 - the chain-and-signer nonce cursor;
 - signed transactions and replacement relationships;
 - verification evidence and reconciliation schedule;

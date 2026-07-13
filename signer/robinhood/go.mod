@@ -2,6 +2,8 @@ module github.com/robintheclawdotcom/robin-the-claw/signer/robinhood
 
 go 1.25.0
 
+toolchain go1.26.5
+
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.31.18
 	github.com/aws/aws-sdk-go-v2/service/kms v1.45.4

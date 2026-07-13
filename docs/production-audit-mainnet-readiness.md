@@ -2,65 +2,117 @@
 
 ## Executive summary
 
-The repository is not ready to custody or trade mainnet capital. The contract suite is a sound
-starting point for a dormant single-owner boundary, but a generic call path is not a safe venue
-adapter and the research programme has not accumulated the evidence required to claim a durable
-edge. This audit hardens the deployable core and records the gates that engineering cannot satisfy
-by assertion.
+The repository is not ready to custody or trade mainnet capital. The obsolete generic execution
+surface has been replaced by typed contracts, durable signer journals, authoritative market gates,
+and a fail-closed execution saga with operator recovery. Those are necessary controls, not proof of
+production readiness. The authenticated venue streams, canonical chain observations, executable
+quote authority, margin verification, operational infrastructure, independent reviews, and elapsed
+research evidence required to close the control loop do not yet exist as verified production
+evidence. Deploying or funding now would be unsafe.
 
-## Critical issues (P0 — block release)
+## Critical issues (P0 - block capital activation)
 
-- [x] **A generic router selector could have been allowlisted.** Its declared notional is not a
-  binding limit on actual asset outflow. The mainnet deployment profile now rejects a router input,
-  starts halted, and deploys no allowed target. A typed, venue-specific adapter remains required.
-- [x] **Deployment wiring had no independent post-deploy assertion.** `VerifyDeployment.s.sol`
-  validates code presence, role separation, immutable references, limits, anchor wiring, and the
-  halted state against explicit operator inputs.
-- [ ] **No typed execution adapters exist.** A live adapter must bind asset, route, recipient,
-  maximum input, minimum output, deadline, slippage, and reconciliation semantics. It also needs a
-  verified venue specification and an independent review.
-- [ ] **No real testnet order lifecycle exists.** The current proof is synthetic and has no
-  execution venue. Successful order, cancel, partial fill, rejected hedge, and unwind evidence is
-  mandatory before enabling an adapter.
-- [ ] **The research gate is incomplete.** There is no 180-day immutable capture set or 60-day
-  continuous paired-shadow record. This is elapsed evidence, not an implementation task.
-- [ ] **No independent smart-contract audit has been completed.** The tracked audit scope is ready
-  for handoff, but internal tests and reviews do not satisfy this requirement.
+- [ ] **The empirical promotion window is incomplete.** Capital activation requires 180 calendar
+  days of verified capture and 60 continuous days of auditable shadow operation. These clocks cannot
+  be shortened or backfilled.
+- [ ] **Independent review is incomplete.** The contracts require an external audit, and the
+  coordinator, both signer services, key topology, and recovery runbooks require an independent
+  executor and operational-key review with no open critical or high findings.
+- [ ] **Legal and venue approval is absent.** Written approval must cover the operating jurisdiction,
+  automated trading, Stock Tokens, Lighter access, custody, and the canary operating model.
+- [ ] **Production reconciliation inputs are unwired.** The coordinator cannot safely trade until an
+  authenticated Lighter account stream and independently reconciled Ethereum-final Robinhood Chain
+  event source continuously supply its append-only venue-event ledger.
+- [ ] **Executable exit authority is unwired.** No production publisher currently supplies the fresh
+  Lighter mark and block-pinned, reviewed Uniswap v4 exact-input quote required before every unwind
+  send.
 
-## High priority (P1 — fix before capital)
+## High priority (P1 - block technical mainnet readiness)
 
-- [ ] Deploy the private collector with worker-only R2 credentials and private Postgres access;
-  retain source-health and archive-write evidence.
-- [ ] Implement verified executable spot quotes, authenticated perp lifecycle handling, and paired
-  reconciliation. Do not fabricate fills when either venue is stale.
-- [ ] Add portfolio covariance, factor, margin, liquidation, and emergency-unwind controls to the
-  execution promotion path.
-- [ ] Complete an operational key review: isolated owner and agent keys, recovery procedure,
-  monitoring, alert routing, and owner-approved canary workflow.
+- [x] Replace caller-selected target and calldata execution with typed spot intents, a typed risk
+  manager, and an internally constructed reviewed route.
+- [x] Persist saga actions, native event identities, nonce reservations, send authorization, exact
+  Robinhood requests, replacement-family outcomes, and operator recovery in PostgreSQL.
+- [x] Keep automatic unwind attempts bounded while allowing an authenticated operator to allocate a
+  new globally unique reduce-only order identity without reuse.
+- [x] Preserve the exposure lock after failed-safe actions and provide reconciliation-only recovery
+  from durable post-broadcast evidence.
+- [ ] Verify Lighter collateral, margin, open position, funding, account identity, and subaccount
+  isolation immediately before signing and during reconciliation.
+- [ ] Apply production migrations through a dedicated release identity with rollback evidence,
+  least-privilege roles, PgBouncer behavior tests, HA failover evidence, and a completed restore
+  drill.
+- [ ] Provision bucket-scoped R2 credentials, retention locks, daily manifest reconciliation,
+  telemetry export, on-call routes, and tested incident automation.
+- [ ] Complete the one-hour 2x-peak benchmark, 24-hour connector chaos test, 72-hour production soak,
+  deterministic replay proof, and 180-day capacity projection.
+- [ ] Meet contract branch-coverage, invariant, fuzz, mainnet-fork, formal-verification, reproducible
+  bytecode, and provenance gates before external audit handoff.
 
 ## Security assessment
 
-The owner is a deliberate human-control boundary and can defund or change policy. This is suitable
-only for a single-owner system with disciplined key management; it is not decentralized custody.
-The deployable core now fails closed: no venue is allowed and the guard begins halted. The generic
-`execute` surface remains unsuitable for live use until it is replaced or constrained by typed
-adapters. Public documentation must not receive runtime, wallet, venue, or strategy credentials.
+The intended authority split is sound but not operationally proven. The coordinator holds no private
+key; the Lighter signer is isolated from EVM authority; and the Robinhood writer uses one
+non-exportable KMS key. Separate HMAC scopes isolate intent admission, exit and recovery, venue
+events, market authority, and signer calls. The services enter Render disabled and the database mode
+enters `HALTED`.
+
+The remaining risk is at the dependency boundary. A compromised authenticated collector, quote
+publisher, RPC pair, KMS policy, or Lighter subaccount could still feed or execute unsafe state if its
+production identity and monitoring are not independently verified. No enable flag, successful build,
+or dormant contract deployment substitutes for that review.
+
+## Performance assessment
+
+The action queue uses bounded leases, skip-locked claims, append-only evidence, and indexed recovery
+lookups. That design is suitable for the intended event-driven rate, but there is no measured peak,
+contention profile, database growth curve, R2 archival backlog profile, or failover benchmark. The
+system therefore has no defensible production capacity claim.
 
 ## Observability assessment
 
-The runtime stores raw events and source health, but production evidence does not yet exist because
-the worker has not been provisioned with R2 credentials. Before capital, alert on archive failures,
-feed staleness, nonce gaps, database errors, hedge state, margin state, and every halt transition.
+The code records control versions, incidents, action events, native venue identity, sequence gaps,
+and reconciliation state. Production metrics, traces, log sinks, alert routes, dashboards, and tested
+dead-man responses remain unprovisioned. Required alerts include source gaps, archive backlog,
+database failure, finality disagreement, signer or nonce divergence, stale cancellation, unhedged
+exposure, margin deterioration, code-hash drift, storage pressure, and missing heartbeats.
+
+## Recommended architecture changes
+
+1. Make the runtime collector the only producer of normalized authoritative venue and chain events.
+2. Deploy the execution-authority publisher as a separate read-only service with reviewed pool,
+   hook, block, and runtime-code evidence.
+3. Add authenticated Lighter account-state and collateral snapshots to the coordinator pre-send gate.
+4. Move migrations and recovery drills into a dedicated release workflow with immutable evidence.
+5. Keep the public application documentation-only and the operator surface private and read-only.
 
 ## Test coverage gaps
 
-- Venue-specific quote, approval, submission, cancellation, partial-fill, and unwind lifecycle.
-- Typed intent bounds against adversarial calldata and upgraded venue contracts.
-- Reorg recovery, sequencer outage, stale source, slippage spike, and margin-deterioration drills.
-- Long-running archive integrity and shadow-fill reconciliation under duplicate events.
+- Replacement-family winner and loser confirmation across reorg and dual-RPC disagreement.
+- Exact-request replay after timeout, 409 conflict, process death, and signer restart.
+- Lighter partial fill, terminal rejection, nonce gap, cancelled order, and exhausted automatic
+  unwind followed by operator recovery.
+- Poisoned payload before and after send authorization, lease theft, stale worker completion, and
+  duplicate recovery requests.
+- Zero-spot short recovery, mismatched spot balance deltas, malicious token behavior, multiplier
+  transition, oracle pause, sequencer outage, and emergency close.
+- PostgreSQL failover, point-in-time recovery, R2 upload and acknowledgement crash boundaries, and
+  full deterministic replay under production-sized data.
+
+## Action plan
+
+1. Finish and independently review the authenticated Lighter and Robinhood event producers.
+2. Build and verify the executable quote-authority publisher and live account-risk gate.
+3. Complete the release, telemetry, retention, backup, restore, and incident infrastructure.
+4. Close contract verification and independent audit findings.
+5. Run the benchmark, chaos, soak, replay, and recovery evidence programme.
+6. Complete the operational key review, then deploy the audited typed contracts halted, unfunded,
+   source-verified, and verify them after Ethereum finality.
+7. Accumulate the mandatory capture and shadow windows and pass statistical promotion.
+8. Obtain legal, venue, and capital-activation approval before funding or authorizing a canary.
 
 ## Release decision
 
-**No capital deployment.** A dormant, halted core may be verified only after its independent audit
-and operator review. Live execution remains blocked until every unchecked P0 and P1 item has
-evidence attached and the research gates in `docs/venue-gates.md` are satisfied.
+**No mainnet deployment or funding in this release.** A halted and unfunded deployment becomes
+permissible after the technical, audit, and key-review gates above. Funding and canary execution
+remain blocked until every empirical, legal, venue, and operational activation gate passes.

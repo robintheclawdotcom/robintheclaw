@@ -2,6 +2,8 @@ module github.com/robintheclawdotcom/robintheclaw/signer/lighter
 
 go 1.24.0
 
+toolchain go1.26.5
+
 require github.com/elliottech/lighter-go v1.0.6
 
 require (
