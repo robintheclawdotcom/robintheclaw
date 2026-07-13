@@ -334,7 +334,7 @@ contract MockFeed is IChainlinkFeed {
             stockFeed.set(1e8, block.timestamp, block.timestamp);
 
             _execute(ISpotExecution.Side.SellSpot, 5e18, 5e6, bytes32("priced-sell"));
-            assertEq(risk.windowTurnover(), 100e6);
+            assertEq(risk.windowTurnover(), 105e6);
         }
 
         function test_recoveryRequiresHaltAndPaysSafeRecipient() public {

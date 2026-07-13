@@ -192,17 +192,58 @@ contract RiskFeed is IChainlinkFeed {
             executor.authorize(risk, futureRound);
         }
 
-        function test_reduceOnlyExitIgnoresExhaustedEntryTurnover() public {
+        function test_roundTripConsumesEntryAndAuthorizedExitAtExactTurnoverLimit() public {
             vm.prank(address(configAdmin));
-            risk.setLimits(1_000e6, 100e6, 1 days, 5 minutes, 1 hours, 3);
-            _buy(stockA, 100e6, 99e18, 100e18, bytes32("turnover-buy"));
-            assertEq(risk.windowTurnover(), 100e6);
+            risk.setLimits(1_000e6, 50e6, 1 days, 5 minutes, 1 hours, 3);
+            _buy(stockA, 25e6, 2475e16, 25e18, bytes32("turnover-buy"));
+            assertEq(risk.windowTurnover(), 25e6);
 
             vm.prank(address(configAdmin));
             risk.setMode(MandateRiskManagerV1.Mode.ReduceOnly);
-            _sell(stockA, 100e18, 99e6, 99e6, bytes32("turnover-sell"));
-            assertEq(risk.windowTurnover(), 100e6);
+            ISpotExecution.SpotIntent memory exit = _intent(
+                stockA, ISpotExecution.Side.SellSpot, 25e18, 2475e4, bytes32("turnover-sell")
+            );
+            executor.authorize(risk, exit);
+            assertEq(risk.windowTurnover(), 50e6);
+
+            executor.settle(risk, exit.id, 25e18, 25e6);
             assertEq(risk.inventory(address(stockA)), 0);
+        }
+
+        function test_entryPastCompletedRoundTripTurnoverIsRejectedWithoutMutation() public {
+            vm.prank(address(configAdmin));
+            risk.setLimits(1_000e6, 50e6, 1 days, 5 minutes, 1 hours, 3);
+            _buy(stockA, 25e6, 2475e16, 25e18, bytes32("boundary-buy"));
+            _sell(stockA, 25e18, 2475e4, 25e6, bytes32("boundary-sell"));
+            assertEq(risk.windowTurnover(), 50e6);
+
+            ISpotExecution.SpotIntent memory next =
+                _intent(stockA, ISpotExecution.Side.BuySpot, 1e6, 99e16, bytes32("over-boundary"));
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    MandateRiskManagerV1.TurnoverLimitExceeded.selector, 51e6, 50e6
+                )
+            );
+            executor.authorize(risk, next);
+
+            assertEq(risk.windowTurnover(), 50e6);
+            assertEq(risk.pendingIntent(), bytes32(0));
+            assertFalse(risk.usedIntent(next.id));
+        }
+
+        function test_turnoverResetsAtExactWindowBoundary() public {
+            vm.prank(address(configAdmin));
+            risk.setLimits(1_000e6, 50e6, 1 days, 5 minutes, 1 hours, 3);
+            _buy(stockA, 25e6, 2475e16, 25e18, bytes32("window-buy"));
+            _sell(stockA, 25e18, 2475e4, 25e6, bytes32("window-sell"));
+
+            uint256 boundary = risk.turnoverWindowStart() + risk.turnoverWindow();
+            vm.warp(boundary);
+            feedA.setRound(2, 1e8, block.timestamp);
+            _buy(stockA, 25e6, 2475e16, 25e18, bytes32("next-window-buy"));
+
+            assertEq(risk.turnoverWindowStart(), boundary);
+            assertEq(risk.windowTurnover(), 25e6);
         }
 
         function test_unrelatedStaleFeedDoesNotBlockReduceOnlyExit() public {

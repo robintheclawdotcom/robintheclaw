@@ -382,6 +382,7 @@ contract MandateRiskManagerV1 {
                 revert InsufficientInventory(intent.amountIn, available);
             }
             notional = _tokenNotional(intent.amountIn, price, market);
+            _consumeTurnover(notional);
         }
         if (notional > market.maxOrderNotional) {
             revert OrderLimitExceeded(notional, market.maxOrderNotional);
