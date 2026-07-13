@@ -34,6 +34,10 @@ type lighterClient interface {
 	Broadcast(context.Context, association) error
 	RegisteredPublicKey(int64, uint8) (string, error)
 	AuthToken(string, int64, uint8, time.Time) (string, error)
+	SignCreateOrder(string, int64, uint8, createOrderRequest) (signedTransaction, error)
+	SignModifyOrder(string, int64, uint8, modifyOrderRequest) (signedTransaction, error)
+	SignCancelOrder(string, int64, uint8, cancelOrderRequest) (signedTransaction, error)
+	SignCancelAll(string, int64, uint8, cancelAllRequest) (signedTransaction, error)
 }
 
 type liveLighterClient struct {

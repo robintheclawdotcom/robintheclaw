@@ -40,11 +40,12 @@ type authTokenRequest struct {
 }
 
 type authTokenResponse struct {
-	Token             string `json:"token"`
-	ExpiresAtUnix     int64  `json:"expiresAtUnix"`
-	AccountIndex      int64  `json:"accountIndex"`
-	APIKeyIndex       uint8  `json:"apiKeyIndex"`
-	CredentialVersion int64  `json:"credentialVersion"`
+	ExecutionAccountID string `json:"executionAccountId"`
+	Token              string `json:"token"`
+	ExpiresAtUnix      int64  `json:"expiresAtUnix"`
+	AccountIndex       int64  `json:"accountIndex"`
+	APIKeyIndex        uint8  `json:"apiKeyIndex"`
+	CredentialVersion  int64  `json:"credentialVersion"`
 }
 
 func (value *service) prepare(ctx context.Context, request prepareRequest) (publicLink, error) {
@@ -62,9 +63,12 @@ func (value *service) prepare(ctx context.Context, request prepareRequest) (publ
 		return publicLink{}, errors.New("nonce must not be negative")
 	}
 	request.ExecutionAccountID = strings.ToLower(request.ExecutionAccountID)
-	reserved, err := value.store.Reserve(ctx, request.ExecutionAccountID, owner, request.AccountIndex, request.APIKeyIndex)
+	reserved, err := value.store.Reserve(ctx, request.ExecutionAccountID, owner, request.AccountIndex, request.APIKeyIndex, request.Nonce)
 	if err != nil {
 		return publicLink{}, err
+	}
+	if reserved.Existing {
+		return reserved.Credential.public(), nil
 	}
 	record := reserved.Credential
 	failed := true
@@ -153,9 +157,8 @@ func (value *service) confirm(ctx context.Context, request confirmRequest) (publ
 			_ = value.store.Block(context.WithoutCancel(ctx), record, "decrypt_failed")
 			return publicLink{}, false, err
 		}
-		secret := string(secretBytes)
 		finalized, recoveredOwner, err := value.lighter.FinalizeAssociation(
-			secret,
+			transientString(secretBytes),
 			record.PublicKey,
 			record.AccountIndex,
 			record.APIKeyIndex,
@@ -221,40 +224,27 @@ func (value *service) authToken(ctx context.Context, request authTokenRequest) (
 	if !expiresAt.After(now) || expiresAt.After(now.Add(8*time.Hour)) {
 		return authTokenResponse{}, errors.New("expiresAtUnix must be within the next 8 hours")
 	}
-	record, err := value.store.Active(ctx, strings.ToLower(request.ExecutionAccountID))
+	record, secretBytes, err := value.activeSecret(ctx, request.ExecutionAccountID)
 	if err != nil {
-		return authTokenResponse{}, errors.New("execution account has no active Lighter credential")
-	}
-	registered, err := value.lighter.RegisteredPublicKey(record.AccountIndex, record.APIKeyIndex)
-	if err != nil {
-		return authTokenResponse{}, errors.New("verify active Lighter credential")
-	}
-	if normalizePublicKey(registered) != normalizePublicKey(record.PublicKey) {
-		_ = value.store.Block(context.WithoutCancel(ctx), record, "active_public_key_mismatch")
-		return authTokenResponse{}, errors.New("active Lighter credential no longer matches registered key")
-	}
-	secretBytes, err := value.envelope.open(ctx, record)
-	if err != nil {
-		_ = value.store.Block(context.WithoutCancel(ctx), record, "decrypt_failed")
 		return authTokenResponse{}, err
 	}
-	secret := string(secretBytes)
-	token, err := value.lighter.AuthToken(secret, record.AccountIndex, record.APIKeyIndex, expiresAt)
+	token, err := value.lighter.AuthToken(transientString(secretBytes), record.AccountIndex, record.APIKeyIndex, expiresAt)
 	zero(secretBytes)
 	if err != nil {
 		return authTokenResponse{}, errors.New("generate Lighter auth token")
 	}
-	if err := value.store.Audit(ctx, record, "auth_token_issued", map[string]any{
+	if err := value.store.AuditActive(ctx, record, "auth_token_issued", map[string]any{
 		"expiresAtUnix": request.ExpiresAtUnix,
 	}); err != nil {
 		return authTokenResponse{}, err
 	}
 	return authTokenResponse{
-		Token:             token,
-		ExpiresAtUnix:     request.ExpiresAtUnix,
-		AccountIndex:      record.AccountIndex,
-		APIKeyIndex:       record.APIKeyIndex,
-		CredentialVersion: record.Version,
+		ExecutionAccountID: record.ExecutionAccountID,
+		Token:              token,
+		ExpiresAtUnix:      request.ExpiresAtUnix,
+		AccountIndex:       record.AccountIndex,
+		APIKeyIndex:        record.APIKeyIndex,
+		CredentialVersion:  record.Version,
 	}, nil
 }
 

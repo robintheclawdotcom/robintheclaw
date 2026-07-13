@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,10 +13,15 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/elliottech/lighter-go/client"
-	"github.com/elliottech/lighter-go/types/txtypes"
 )
+
+type stubBridge struct {
+	callFn func(string, any, any) error
+}
+
+func (value stubBridge) call(_ context.Context, path string, input, output any) error {
+	return value.callFn(path, input, output)
+}
 
 func TestDisabledSignerFailsClosed(t *testing.T) {
 	server, err := newSignerServer(config{})
@@ -62,32 +69,6 @@ func TestSignerSurfaceHasNoAssetMovementRoute(t *testing.T) {
 		if response.Code != http.StatusNotFound {
 			t.Fatalf("%s got status %d", path, response.Code)
 		}
-	}
-}
-
-func TestIOCLimitOrderUsesNilOrderExpiry(t *testing.T) {
-	transaction := &txtypes.L2CreateOrderTxInfo{
-		AccountIndex: 1,
-		ApiKeyIndex:  2,
-		OrderInfo: &txtypes.OrderInfo{
-			MarketIndex:      0,
-			ClientOrderIndex: 1,
-			BaseAmount:       1,
-			Price:            1,
-			IsAsk:            1,
-			Type:             txtypes.LimitOrder,
-			TimeInForce:      txtypes.ImmediateOrCancel,
-			OrderExpiry:      txtypes.NilOrderExpiry,
-		},
-		ExpiredAt: 1,
-		Nonce:     0,
-	}
-	if err := transaction.Validate(); err != nil {
-		t.Fatalf("valid IOC limit order rejected: %v", err)
-	}
-	transaction.OrderExpiry = time.Now().Add(time.Minute).UnixMilli()
-	if err := transaction.Validate(); err != txtypes.ErrOrderExpiryInvalid {
-		t.Fatalf("non-zero IOC order expiry returned %v", err)
 	}
 }
 
@@ -218,6 +199,65 @@ func TestUnknownExecutionAccountIsRejectedBeforeSigning(t *testing.T) {
 	}
 }
 
+func TestProvisionerCrossAccountSubstitutionFailsClosed(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	server := authTestServer(now)
+	server.bridge = stubBridge{callFn: func(_ string, input, output any) error {
+		request := input.(createOrderRequest)
+		response := output.(*signedTransaction)
+		*response = signedTransaction{
+			ExecutionAccountID: "22222222-2222-4222-8222-222222222222",
+			AccountIndex:       42,
+			APIKeyIndex:        3,
+			CredentialVersion:  1,
+			IntentID:           request.IntentID,
+			TxType:             14,
+			TxHash:             "0x01",
+			TxInfo:             json.RawMessage(`{"AccountIndex":42,"ApiKeyIndex":3}`),
+		}
+		return nil
+	}}
+	body := []byte(`{"executionAccountId":"11111111-1111-4111-8111-111111111111","intentId":"intent-1","marketIndex":1,"clientOrderIndex":1,"baseAmount":1,"price":1,"isAsk":true,"orderType":0,"timeInForce":0,"reduceOnly":false,"triggerPrice":0,"orderExpiryMs":0,"transaction":{"nonce":1,"expiresAtMs":1800000300000}}`)
+	response := httptest.NewRecorder()
+	server.routes().ServeHTTP(response, signedRequest(server.config, body, strings.Repeat("x", 32), now))
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("substituted account got status %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestSignerUsesRotatedCredentialWithoutSecretConfiguration(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	server := authTestServer(now)
+	version := int64(0)
+	server.bridge = stubBridge{callFn: func(_ string, input, output any) error {
+		version++
+		request := input.(createOrderRequest)
+		response := output.(*signedTransaction)
+		*response = signedTransaction{
+			ExecutionAccountID: request.ExecutionAccountID,
+			AccountIndex:       42,
+			APIKeyIndex:        3,
+			CredentialVersion:  version,
+			IntentID:           request.IntentID,
+			TxType:             14,
+			TxHash:             fmt.Sprintf("0x%02d", version),
+			TxInfo:             json.RawMessage(`{"AccountIndex":42,"ApiKeyIndex":3}`),
+		}
+		return nil
+	}}
+	body := []byte(`{"executionAccountId":"11111111-1111-4111-8111-111111111111","intentId":"intent-1","marketIndex":1,"clientOrderIndex":1,"baseAmount":1,"price":1,"isAsk":true,"orderType":0,"timeInForce":0,"reduceOnly":false,"triggerPrice":0,"orderExpiryMs":0,"transaction":{"nonce":1,"expiresAtMs":1800000300000}}`)
+	for index, nonce := range []string{strings.Repeat("r", 32), strings.Repeat("s", 32)} {
+		response := httptest.NewRecorder()
+		server.routes().ServeHTTP(response, signedRequest(server.config, body, nonce, now))
+		if response.Code != http.StatusOK {
+			t.Fatalf("request %d got status %d body=%s", index, response.Code, response.Body.String())
+		}
+		if !strings.Contains(response.Body.String(), fmt.Sprintf(`"credentialVersion":%d`, index+1)) {
+			t.Fatalf("request %d did not use credential version %d: %s", index, index+1, response.Body.String())
+		}
+	}
+}
+
 func TestSecurityHeaders(t *testing.T) {
 	server, err := newSignerServer(config{})
 	if err != nil {
@@ -238,16 +278,14 @@ func TestLoadConfigRequiresHMACAuthentication(t *testing.T) {
 	t.Setenv("LIGHTER_SIGNER_ENABLED", "true")
 	t.Setenv("LIGHTER_SIGNER_HMAC_KEY", strings.Repeat("61", 32))
 	t.Setenv("SIGNER_CALLER_ID", "execution-coordinator")
-	t.Setenv("LIGHTER_API_PRIVATE_KEY", "test-private-key")
-	t.Setenv("LIGHTER_EXECUTION_ACCOUNT_ID", "account-canary-1")
-	t.Setenv("LIGHTER_CHAIN_ID", "300")
-	t.Setenv("LIGHTER_ACCOUNT_INDEX", "1")
-	t.Setenv("LIGHTER_API_KEY_INDEX", "2")
+	t.Setenv("LIGHTER_PROVISIONER_URL", "https://provisioner.invalid")
+	t.Setenv("LIGHTER_SIGNER_BRIDGE_HMAC_KEY", strings.Repeat("62", 32))
+	t.Setenv("LIGHTER_SIGNER_BRIDGE_CALLER_ID", "lighter-signer")
 	value, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(value.apiHMACKey) != sha256.Size || value.callerID != "execution-coordinator" {
+	if len(value.apiHMACKey) != sha256.Size || len(value.bridgeHMACKey) != sha256.Size || value.callerID != "execution-coordinator" {
 		t.Fatal("HMAC configuration was not loaded")
 	}
 
@@ -266,15 +304,22 @@ func authTestServer(now time.Time) *signerServer {
 		maxConcurrentRequests: 1,
 	}
 	return &signerServer{
-		config:  value,
-		clients: map[string]*client.TxClient{"account-canary-1": {}},
-		accounts: map[string]lighterAccountConfig{
-			"account-canary-1": {
-				ExecutionAccountID: "account-canary-1",
+		config: value,
+		bridge: stubBridge{callFn: func(_ string, input, output any) error {
+			request := input.(createOrderRequest)
+			response := output.(*signedTransaction)
+			*response = signedTransaction{
+				ExecutionAccountID: request.ExecutionAccountID,
 				AccountIndex:       7,
 				APIKeyIndex:        2,
-			},
-		},
+				CredentialVersion:  1,
+				IntentID:           request.IntentID,
+				TxType:             14,
+				TxHash:             "0x01",
+				TxInfo:             json.RawMessage(`{"AccountIndex":7,"ApiKeyIndex":2}`),
+			}
+			return nil
+		}},
 		now:    func() time.Time { return now },
 		slots:  make(chan struct{}, value.maxConcurrentRequests),
 		nonces: authNonces{expires: make(map[string]time.Time)},

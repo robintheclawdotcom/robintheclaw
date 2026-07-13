@@ -29,7 +29,7 @@ func newMemoryStore() *memoryStore {
 	}
 }
 
-func (value *memoryStore) Reserve(_ context.Context, executionID, owner string, accountIndex int64, apiKeyIndex uint8) (reservation, error) {
+func (value *memoryStore) Reserve(_ context.Context, executionID, owner string, accountIndex int64, apiKeyIndex uint8, changeNonce int64) (reservation, error) {
 	value.mu.Lock()
 	defer value.mu.Unlock()
 	bound, exists := value.bindings[executionID]
@@ -37,8 +37,12 @@ func (value *memoryStore) Reserve(_ context.Context, executionID, owner string, 
 		return reservation{}, errBindingMismatch
 	}
 	for _, id := range value.versions[executionID] {
-		status := value.records[id].Status
+		record := value.records[id]
+		status := record.Status
 		if status == statusGenerating || status == statusPending || status == statusVerifying {
+			if status != statusGenerating && record.ChangeNonce == changeNonce {
+				return reservation{Credential: cloneCredential(record), Rotation: bound.ActiveCredentialID != "", Existing: true}, nil
+			}
 			return reservation{}, errRotationOpen
 		}
 	}
@@ -200,6 +204,16 @@ func (*memoryStore) Audit(context.Context, credential, string, map[string]any) e
 	return nil
 }
 
+func (value *memoryStore) AuditActive(_ context.Context, record credential, _ string, _ map[string]any) error {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	bound, exists := value.bindings[record.ExecutionAccountID]
+	if !exists || bound.Status != "linked" || bound.ActiveCredentialID != record.ID {
+		return errors.New("execution account credential changed during signing")
+	}
+	return nil
+}
+
 func cloneCredential(value credential) credential {
 	value.EncryptedDataKey = append([]byte(nil), value.EncryptedDataKey...)
 	value.CipherNonce = append([]byte(nil), value.CipherNonce...)
@@ -291,6 +305,30 @@ func (value *fakeLighter) RegisteredPublicKey(_ int64, _ uint8) (string, error) 
 
 func (*fakeLighter) AuthToken(_ string, accountIndex int64, apiKeyIndex uint8, expiresAt time.Time) (string, error) {
 	return fmt.Sprintf("auth-%d-%d-%d", accountIndex, apiKeyIndex, expiresAt.Unix()), nil
+}
+
+func (*fakeLighter) SignCreateOrder(_ string, accountIndex int64, apiKeyIndex uint8, request createOrderRequest) (signedTransaction, error) {
+	return fakeSignedTransaction(accountIndex, apiKeyIndex, request.TransactOptions.Nonce), nil
+}
+
+func (*fakeLighter) SignModifyOrder(_ string, accountIndex int64, apiKeyIndex uint8, request modifyOrderRequest) (signedTransaction, error) {
+	return fakeSignedTransaction(accountIndex, apiKeyIndex, request.TransactOptions.Nonce), nil
+}
+
+func (*fakeLighter) SignCancelOrder(_ string, accountIndex int64, apiKeyIndex uint8, request cancelOrderRequest) (signedTransaction, error) {
+	return fakeSignedTransaction(accountIndex, apiKeyIndex, request.TransactOptions.Nonce), nil
+}
+
+func (*fakeLighter) SignCancelAll(_ string, accountIndex int64, apiKeyIndex uint8, request cancelAllRequest) (signedTransaction, error) {
+	return fakeSignedTransaction(accountIndex, apiKeyIndex, request.TransactOptions.Nonce), nil
+}
+
+func fakeSignedTransaction(accountIndex int64, apiKeyIndex uint8, nonce int64) signedTransaction {
+	return signedTransaction{
+		TxType: 14,
+		TxHash: fmt.Sprintf("0x%064x", nonce),
+		TxInfo: []byte(fmt.Sprintf(`{"AccountIndex":%d,"ApiKeyIndex":%d,"Nonce":%d}`, accountIndex, apiKeyIndex, nonce)),
+	}
 }
 
 func validTestSignature() string {

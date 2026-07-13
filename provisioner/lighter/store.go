@@ -24,7 +24,7 @@ var (
 var migrationFiles embed.FS
 
 type credentialStore interface {
-	Reserve(context.Context, string, string, int64, uint8) (reservation, error)
+	Reserve(context.Context, string, string, int64, uint8, int64) (reservation, error)
 	Complete(context.Context, credential) (credential, error)
 	Fail(context.Context, string, string) error
 	Latest(context.Context, string) (credential, error)
@@ -35,6 +35,7 @@ type credentialStore interface {
 	Active(context.Context, string) (credential, error)
 	ClaimAuthNonce(context.Context, string, string, time.Time) (bool, error)
 	Audit(context.Context, credential, string, map[string]any) error
+	AuditActive(context.Context, credential, string, map[string]any) error
 }
 
 type pgStore struct {
@@ -73,7 +74,7 @@ func (value *pgStore) migrate(ctx context.Context) error {
 	return nil
 }
 
-func (value *pgStore) Reserve(ctx context.Context, executionID, owner string, accountIndex int64, apiKeyIndex uint8) (reservation, error) {
+func (value *pgStore) Reserve(ctx context.Context, executionID, owner string, accountIndex int64, apiKeyIndex uint8, changeNonce int64) (reservation, error) {
 	tx, err := value.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return reservation{}, errors.New("begin credential reservation")
@@ -105,17 +106,18 @@ func (value *pgStore) Reserve(ctx context.Context, executionID, owner string, ac
 		return reservation{}, errBindingMismatch
 	}
 
-	var open bool
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM lighter_credentials
-			WHERE execution_account_id = $1 AND api_key_index = $2
-			AND status IN ('generating', 'pending', 'verifying')
-		)`, executionID, apiKeyIndex).Scan(&open); err != nil {
-		return reservation{}, errors.New("check open credential")
-	}
-	if open {
+	open, err := scanCredential(tx.QueryRow(ctx, credentialSelect+`
+		WHERE execution_account_id = $1 AND api_key_index = $2
+		AND status IN ('generating', 'pending', 'verifying')
+		ORDER BY version DESC LIMIT 1`, executionID, apiKeyIndex))
+	if err == nil {
+		if open.Status != statusGenerating && open.ChangeNonce == changeNonce {
+			return reservation{Credential: open, Rotation: activeID != nil && *activeID != "", Existing: true}, nil
+		}
 		return reservation{}, errRotationOpen
+	}
+	if !errors.Is(err, errNotFound) {
+		return reservation{}, errors.New("check open credential")
 	}
 
 	var version int64
@@ -349,6 +351,33 @@ func (value *pgStore) Audit(ctx context.Context, record credential, event string
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return errors.New("commit credential audit")
+	}
+	return nil
+}
+
+func (value *pgStore) AuditActive(ctx context.Context, record credential, event string, details map[string]any) error {
+	tx, err := value.pool.Begin(ctx)
+	if err != nil {
+		return errors.New("begin active credential audit")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var status string
+	var activeID *string
+	if err := tx.QueryRow(ctx, `
+		SELECT status, active_credential_id::text
+		FROM lighter_credential_bindings
+		WHERE execution_account_id = $1
+		FOR SHARE`, record.ExecutionAccountID).Scan(&status, &activeID); err != nil {
+		return errors.New("lock active credential binding")
+	}
+	if status != "linked" || activeID == nil || *activeID != record.ID {
+		return errors.New("execution account credential changed during signing")
+	}
+	if err := appendAudit(ctx, tx, record, event, details); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return errors.New("commit active credential audit")
 	}
 	return nil
 }

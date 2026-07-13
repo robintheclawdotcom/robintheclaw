@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,14 +19,34 @@ func newTestServer() (*server, *fakeLighter) {
 	service, store, lighter := newTestService()
 	return &server{
 		config: config{
-			Enabled:  true,
-			CallerID: "product-api",
-			HMACKey:  bytes.Repeat([]byte{0x42}, 32),
+			Enabled:                     true,
+			CallerID:                    "product-api",
+			HMACKey:                     bytes.Repeat([]byte{0x42}, 32),
+			SignerCallerID:              "lighter-signer",
+			SignerHMACKey:               bytes.Repeat([]byte{0x24}, 32),
+			SigningMaxRequestsPerMinute: 120,
+			SigningMaxConcurrent:        4,
 		},
-		service: service,
-		store:   store,
-		now:     service.now,
+		service:      service,
+		store:        store,
+		now:          service.now,
+		signingSlots: make(chan struct{}, 4),
 	}, lighter
+}
+
+func signedSignerRequest(t *testing.T, server *server, path, body, nonce string) *http.Request {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	timestamp := fmt.Sprintf("%d", server.now().Unix())
+	digest := sha256.Sum256([]byte(body))
+	canonical := fmt.Sprintf("POST\n%s\n%s\n%s\n%s\n%x", path, server.config.SignerCallerID, timestamp, nonce, digest)
+	mac := hmac.New(sha256.New, server.config.SignerHMACKey)
+	_, _ = mac.Write([]byte(canonical))
+	request.Header.Set("X-RTC-Caller", server.config.SignerCallerID)
+	request.Header.Set("X-RTC-Timestamp", timestamp)
+	request.Header.Set("X-RTC-Nonce", nonce)
+	request.Header.Set("X-RTC-Signature", hex.EncodeToString(mac.Sum(nil)))
+	return request
 }
 
 func signedRequest(t *testing.T, server *server, path, body, nonce string) *http.Request {
@@ -113,5 +134,47 @@ func TestDisabledProvisionerIsNotReady(t *testing.T) {
 	body, _ := io.ReadAll(response.Body)
 	if !strings.Contains(string(body), "disabled") {
 		t.Fatalf("body = %s", body)
+	}
+}
+
+func TestSigningBridgeIsAuthenticatedAndReplayProtected(t *testing.T) {
+	server, lighter := newTestServer()
+	link, err := server.service.prepare(context.Background(), prepareRequest{
+		ExecutionAccountID: testExecutionID,
+		OwnerAddress:       testOwner,
+		AccountIndex:       42,
+		APIKeyIndex:        3,
+		Nonce:              7,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lighter.registered = link.PublicKey
+	if _, linked, err := server.service.confirm(context.Background(), confirmRequest{
+		ExecutionAccountID: testExecutionID,
+		LinkID:             link.LinkID,
+		L1Signature:        validTestSignature(),
+	}); err != nil || !linked {
+		t.Fatalf("activate credential: linked=%v err=%v", linked, err)
+	}
+	body := fmt.Sprintf(`{"executionAccountId":%q,"intentId":"intent-001","marketIndex":1,"clientOrderIndex":1,"baseAmount":1,"price":1,"isAsk":true,"orderType":0,"timeInForce":0,"reduceOnly":false,"triggerPrice":0,"orderExpiryMs":0,"transaction":{"nonce":9,"expiresAtMs":%d}}`, testExecutionID, server.now().Add(time.Minute).UnixMilli())
+	nonce := strings.Repeat("s", 32)
+	response := httptest.NewRecorder()
+	server.handler().ServeHTTP(response, signedSignerRequest(t, server, "/v1/signer/create-order", body, nonce))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"credentialVersion":1`) {
+		t.Fatalf("signing response status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("X-RTC-Response-Signature") == "" {
+		t.Fatal("signing response was not authenticated")
+	}
+	replay := httptest.NewRecorder()
+	server.handler().ServeHTTP(replay, signedSignerRequest(t, server, "/v1/signer/create-order", body, nonce))
+	if replay.Code != http.StatusUnauthorized {
+		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	wrongCaller := httptest.NewRecorder()
+	server.handler().ServeHTTP(wrongCaller, signedRequest(t, server, "/v1/signer/create-order", body, strings.Repeat("p", 32)))
+	if wrongCaller.Code != http.StatusUnauthorized {
+		t.Fatalf("product caller reached signing bridge: status=%d", wrongCaller.Code)
 	}
 }

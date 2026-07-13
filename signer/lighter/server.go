@@ -14,22 +14,17 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"github.com/elliottech/lighter-go/client"
-	"github.com/elliottech/lighter-go/types"
-	"github.com/elliottech/lighter-go/types/txtypes"
 )
 
 const maxBodyBytes = 64 << 10
 
 type signerServer struct {
-	config   config
-	clients  map[string]*client.TxClient
-	accounts map[string]lighterAccountConfig
-	now      func() time.Time
-	slots    chan struct{}
-	rate     requestRate
-	nonces   authNonces
+	config config
+	bridge signingBridge
+	now    func() time.Time
+	slots  chan struct{}
+	rate   requestRate
+	nonces authNonces
 }
 
 type requestRate struct {
@@ -47,10 +42,20 @@ type signedTransaction struct {
 	ExecutionAccountID string          `json:"executionAccountId"`
 	AccountIndex       int64           `json:"accountIndex"`
 	APIKeyIndex        uint8           `json:"apiKeyIndex"`
-	IntentID           string          `json:"intentId,omitempty"`
+	CredentialVersion  int64           `json:"credentialVersion"`
+	IntentID           string          `json:"intentId"`
 	TxType             uint8           `json:"txType"`
 	TxHash             string          `json:"txHash"`
 	TxInfo             json.RawMessage `json:"txInfo"`
+}
+
+type authTokenResponse struct {
+	ExecutionAccountID string `json:"executionAccountId"`
+	Token              string `json:"token"`
+	ExpiresAtUnix      int64  `json:"expiresAtUnix"`
+	AccountIndex       int64  `json:"accountIndex"`
+	APIKeyIndex        uint8  `json:"apiKeyIndex"`
+	CredentialVersion  int64  `json:"credentialVersion"`
 }
 
 type transactOptions struct {
@@ -108,30 +113,15 @@ type authTokenRequest struct {
 
 func newSignerServer(value config) (*signerServer, error) {
 	server := &signerServer{
-		config:   value,
-		now:      time.Now,
-		nonces:   authNonces{expires: make(map[string]time.Time)},
-		clients:  make(map[string]*client.TxClient),
-		accounts: make(map[string]lighterAccountConfig),
+		config: value,
+		now:    time.Now,
+		nonces: authNonces{expires: make(map[string]time.Time)},
 	}
 	if !value.enabled {
 		return server, nil
 	}
 	server.slots = make(chan struct{}, value.maxConcurrentRequests)
-	for _, account := range value.accounts {
-		txClient, err := client.NewTxClient(
-			nil,
-			account.PrivateKey,
-			account.AccountIndex,
-			account.APIKeyIndex,
-			account.ChainID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("initialize Lighter signer for %s: %w", account.ExecutionAccountID, err)
-		}
-		server.clients[account.ExecutionAccountID] = txClient
-		server.accounts[account.ExecutionAccountID] = account
-	}
+	server.bridge = newHTTPBridge(value.provisionerURL, value.bridgeCallerID, value.bridgeHMACKey)
 	return server, nil
 }
 
@@ -152,7 +142,7 @@ func (s *signerServer) livez(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *signerServer) readyz(w http.ResponseWriter, _ *http.Request) {
-	if !s.config.enabled || len(s.clients) == 0 {
+	if !s.config.enabled || s.bridge == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "disabled"})
 		return
 	}
@@ -161,7 +151,7 @@ func (s *signerServer) readyz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *signerServer) authorize(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.config.enabled || len(s.clients) == 0 {
+		if !s.config.enabled || s.bridge == nil {
 			writeError(w, http.StatusServiceUnavailable, "signer disabled")
 			return
 		}
@@ -215,15 +205,7 @@ func (s *signerServer) authorized(r *http.Request, body []byte, now time.Time) b
 		return false
 	}
 	bodyDigest := sha256.Sum256(body)
-	canonical := fmt.Sprintf(
-		"%s\n%s\n%s\n%s\n%s\n%x",
-		r.Method,
-		r.URL.Path,
-		caller,
-		timestampText,
-		nonce,
-		bodyDigest,
-	)
+	canonical := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%x", r.Method, r.URL.Path, caller, timestampText, nonce, bodyDigest)
 	mac := hmac.New(sha256.New, s.config.apiHMACKey)
 	_, _ = mac.Write([]byte(canonical))
 	if subtle.ConstantTimeCompare(mac.Sum(nil), provided) != 1 {
@@ -288,24 +270,7 @@ func (s *signerServer) createOrder(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
-	client, account, ok := s.account(request.ExecutionAccountID)
-	if request.IntentID == "" || !ok {
-		writeError(w, http.StatusBadRequest, "execution account or intent is invalid")
-		return
-	}
-	tx, err := client.GetCreateOrderTransaction(&types.CreateOrderTxReq{
-		MarketIndex:      request.MarketIndex,
-		ClientOrderIndex: request.ClientOrderID,
-		BaseAmount:       request.BaseAmount,
-		Price:            request.Price,
-		IsAsk:            boolByte(request.IsAsk),
-		Type:             request.OrderType,
-		TimeInForce:      request.TimeInForce,
-		ReduceOnly:       boolByte(request.ReduceOnly),
-		TriggerPrice:     request.TriggerPrice,
-		OrderExpiry:      request.OrderExpiryMS,
-	}, txOptions(request.TransactOptions))
-	writeSigned(w, account, request.IntentID, tx, err)
+	s.forwardTransaction(w, r, "/v1/signer/create-order", request.ExecutionAccountID, request.IntentID, request)
 }
 
 func (s *signerServer) modifyOrder(w http.ResponseWriter, r *http.Request) {
@@ -313,19 +278,7 @@ func (s *signerServer) modifyOrder(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
-	client, account, ok := s.account(request.ExecutionAccountID)
-	if request.IntentID == "" || !ok {
-		writeError(w, http.StatusBadRequest, "execution account or intent is invalid")
-		return
-	}
-	tx, err := client.GetModifyOrderTransaction(&types.ModifyOrderTxReq{
-		MarketIndex:  request.MarketIndex,
-		Index:        request.OrderIndex,
-		BaseAmount:   request.BaseAmount,
-		Price:        request.Price,
-		TriggerPrice: request.TriggerPrice,
-	}, txOptions(request.TransactOptions))
-	writeSigned(w, account, request.IntentID, tx, err)
+	s.forwardTransaction(w, r, "/v1/signer/modify-order", request.ExecutionAccountID, request.IntentID, request)
 }
 
 func (s *signerServer) cancelOrder(w http.ResponseWriter, r *http.Request) {
@@ -333,16 +286,7 @@ func (s *signerServer) cancelOrder(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
-	client, account, ok := s.account(request.ExecutionAccountID)
-	if request.IntentID == "" || !ok {
-		writeError(w, http.StatusBadRequest, "execution account or intent is invalid")
-		return
-	}
-	tx, err := client.GetCancelOrderTransaction(&types.CancelOrderTxReq{
-		MarketIndex: request.MarketIndex,
-		Index:       request.OrderIndex,
-	}, txOptions(request.TransactOptions))
-	writeSigned(w, account, request.IntentID, tx, err)
+	s.forwardTransaction(w, r, "/v1/signer/cancel-order", request.ExecutionAccountID, request.IntentID, request)
 }
 
 func (s *signerServer) cancelAll(w http.ResponseWriter, r *http.Request) {
@@ -350,30 +294,28 @@ func (s *signerServer) cancelAll(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
-	client, account, ok := s.account(request.ExecutionAccountID)
-	if request.IntentID == "" || !ok {
-		writeError(w, http.StatusBadRequest, "execution account or intent is invalid")
-		return
-	}
-	var mode uint8
-	switch request.Mode {
-	case "immediate":
-		mode = txtypes.ImmediateCancelAll
-		request.ExecuteAtMS = 0
-	case "scheduled":
-		mode = txtypes.ScheduledCancelAll
-	case "abort_scheduled":
-		mode = txtypes.AbortScheduledCancelAll
-		request.ExecuteAtMS = 0
-	default:
+	if request.Mode != "immediate" && request.Mode != "scheduled" && request.Mode != "abort_scheduled" {
 		writeError(w, http.StatusBadRequest, "invalid cancel-all mode")
 		return
 	}
-	tx, err := client.GetCancelAllOrdersTransaction(&types.CancelAllOrdersTxReq{
-		TimeInForce: mode,
-		Time:        request.ExecuteAtMS,
-	}, txOptions(request.TransactOptions))
-	writeSigned(w, account, request.IntentID, tx, err)
+	s.forwardTransaction(w, r, "/v1/signer/cancel-all", request.ExecutionAccountID, request.IntentID, request)
+}
+
+func (s *signerServer) forwardTransaction(w http.ResponseWriter, r *http.Request, path, executionID, intentID string, request any) {
+	if !validExecutionAccountID(executionID) || !validIntentID(intentID) {
+		writeError(w, http.StatusBadRequest, "execution account or intent is invalid")
+		return
+	}
+	var response signedTransaction
+	if err := s.bridge.call(r.Context(), path, request, &response); err != nil {
+		writeBridgeError(w, err)
+		return
+	}
+	if err := validateSignedTransaction(response, executionID, intentID); err != nil {
+		writeError(w, http.StatusBadGateway, "signing response identity mismatch")
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *signerServer) authToken(w http.ResponseWriter, r *http.Request) {
@@ -381,58 +323,72 @@ func (s *signerServer) authToken(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
-	client, account, ok := s.account(request.ExecutionAccountID)
-	if !ok {
+	if !validExecutionAccountID(request.ExecutionAccountID) {
 		writeError(w, http.StatusBadRequest, "execution account is invalid")
 		return
 	}
-	now := time.Now().Unix()
+	now := s.now().Unix()
 	if request.ExpiresAtUnix <= now || request.ExpiresAtUnix > now+8*60*60 {
 		writeError(w, http.StatusBadRequest, "expiry must be within eight hours")
 		return
 	}
-	token, err := client.GetAuthToken(time.Unix(request.ExpiresAtUnix, 0))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "unable to create auth token")
+	var response authTokenResponse
+	if err := s.bridge.call(r.Context(), "/v1/signer/auth-token", request, &response); err != nil {
+		writeBridgeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"executionAccountId": account.ExecutionAccountID,
-		"token":              token,
-		"expiresAtUnix":      request.ExpiresAtUnix,
-	})
-}
-
-func txOptions(value transactOptions) *types.TransactOpts {
-	nonce := value.Nonce
-	return &types.TransactOpts{Nonce: &nonce, ExpiredAt: value.ExpiresAtMS}
-}
-
-func writeSigned(w http.ResponseWriter, account lighterAccountConfig, intentID string, tx txtypes.TxInfo, err error) {
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "transaction declined")
+	if response.ExecutionAccountID != request.ExecutionAccountID || response.ExpiresAtUnix != request.ExpiresAtUnix ||
+		response.Token == "" || response.AccountIndex <= 0 || response.APIKeyIndex < 2 ||
+		response.APIKeyIndex > 254 || response.CredentialVersion <= 0 {
+		writeError(w, http.StatusBadGateway, "authentication response identity mismatch")
 		return
 	}
-	info, err := tx.GetTxInfo()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "transaction encoding failed")
-		return
-	}
-	writeJSON(w, http.StatusOK, signedTransaction{
-		ExecutionAccountID: account.ExecutionAccountID,
-		AccountIndex:       account.AccountIndex,
-		APIKeyIndex:        account.APIKeyIndex,
-		IntentID:           intentID,
-		TxType:             tx.GetTxType(),
-		TxHash:             tx.GetTxHash(),
-		TxInfo:             json.RawMessage(info),
-	})
+	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *signerServer) account(executionAccountID string) (*client.TxClient, lighterAccountConfig, bool) {
-	client, exists := s.clients[executionAccountID]
-	account, configured := s.accounts[executionAccountID]
-	return client, account, exists && configured
+func validIntentID(value string) bool {
+	if len(value) < 8 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && character != '-' && character != '_' && character != ':' {
+			return false
+		}
+	}
+	return true
+}
+
+func validateSignedTransaction(value signedTransaction, executionID, intentID string) error {
+	if value.ExecutionAccountID != executionID || value.IntentID != intentID || value.AccountIndex <= 0 ||
+		value.APIKeyIndex < 2 || value.APIKeyIndex > 254 || value.CredentialVersion <= 0 ||
+		value.TxType == 0 || value.TxHash == "" || !json.Valid(value.TxInfo) {
+		return errors.New("invalid signed transaction identity")
+	}
+	var identity struct {
+		AccountIndex int64 `json:"AccountIndex"`
+		APIKeyIndex  uint8 `json:"ApiKeyIndex"`
+	}
+	if err := json.Unmarshal(value.TxInfo, &identity); err != nil || identity.AccountIndex != value.AccountIndex || identity.APIKeyIndex != value.APIKeyIndex {
+		return errors.New("transaction payload identity mismatch")
+	}
+	return nil
+}
+
+func writeBridgeError(w http.ResponseWriter, err error) {
+	var responseError *bridgeResponseError
+	if errors.As(err, &responseError) {
+		switch responseError.status {
+		case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict:
+			writeError(w, http.StatusBadRequest, "transaction declined")
+		case http.StatusTooManyRequests:
+			writeError(w, http.StatusTooManyRequests, "signing rate limit exceeded")
+		default:
+			writeError(w, http.StatusServiceUnavailable, "signing unavailable")
+		}
+		return
+	}
+	writeError(w, http.StatusServiceUnavailable, "signing unavailable")
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, target any) error {
@@ -445,16 +401,9 @@ func decodeBody(w http.ResponseWriter, r *http.Request, target any) error {
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "request must contain one JSON value")
-		return fmt.Errorf("trailing request data")
+		return errors.New("trailing request data")
 	}
 	return nil
-}
-
-func boolByte(value bool) uint8 {
-	if value {
-		return 1
-	}
-	return 0
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

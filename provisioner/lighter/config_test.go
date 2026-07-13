@@ -20,6 +20,8 @@ func TestEnabledProvisionerUsesPrivateDatabaseConfiguration(t *testing.T) {
 	t.Setenv("LIGHTER_PROVISIONER_ENABLED", "true")
 	t.Setenv("LIGHTER_PROVISIONER_HMAC_KEY", strings.Repeat("42", 32))
 	t.Setenv("PROVISIONER_CALLER_ID", "product-api")
+	t.Setenv("LIGHTER_SIGNER_BRIDGE_HMAC_KEY", strings.Repeat("24", 32))
+	t.Setenv("LIGHTER_SIGNER_BRIDGE_CALLER_ID", "lighter-signer")
 	t.Setenv("LIGHTER_PROVISIONER_DATABASE_URL", "postgres://provisioner.invalid/credentials")
 	t.Setenv("AWS_KMS_KEY_ID", "alias/lighter")
 	t.Setenv("LIGHTER_CHAIN_ID", "300")

@@ -58,6 +58,7 @@ type credential struct {
 type reservation struct {
 	Credential credential
 	Rotation   bool
+	Existing   bool
 }
 
 type sealedSecret struct {

@@ -1,22 +1,22 @@
 # Lighter signer
 
-The signer wraps the pinned official `lighter-go` implementation and exposes only order, cancel,
-dead-man cancellation, and short-lived authentication operations. It cannot sign withdrawals,
-transfers, leverage changes, account administration, or subaccount operations.
+The signer exposes only order, cancel, dead-man cancellation, and short-lived authentication
+operations. It cannot sign withdrawals, transfers, leverage changes, account administration,
+generic transactions, or subaccount operations.
 
-The service is disabled unless `LIGHTER_SIGNER_ENABLED=true`. Production also requires a private
-service token and an owner-only account registry selected with `LIGHTER_SIGNER_ACCOUNTS_FILE`.
-Each registry entry binds one opaque execution-account ID to a dedicated API private key, chain ID,
-account index, and API-key index. Requests contain the execution-account ID; the signer resolves
-and verifies the credential and returns the resolved public account identity. The coordinator
-never receives private keys.
+The service is disabled unless `LIGHTER_SIGNER_ENABLED=true`. It authenticates the execution
+coordinator with `LIGHTER_SIGNER_HMAC_KEY` and delegates signing to the private credential
+provisioner with a distinct `LIGHTER_SIGNER_BRIDGE_HMAC_KEY`. Both hops bind the method, path,
+caller, timestamp, nonce, and body digest. Requests contain only the opaque execution-account ID
+and operation fields.
 
-The legacy single-account configuration additionally requires
-`LIGHTER_EXECUTION_ACCOUNT_ID`. It accepts an explicit nonce for every transaction; the execution
-coordinator owns the durable account-scoped nonce journal.
+The signer has no configuration path for Lighter private keys. The provisioner resolves the active
+credential, verifies its registered public key, decrypts it with account-bound KMS context, signs,
+zeroes the plaintext, and returns the account index, API-key index, and credential version. The
+signer rejects any returned account, intent, key identity, or transaction-payload mismatch.
 
-The service must run on a private network with a collateral-capped subaccount. Never place an EVM
-private key in this service.
+The service must run on a private network. The execution coordinator owns the durable,
+account-scoped nonce journal.
 
 ```bash
 go test ./...

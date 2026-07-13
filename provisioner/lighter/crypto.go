@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"io"
+	"unsafe"
 
 	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
@@ -106,4 +107,11 @@ func zero(value []byte) {
 	for index := range value {
 		value[index] = 0
 	}
+}
+
+func transientString(value []byte) string {
+	if len(value) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(value), len(value))
 }

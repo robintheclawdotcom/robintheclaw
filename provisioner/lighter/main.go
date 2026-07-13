@@ -51,6 +51,7 @@ func run() error {
 			ttl:      value.AssociationTTL,
 			now:      time.Now,
 		}
+		state.signingSlots = make(chan struct{}, value.SigningMaxConcurrent)
 	}
 
 	httpServer := &http.Server{
