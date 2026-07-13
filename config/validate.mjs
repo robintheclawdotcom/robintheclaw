@@ -25,7 +25,10 @@ for (const network of ["mainnet", "testnet"]) {
 }
 
 const mainnet = config.deployment.mainnet;
-if (mainnet.status !== "verified") fail("mainnet must be verified");
+if (mainnet.venueStatus !== "verified") fail("mainnet venue configuration must be verified");
+if (mainnet.contractStatus !== "blocked" || mainnet.capitalStatus !== "blocked") {
+  fail("mainnet contracts and capital must remain blocked before audited deployment");
+}
 if (!address.test(mainnet.asset) || !address.test(mainnet.universalRouter)) {
   fail("mainnet asset and router are required");
 }
@@ -63,7 +66,7 @@ if (
 }
 
 const testnet = config.deployment.testnet;
-if (testnet.status === "verified" && (!address.test(testnet.asset) || !address.test(testnet.universalRouter))) {
+if (testnet.venueStatus === "verified" && (!address.test(testnet.asset) || !address.test(testnet.universalRouter))) {
   fail("a verified testnet requires an asset and router");
 }
 

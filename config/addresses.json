@@ -18,13 +18,18 @@
       "chainId": 4663,
       "asset": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
       "universalRouter": "0x8876789976decbfcbbbe364623c63652db8c0904",
-      "status": "verified"
+      "venueStatus": "verified",
+      "contractStatus": "blocked",
+      "capitalStatus": "blocked",
+      "reason": "Typed v1 contracts are not independently audited or deployed."
     },
     "testnet": {
       "chainId": 46630,
       "asset": null,
       "universalRouter": null,
-      "status": "blocked",
+      "venueStatus": "blocked",
+      "contractStatus": "blocked",
+      "capitalStatus": "blocked",
       "reason": "No canonical testnet USDG or execution venue has been verified."
     }
   },
