@@ -13,16 +13,16 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
       <>
         <p>
           Robin the Claw is building the delta-neutral trading stack for tokenized markets on
-          Robinhood Chain: market intelligence, adaptive sizing, matched execution, and a
-          durable operating layer for autonomous strategies.
+          Robinhood Chain: venue-native data, adaptive models, matched execution, and a durable
+          operating layer for autonomous strategies.
         </p>
         <h2>From market structure to a trade plan</h2>
         <p>
-          It measures the basis between tokenized-equity spot liquidity and matching perpetuals,
-          then turns a qualified opportunity into coordinated spot and perp legs.
+          It turns continuous market and chain data into convergence research, regime-aware trade
+          planning, and coordinated spot and perp legs.
         </p>
         <div className="note">
-          On-chain records make each strategy run easier to inspect and improve over time.
+          Onchain records make each strategy run easier to inspect and improve over time.
         </div>
       </>
     ),
@@ -33,8 +33,8 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
     body: (
       <>
         <p>
-          The scanner discovers Uniswap v4 stock-token pools, compares their on-chain spot prices
-          with active Lighter perp marks, and builds the market data layer for strategy research.
+          The scanner discovers Uniswap v4 stock-token pools, compares their onchain spot prices
+          with active Lighter perp marks, and feeds the market data layer for strategy research.
         </p>
         <h2>Find the real opportunity</h2>
         <p>
@@ -51,7 +51,7 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
     body: (
       <>
         <p>
-          The on-chain foundation combines custody, delegated execution, venue policy, and
+          The onchain foundation combines custody, delegated execution, venue policy, and
           operator control into a focused base for the Robin execution layer.
         </p>
         <h2>Built for expansion</h2>
@@ -69,7 +69,7 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
     body: (
       <>
         <p>
-          Robin can encode trade records deterministically, commit them on chain, and keep a
+          Robin can encode trade records deterministically, commit them onchain, and keep a
           durable history alongside strategy development.
         </p>
         <h2>A useful feedback loop</h2>
@@ -87,10 +87,10 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
     body: (
       <>
         <p>
-          The deployed testnet stack connects custody, strategy roles, and on-chain records on
+          The deployed testnet stack connects custody, strategy roles, and onchain records on
           Robinhood Chain. It is the base for bringing venue integrations online in stages.
         </p>
-        <h2>Connected on chain</h2>
+        <h2>Connected onchain</h2>
         <p>
           The first testnet batch confirms the contract and record pipeline end to end. The
           accompanying verifier lets developers inspect that foundation directly.
@@ -112,12 +112,12 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
       <>
         <p>
           The Rust engine turns a basis observation into a matched spot and perp plan, combining
-          market quality, fractional-Kelly sizing, exposure awareness, and delta neutrality.
+          market quality, fractional-Kelly sizing, portfolio awareness, and delta neutrality.
         </p>
-        <h2>Designed for repeatability</h2>
+        <h2>Built to evolve</h2>
         <p>
-          The engine gives the execution layer a clear plan to act on, so strategy development,
-          operations, and venue integrations can evolve independently.
+          The model roadmap adds convergence, regime, hedge-ratio, and portfolio layers while the
+          execution engine stays focused on turning research into clear trade instructions.
         </p>
         <div className="code-block"><span>$</span> cd engine && cargo test</div>
       </>
@@ -313,9 +313,9 @@ export default function Home() {
               <section className="intro">
                 <Prompt>robin init</Prompt>
                 <p>
-                  Robin the Claw is an autonomous trading stack for tokenized markets.
-                  It finds cross-venue basis, evaluates the opportunity, sizes a position, and
-                  prepares matched spot and perp legs for disciplined execution.
+                  Robin the Claw is an autonomous trading stack for tokenized markets. It captures
+                  venue-native data, finds cross-venue basis, develops adaptive models, sizes a
+                  position, and prepares matched spot and perp legs for execution.
                 </p>
               </section>
 
@@ -326,7 +326,7 @@ export default function Home() {
                   <code>git clone https://github.com/robintheclawdotcom/robintheclaw.git</code>
                   <button onClick={copyClone}>{copied ? "copied ✓" : "copy"}</button>
                 </div>
-                <small>Open source foundations for market intelligence, trade planning, and execution.</small>
+                <small>Open source foundations for market intelligence, research models, and execution.</small>
               </section>
 
               <section className="proof-status">
@@ -334,11 +334,11 @@ export default function Home() {
                 <div className="proof-panel">
                   <div>
                     <span className="proof-label">testnet foundation</span>
-                    <strong>on-chain stack connected · sequence {testnetProof.sequence}</strong>
+                    <strong>onchain stack connected · sequence {testnetProof.sequence}</strong>
                     <p>Custody, strategy roles, and the record pipeline are live on Robinhood Chain testnet.</p>
                   </div>
                   <a href={`${testnetProof.explorer}/tx/${testnetProof.transaction}`} target="_blank" rel="noreferrer">
-                    inspect on chain ↗
+                    inspect onchain ↗
                   </a>
                 </div>
               </section>
@@ -347,10 +347,10 @@ export default function Home() {
                 <Prompt>robin --components</Prompt>
                 <div className="cards">
                   <article><span>[ signal ]</span><h2>Market intelligence</h2><p>Discovers v4 pools, compares spot with live perps, and maps the basis across tokenized markets.</p></article>
-                  <article><span>[ engine ]</span><h2>Trade planning</h2><p>Combines spread quality, sizing, exposure awareness, and neutrality into a coordinated trade plan.</p></article>
-                  <article><span>[ research ]</span><h2>Strategy research</h2><p>Builds the data, models, and market understanding that make each iteration stronger.</p></article>
+                  <article><span>[ engine ]</span><h2>Trade planning</h2><p>Combines spread quality, Kelly sizing, portfolio awareness, and neutrality into a coordinated plan.</p></article>
+                  <article><span>[ research ]</span><h2>Adaptive research</h2><p>Builds a compounding event store for convergence, regime, hedge-ratio, and routing models.</p></article>
                   <article><span>[ contracts ]</span><h2>Execution foundation</h2><p>Custody, delegated execution, and venue policy establish the base for the Robin execution layer.</p></article>
-                  <article><span>[ verifier ]</span><h2>Record integrity</h2><p>On-chain records support inspection, research, and a durable history of strategy operations.</p></article>
+                  <article><span>[ verifier ]</span><h2>Record integrity</h2><p>Onchain records support inspection, research, and a durable history of strategy operations.</p></article>
                 </div>
               </section>
 
@@ -358,10 +358,10 @@ export default function Home() {
                 <Prompt>robin explain --pipeline</Prompt>
                 <div className="pipeline">
                   {[
-                    ["01 · scan", "Map cross-venue market structure"],
-                    ["02 · plan", "Size matched spot and perp legs"],
-                    ["03 · execute", "Coordinate strategy and venue workflow"],
-                    ["04 · learn", "Record each run and refine the system"],
+                    ["01 · capture", "Build venue-native market and chain history"],
+                    ["02 · model", "Find convergence and regime-aware opportunities"],
+                    ["03 · plan", "Size matched spot and perp legs"],
+                    ["04 · learn", "Refine hypotheses, routing, and execution"],
                   ].map(([label, detail], index) => (
                     <div className="pipeline-item" key={label}>
                       <span>{label}</span><p>{detail}</p>{index < 3 && <b className="arrow">→</b>}
@@ -371,7 +371,7 @@ export default function Home() {
               </section>
 
               <section className="docs-cta">
-                <div><h2>Explore the execution stack</h2><p>Market intelligence, strategy planning, contracts, operations, and record integrity.</p></div>
+                <div><h2>Explore the research and execution stack</h2><p>Market intelligence, adaptive models, strategy planning, contracts, and operations.</p></div>
                 <button onClick={openDocs}>docs →</button>
               </section>
             </div>

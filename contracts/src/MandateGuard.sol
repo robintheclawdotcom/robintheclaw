@@ -2,7 +2,7 @@
 pragma solidity 0.8.28;
 
 /// @title MandateGuard
-/// @notice The on-chain mandate the agent cannot exceed. Every execution consults check()
+/// @notice The onchain mandate the agent cannot exceed. Every execution consults check()
 ///         first: a call to a non-allowlisted (target, selector), while halted, or that pushes
 ///         cumulative notional past the per-window cap reverts. The window rolls lazily. Only
 ///         the executor (the vault) may call check(); only the owner (human boundary) can

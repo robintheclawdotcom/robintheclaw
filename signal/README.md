@@ -2,7 +2,7 @@
 
 Read-only market measurement for basis research. It tests whether an observed spread is real,
 liquid, and persistent enough to survive execution costs before any execution code is written. No
-keys, no on-chain writes, no orders.
+keys, no onchain writes, no orders.
 
 ## Two steps
 
@@ -24,7 +24,7 @@ median liquidity are flagged `THIN`: a wide basis on a shallow pool is a stale m
 capturable spread. Every observation appends to `data/xbasis-YYYYMMDD.jsonl`.
 
 `basis.mjs` is the older perp-only view (perp mark vs the perp's own index); kept as a fast
-sanity check that needs no on-chain reads.
+sanity check that needs no onchain reads.
 
 ## Reading the output
 

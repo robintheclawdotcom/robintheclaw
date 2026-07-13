@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Cross-venue basis scanner: the real signal. For each name it reads the Uniswap v4 AMM spot
-// price on Robinhood Chain (on-chain, 24/7) and the Lighter perp mark, and reports the basis.
+// price on Robinhood Chain (onchain, 24/7) and the Lighter perp mark, and reports the basis.
 // Pool keys come from the discovery cache (run discover.mjs first); any name with several fee
 // tiers is resolved to its deepest pool by liquidity, which discards the permissionless spam
 // pools (absurd fees, no liquidity) and keeps the real one. Names below a liquidity floor are
 // flagged THIN because a wide basis on a shallow pool is a stale mark, not a capturable spread.
 //
-// Read-only: no keys, no writes on-chain, no execution. Appends every observation to JSONL.
+// Read-only: no keys, no writes onchain, no execution. Appends every observation to JSONL.
 
 import { readFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

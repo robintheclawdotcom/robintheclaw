@@ -2,7 +2,7 @@
 //! (Uniswap spot vs Lighter perp) into a sized, delta-neutral order plan bounded by portfolio
 //! risk limits. Pure logic: no chain client, no network, no database. Callers feed observations
 //! and portfolio state in and receive a plan out, so every decision is reproducible and testable
-//! off-line, and the same plan can be replayed against the on-chain record.
+//! off-line, and the same plan can be replayed against the onchain record.
 
 pub mod basis;
 pub mod neutral;

@@ -21,7 +21,7 @@ aim to acknowledge within 72 hours and will keep you updated as we investigate.
 In scope:
 
 - `contracts/` (StrategyVault, MandateGuard, AttestationAnchor and future contracts)
-- `verifier/` (record hashing, Merkle construction, on-chain verification)
+- `verifier/` (record hashing, Merkle construction, onchain verification)
 - key handling and any code path that signs or submits transactions
 
 Out of scope:

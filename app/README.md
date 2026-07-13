@@ -47,5 +47,5 @@ leave contract addresses empty so a fresh process does not index the wrong chain
   the tradable universe, evaluates each through the `engine`, records the observation, and emits on
   the event bus. Its shape mirrors the indexer loop.
 - **Signer and execution**: a key-isolated signer and the two-leg neutral executor, gated by the
-  on-chain `MandateGuard`.
+  onchain `MandateGuard`.
 - **Metered access**: x402 in front of the paid data endpoints.

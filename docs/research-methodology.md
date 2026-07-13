@@ -71,7 +71,7 @@ economically relevant event even when it occurs far slower than an order book.
 
 ## Adversarial execution research
 
-On-chain arbitrage is an adversarial market. The model must account for mempool visibility, builder
+Onchain arbitrage is an adversarial market. The model must account for mempool visibility, builder
 and sequencer ordering, gas auctions, competing routes, private order flow, AMM curvature, and
 failed or partial hedges. A spread that cannot survive the expected auction and routing outcome is
 not an edge.

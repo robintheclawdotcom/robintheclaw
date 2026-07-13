@@ -91,4 +91,4 @@ npm run verify:testnet-proof
 
 The command reads the tracked deployment record and synthetic fixture, checks the deployed role
 relationships, recomputes the root, and compares it with the chain. It gives developers a direct
-view of the current on-chain foundation.
+view of the current onchain foundation.

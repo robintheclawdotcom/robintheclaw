@@ -23,7 +23,7 @@ export function buildRoot(leaves) {
   return level[0];
 }
 
-/// Sibling path proving `index` is in the tree, for on-chain / independent inclusion checks.
+/// Sibling path proving `index` is in the tree, for onchain / independent inclusion checks.
 export function proof(leaves, index) {
   if (!Number.isInteger(index) || index < 0 || index >= leaves.length) {
     throw new Error("proof index is out of range");

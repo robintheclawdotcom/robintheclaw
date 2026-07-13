@@ -3,7 +3,7 @@
 A delta-neutral trading system for tokenized markets on Robinhood Chain. Robin the Claw finds
 cross-venue basis between tokenized-equity spot liquidity and matching perpetuals, then turns
 that market structure into coordinated trading plans. The ambition is a complete autonomous
-stack: market intelligence, adaptive sizing, matched execution, and continuous learning.
+stack: venue-native data, adaptive models, matched execution, and continuous learning.
 
 ## Why
 
@@ -12,12 +12,14 @@ Robin the Claw is being built to give those markets an intelligent, disciplined 
 that can recognize relative-value opportunities and act on them with precision.
 
 - **Market intelligence:** discovers tokenized-equity pools, compares them with perpetual markets,
-  and identifies the basis that can support a relative-value strategy.
-- **Trade planning:** combines liquidity, fractional-Kelly sizing, exposure awareness, and matched
+  and builds the event history needed to understand cross-venue market structure.
+- **Trade planning:** combines liquidity, fractional-Kelly sizing, portfolio awareness, and matched
   spot/perp legs into deterministic strategy plans.
+- **Research models:** develops convergence, regime, and hedge-ratio models from the growing
+  proprietary event store, then promotes the strongest ideas into the strategy stack.
 - **Execution foundation:** pairs custody and delegated execution contracts with a clean path to
   venue adapters, position workflows, and operational control.
-- **Record integrity:** commits strategy records on chain as a supporting tool for research,
+- **Record integrity:** commits strategy records onchain as a supporting tool for research,
   operations, and inspection.
 
 ## Layout
@@ -26,7 +28,7 @@ that can recognize relative-value opportunities and act on them with precision.
 config/      canonical chain + venue addresses and deployment readiness gates
 contracts/   Foundry workspace (MandateGuard, StrategyVault, AttestationAnchor)
 engine/      deterministic basis, sizing, risk, and neutral-plan engine
-runtime/     high-frequency market capture and research runtime
+runtime/     continuous market capture and research runtime
 signal/      read-only basis scanner (measurement before execution)
 sdk/         TypeScript client (later)
 verifier/    record-integrity tool
@@ -40,8 +42,8 @@ Robin already has working foundations across the stack:
 
 - `signal/` discovers pools and measures live basis across the tokenized-equity universe.
 - `engine/` transforms observations into delta-neutral spot/perp plans with adaptive sizing.
-- `runtime/` captures high-frequency market data and accelerates strategy research.
-- `contracts/` establish the on-chain custody, strategy-role, and execution-policy foundation.
+- `runtime/` continuously captures venue and chain events into the research dataset.
+- `contracts/` establish the onchain custody, strategy-role, and execution-policy foundation.
 - `verifier/` provides an inspectable record pipeline alongside the strategy stack.
 - `web/` publishes the architecture, developer documentation, and testnet progress.
 
@@ -53,7 +55,7 @@ cd signal && node src/basis.mjs
 cd contracts && forge test -vv
 ```
 
-The first on-chain foundation is deployed on Robinhood Chain testnet. Venue adapters and the
+The first onchain foundation is deployed on Robinhood Chain testnet. Venue adapters and the
 full execution lifecycle are the next major build-out. The initial universe is the 21 Stock
 Tokens that also have a live perp.
 
@@ -78,8 +80,10 @@ model hierarchy, RWA-specific data requirements, and evidence needed to promote 
 ## Direction
 
 Robin is designed to grow from market intelligence into a full trading platform for tokenized
-markets: better data, smarter portfolio construction, venue adapters, resilient execution, and
-an operating history that makes each iteration more informed than the last.
+markets. The roadmap extends the current stack with cointegration and Ornstein-Uhlenbeck spread
+models, adaptive Kalman hedge ratios, hidden-Markov regime classification, portfolio covariance,
+and execution-aware venue routing. The planned large-model research loop will turn event data and
+market context into better hypotheses, tests, and post-trade analysis.
 
 Tokenized stocks on Robinhood Chain are geo-restricted and are not available to U.S. persons.
 

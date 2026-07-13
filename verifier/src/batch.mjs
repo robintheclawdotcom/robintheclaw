@@ -1,5 +1,5 @@
 // Prove and verify a batch of trades. prove() turns a list of trade records into a Merkle root
-// plus the exact args to anchor it on-chain (AttestationAnchor.anchor). verify() independently
+// plus the exact args to anchor it onchain (AttestationAnchor.anchor). verify() independently
 // recomputes the root from the published records and confirms it matches the claimed/anchored
 // root: this is the "recompute the record" the whole product rests on. A single flipped field in
 // any record changes its leaf and breaks the root, so a tampered log cannot pass.

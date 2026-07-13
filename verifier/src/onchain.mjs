@@ -1,6 +1,6 @@
 // Read the root the agent actually anchored on Robinhood Chain and compare it to the root
 // recomputed from published records. This closes the loop: it is not enough that the records are
-// internally consistent, they must match what the agent committed on-chain. Needs only a public
+// internally consistent, they must match what the agent committed onchain. Needs only a public
 // RPC and the AttestationAnchor address, no keys.
 
 import { createPublicClient, http, getAddress } from "viem";
@@ -40,7 +40,7 @@ export async function readAnchoredRoot({ rpc, anchor, sequence }) {
 }
 
 /// Full verification: recompute the root from published records and confirm it equals the root
-/// anchored on-chain for that sequence.
+/// anchored onchain for that sequence.
 export async function verifyAgainstChain({ rpc, anchor, sequence, records }) {
   const onchain = await readAnchoredRoot({ rpc, anchor, sequence });
   const local = verify(records, onchain.root);
@@ -51,7 +51,7 @@ export async function verifyAgainstChain({ rpc, anchor, sequence, records }) {
     tradeCountMatch: onchain.tradeCount === records.length,
     onchain,
     reason: local.ok
-      ? (onchain.tradeCount === records.length ? "records match the on-chain root" : "root matches but trade count differs")
-      : "recomputed root does not match the on-chain root",
+      ? (onchain.tradeCount === records.length ? "records match the onchain root" : "root matches but trade count differs")
+      : "recomputed root does not match the onchain root",
   };
 }

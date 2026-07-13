@@ -43,6 +43,6 @@ replace that gate with an assumed address.
 ## Isolated testnet proof path
 
 `script/DeployTestnet.s.sol` deploys a clearly named `tUSDG` test asset and a vault with no
-allowlisted venue. It exists to verify owner/agent roles, custody, and on-chain attestations; it
+allowlisted venue. It exists to verify owner/agent roles, custody, and onchain attestations; it
 cannot execute a trade. Use it only on Robinhood testnet and record its addresses in a local,
 ignored deployment file.

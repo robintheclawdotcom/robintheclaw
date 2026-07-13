@@ -35,7 +35,7 @@ An integration is ready to connect when the following are complete:
 - Engine inputs calibrated from frozen historical data, including costs.
 - Partial-fill state machine and emergency unwind covered by tests.
 - Oracle/sequencer health policy covered by tests.
-- On-chain cap, operator approval gate, and venue-specific limits reviewed together.
+- Onchain cap, operator approval gate, and venue-specific limits reviewed together.
 - Testnet end-to-end evidence published and independently verified.
 
 This work keeps the execution layer aligned with the strategy engine, venue semantics, and

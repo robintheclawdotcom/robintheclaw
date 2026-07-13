@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Portfolio risk limits. The engine holds these in memory; persistence and the on-chain mandate
+/// Portfolio risk limits. The engine holds these in memory; persistence and the onchain mandate
 /// (MandateGuard) are the caller's job. These bound a single entry and the book as a whole, and
 /// arm the drawdown kill switch.
 #[derive(Debug, Clone, Serialize, Deserialize)]

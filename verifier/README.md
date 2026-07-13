@@ -40,7 +40,7 @@ const result = await verifyAgainstChain({
   sequence: 1,
   records: publishedRecords,
 });
-// result.ok === true only if the published records reproduce the on-chain root
+// result.ok === true only if the published records reproduce the onchain root
 ```
 
 ## Testnet proof deployment
@@ -57,7 +57,7 @@ The fixture explicitly declares that it is not a fill or performance record.
 ## Design note
 
 The contract stores only the root, so publishing the record is the agent's choice: what is
-enforced on-chain is that the agent cannot later change what it committed. Withholding the record
+enforced onchain is that the agent cannot later change what it committed. Withholding the record
 is visible (a root with no published batch), and a published batch that does not recompute to the
 anchored root is provably dishonest. The point is not that the agent is forced to publish, but
 that anything it does publish is checkable and nothing it committed can be quietly rewritten.

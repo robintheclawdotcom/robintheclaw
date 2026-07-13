@@ -14,7 +14,7 @@ independently.
 | `signal/` | Reads Uniswap v4 and Lighter public market data; writes local JSONL observations. | Untrusted input | No |
 | `runtime/` | Captures high-frequency market and chain evidence, stores immutable raw payloads, and creates only shadow lifecycles. | Private research input | No |
 | `engine/` | Produces deterministic approved/declined plans from supplied JSON. | Pure computation | No |
-| `contracts/` | Holds one owner's asset and bounds calls made by the configured agent. | On-chain enforcement | Only after an owner allowlists a contract and selector |
+| `contracts/` | Holds one owner's asset and bounds calls made by the configured agent. | Onchain enforcement | Only after an owner allowlists a contract and selector |
 | `verifier/` | Canonicalizes disclosed records, computes Merkle roots, and compares roots with chain state. | Public verification | No |
 | `web/` | Static public documentation and proof status. | Informational | No |
 
@@ -69,8 +69,8 @@ sequence has been accepted.
 
 ## State ownership
 
-On-chain state is limited to custody controls and Merkle commitments. Market observations,
+Onchain state is limited to custody controls and Merkle commitments. Market observations,
 calibration inputs, and record publication live off chain. This is intentional: storing prices,
-order books, or full fills on chain would be costly and would not improve their source quality.
+order books, or full fills onchain would be costly and would not improve their source quality.
 The public commitment prevents silently rewriting a disclosed batch; it does not make withheld
 records available.

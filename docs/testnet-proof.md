@@ -8,7 +8,7 @@ The Robinhood testnet deployment establishes the first connected Robin contract 
 agent -> StrategyVault -> AttestationAnchor -> public verifier
 ```
 
-It connects the agent, custody, on-chain record, and developer tooling on Robinhood Chain. The
+It connects the agent, custody, onchain record, and developer tooling on Robinhood Chain. The
 first committed record is a synthetic fixture, giving the system a clear starting point for the
 next phase of venue integration.
 
@@ -32,7 +32,7 @@ The verifier checks:
 2. Guard owner and executor against the owner and vault.
 3. Anchor publisher against the vault.
 4. Fixture kind and canonical Merkle root.
-5. On-chain sequence, root, and trade count.
+5. Onchain sequence, root, and trade count.
 
 Any mismatch exits nonzero. The command is read-only and requires no key.
 

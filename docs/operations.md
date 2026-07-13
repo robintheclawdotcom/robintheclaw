@@ -18,7 +18,7 @@ because owner-only wiring occurs in the same broadcast. Do not use a browser pro
 2. Confirm `config/addresses.json` has the expected chain status and current contract code at each
    configured mainnet address.
 3. For testnet proof deployments, use `DeployTestnet.s.sol`; record generated addresses in
-   `deployments/testnet-proof.json` only after on-chain confirmation.
+   `deployments/testnet-proof.json` only after onchain confirmation.
 4. Fund the agent only with enough test ETH for attestation operations. The agent must not receive
    owner authority.
 5. Run `npm run verify:testnet-proof` after each proof deployment.

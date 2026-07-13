@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Read-only basis scanner. For each name in the tradable universe it reads the Lighter perp
 // (mark, index, open interest) and reports the perp's premium/discount to its index in bps.
-// No keys, no writes on-chain, no execution. This is the measurement step: confirm the basis
+// No keys, no writes onchain, no execution. This is the measurement step: confirm the basis
 // exists and watch how it moves before building anything that touches money.
 //
 // Funding is intentionally NOT annualized into a headline number here. The public funding-rates
