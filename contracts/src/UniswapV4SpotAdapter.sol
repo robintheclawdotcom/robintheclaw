@@ -19,7 +19,8 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
     struct MarketRoute {
         PoolKey poolKey;
         uint64 version;
-        bool enabled;
+        bool entryEnabled;
+        bool exitEnabled;
     }
 
     bytes1 private constant V4_SWAP = 0x10;
@@ -31,7 +32,7 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
     IERC20 public immutable settlementAsset;
     IUniversalRouter public immutable router;
     IPermit2AllowanceTransfer public immutable permit2;
-    address public immutable admin;
+    address public immutable configAdmin;
     bytes32 public immutable routerCodeHash;
     bytes32 public immutable permit2CodeHash;
 
@@ -47,7 +48,8 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
         address currency1,
         uint24 fee,
         int24 tickSpacing,
-        bool enabled
+        bool entryEnabled,
+        bool exitEnabled
     );
     event SwapExecuted(
         bytes32 indexed id,
@@ -57,7 +59,7 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
         uint256 amountOut
     );
 
-    error NotAdmin();
+    error NotConfigAdmin();
     error NotVault();
     error NotBootstrapper();
     error AlreadyBound();
@@ -70,8 +72,8 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
     error InvalidDeadline();
     error ExternalCodeChanged(address target, bytes32 expected, bytes32 actual);
 
-    modifier onlyAdmin() {
-        if (msg.sender != admin) revert NotAdmin();
+    modifier onlyConfigAdmin() {
+        if (msg.sender != configAdmin) revert NotConfigAdmin();
         _;
     }
 
@@ -79,14 +81,14 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
         IERC20 settlementAsset_,
         IUniversalRouter router_,
         IPermit2AllowanceTransfer permit2_,
-        address admin_,
+        address configAdmin_,
         address bootstrapper_,
         bytes32 routerCodeHash_,
         bytes32 permit2CodeHash_
     ) {
         if (
             address(settlementAsset_).code.length == 0 || address(router_).code.length == 0
-                || address(permit2_).code.length == 0 || admin_ == address(0)
+                || address(permit2_).code.length == 0 || configAdmin_.code.length == 0
                 || bootstrapper_ == address(0)
         ) revert InvalidAddress();
         if (
@@ -97,7 +99,7 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
         settlementAsset = settlementAsset_;
         router = router_;
         permit2 = permit2_;
-        admin = admin_;
+        configAdmin = configAdmin_;
         bootstrapper = bootstrapper_;
         routerCodeHash = routerCodeHash_;
         permit2CodeHash = permit2CodeHash_;
@@ -114,8 +116,28 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
 
     function setMarket(address stockToken, PoolKey calldata poolKey, uint64 version, bool enabled)
         external
-        onlyAdmin
+        onlyConfigAdmin
     {
+        _setMarket(stockToken, poolKey, version, enabled, enabled);
+    }
+
+    function setMarket(
+        address stockToken,
+        PoolKey calldata poolKey,
+        uint64 version,
+        bool entryEnabled,
+        bool exitEnabled
+    ) external onlyConfigAdmin {
+        _setMarket(stockToken, poolKey, version, entryEnabled, exitEnabled);
+    }
+
+    function _setMarket(
+        address stockToken,
+        PoolKey calldata poolKey,
+        uint64 version,
+        bool entryEnabled,
+        bool exitEnabled
+    ) private {
         if (stockToken.code.length == 0) revert InvalidAddress();
         MarketRoute storage current = routes[stockToken];
         if (version == 0 || version <= current.version) revert InvalidConfiguration();
@@ -126,7 +148,9 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
         if (!validPair || poolKey.hooks != address(0) || poolKey.tickSpacing == 0) {
             revert InvalidRoute();
         }
-        routes[stockToken] = MarketRoute({ poolKey: poolKey, version: version, enabled: enabled });
+        routes[stockToken] = MarketRoute({
+            poolKey: poolKey, version: version, entryEnabled: entryEnabled, exitEnabled: exitEnabled
+        });
         emit MarketSet(
             stockToken,
             version,
@@ -134,7 +158,8 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
             poolKey.currency1,
             poolKey.fee,
             poolKey.tickSpacing,
-            enabled
+            entryEnabled,
+            exitEnabled
         );
     }
 
@@ -151,7 +176,9 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
         _checkCode(address(router), routerCodeHash);
         _checkCode(address(permit2), permit2CodeHash);
         MarketRoute memory route = routes[intent.stockToken];
-        if (!route.enabled) revert MarketDisabled(intent.stockToken);
+        bool enabled =
+            intent.side == ISpotExecution.Side.BuySpot ? route.entryEnabled : route.exitEnabled;
+        if (!enabled) revert MarketDisabled(intent.stockToken);
         if (intent.configVersion != route.version) {
             revert StaleConfiguration(route.version, intent.configVersion);
         }

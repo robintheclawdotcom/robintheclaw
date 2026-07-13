@@ -13,6 +13,8 @@ interface ISpotExecution {
         Side side;
         uint128 amountIn;
         uint128 minAmountOut;
+        uint256 expectedUIMultiplier;
+        uint80 minOracleRoundId;
         uint64 deadline;
         uint64 configVersion;
     }

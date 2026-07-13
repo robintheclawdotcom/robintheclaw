@@ -21,9 +21,11 @@ contract MandateRiskManagerV1 {
         uint128 maxInventory;
         uint64 heartbeat;
         uint64 version;
+        uint16 maxSlippageBps;
         uint8 tokenDecimals;
         uint8 feedDecimals;
-        bool enabled;
+        bool entryEnabled;
+        bool exitEnabled;
     }
 
     struct PendingExecution {
@@ -32,12 +34,19 @@ contract MandateRiskManagerV1 {
         ISpotExecution.Side side;
         uint128 amountIn;
         uint128 minAmountOut;
+        uint256 expectedUIMultiplier;
+        uint80 minOracleRoundId;
     }
+
+    uint16 public constant MAX_SLIPPAGE_BPS = 500;
+    uint16 public constant LEGACY_SLIPPAGE_BPS = 100;
+    uint256 private constant BPS = 10_000;
 
     IERC20Metadata public immutable settlementAsset;
     IChainlinkFeed public immutable sequencerFeed;
-    address public immutable admin;
-    address public immutable guardian;
+    address public immutable configAdmin;
+    address public guardian;
+    address public immutable treasury;
     uint8 public immutable settlementDecimals;
 
     address public executor;
@@ -51,7 +60,6 @@ contract MandateRiskManagerV1 {
     uint256 public turnoverLimit;
     uint256 public turnoverWindowStart;
     uint256 public windowTurnover;
-    uint256 public grossExposure;
     uint256 public activeMarketCount;
 
     PendingExecution private pending;
@@ -59,8 +67,11 @@ contract MandateRiskManagerV1 {
     mapping(address => uint256) public inventory;
     mapping(address => uint256) public inventoryCost;
     mapping(bytes32 => bool) public usedIntent;
+    address[] public activeMarkets;
+    mapping(address => uint256) private activeMarketIndexPlusOne;
 
     event ExecutorBound(address indexed executor);
+    event GuardianSet(address indexed previousGuardian, address indexed guardian);
     event ModeSet(Mode mode, address indexed caller);
     event LimitsSet(
         uint256 grossNotionalLimit,
@@ -77,7 +88,9 @@ contract MandateRiskManagerV1 {
         uint128 maxOrderNotional,
         uint128 maxInventory,
         uint64 heartbeat,
-        bool enabled
+        uint16 maxSlippageBps,
+        bool entryEnabled,
+        bool exitEnabled
     );
     event IntentAuthorized(
         bytes32 indexed id,
@@ -93,11 +106,11 @@ contract MandateRiskManagerV1 {
         uint256 amountIn,
         uint256 amountOut,
         uint256 inventory,
-        uint256 grossExposure
+        uint256 bookCost
     );
 
-    error NotAdmin();
-    error NotGuardian();
+    error NotConfigAdmin();
+    error NotRestrictor();
     error NotExecutor();
     error NotBootstrapper();
     error AlreadyBound();
@@ -115,11 +128,14 @@ contract MandateRiskManagerV1 {
     error OraclePaused(address stockToken);
     error OracleInvalid(address feed);
     error OracleStale(address feed, uint256 updatedAt);
+    error OracleRoundTooOld(uint80 minimum, uint80 actual);
     error SequencerDown();
     error SequencerGracePeriod();
     error MultiplierTransition(
         uint256 currentMultiplier, uint256 pendingMultiplier, uint256 effectiveAt
     );
+    error MultiplierMismatch(uint256 expected, uint256 actual);
+    error SlippageLimitExceeded(uint256 minimum, uint256 supplied);
     error OrderLimitExceeded(uint256 attempted, uint256 limit);
     error TurnoverLimitExceeded(uint256 attempted, uint256 limit);
     error GrossLimitExceeded(uint256 attempted, uint256 limit);
@@ -128,8 +144,8 @@ contract MandateRiskManagerV1 {
     error InsufficientInventory(uint256 attempted, uint256 available);
     error SettlementMismatch();
 
-    modifier onlyAdmin() {
-        if (msg.sender != admin) revert NotAdmin();
+    modifier onlyConfigAdmin() {
+        if (msg.sender != configAdmin) revert NotConfigAdmin();
         _;
     }
 
@@ -141,8 +157,9 @@ contract MandateRiskManagerV1 {
     constructor(
         IERC20Metadata settlementAsset_,
         IChainlinkFeed sequencerFeed_,
-        address admin_,
+        address configAdmin_,
         address guardian_,
+        address treasury_,
         address bootstrapper_,
         uint256 grossNotionalLimit_,
         uint256 turnoverLimit_,
@@ -153,17 +170,23 @@ contract MandateRiskManagerV1 {
     ) {
         if (
             address(settlementAsset_).code.length == 0 || address(sequencerFeed_).code.length == 0
-                || admin_ == address(0) || guardian_ == address(0) || bootstrapper_ == address(0)
+                || configAdmin_.code.length == 0 || guardian_ == address(0)
+                || treasury_.code.length == 0 || bootstrapper_ == address(0)
         ) revert InvalidAddress();
-        if (admin_ == guardian_) revert InvalidConfiguration();
+        if (
+            configAdmin_ == guardian_ || configAdmin_ == treasury_ || guardian_ == treasury_
+                || bootstrapper_ == configAdmin_ || bootstrapper_ == guardian_
+                || bootstrapper_ == treasury_
+        ) revert InvalidConfiguration();
 
         uint8 decimals_ = settlementAsset_.decimals();
         if (decimals_ > 18) revert InvalidConfiguration();
 
         settlementAsset = settlementAsset_;
         sequencerFeed = sequencerFeed_;
-        admin = admin_;
+        configAdmin = configAdmin_;
         guardian = guardian_;
+        treasury = treasury_;
         bootstrapper = bootstrapper_;
         settlementDecimals = decimals_;
         mode = Mode.Halted;
@@ -186,13 +209,21 @@ contract MandateRiskManagerV1 {
         emit ExecutorBound(executor_);
     }
 
-    function setMode(Mode mode_) external onlyAdmin {
+    function setMode(Mode mode_) external onlyConfigAdmin {
         mode = mode_;
         emit ModeSet(mode_, msg.sender);
     }
 
+    function setGuardian(address guardian_) external onlyConfigAdmin {
+        if (guardian_ == address(0)) revert InvalidAddress();
+        if (guardian_ == configAdmin || guardian_ == treasury) revert InvalidConfiguration();
+        address previous = guardian;
+        guardian = guardian_;
+        emit GuardianSet(previous, guardian_);
+    }
+
     function restrictMode(Mode mode_) external {
-        if (msg.sender != guardian) revert NotGuardian();
+        if (msg.sender != guardian && msg.sender != treasury) revert NotRestrictor();
         if (mode_ == Mode.Active || uint8(mode_) < uint8(mode)) revert InvalidModeTransition();
         mode = mode_;
         emit ModeSet(mode_, msg.sender);
@@ -205,7 +236,7 @@ contract MandateRiskManagerV1 {
         uint64 maxDeadlineDelay_,
         uint64 sequencerGracePeriod_,
         uint8 maxActiveMarkets_
-    ) external onlyAdmin {
+    ) external onlyConfigAdmin {
         _setLimits(
             grossNotionalLimit_,
             turnoverLimit_,
@@ -224,13 +255,242 @@ contract MandateRiskManagerV1 {
         uint64 heartbeat,
         uint64 version,
         bool enabled
-    ) external onlyAdmin {
+    ) external onlyConfigAdmin {
+        _setMarket(
+            stockToken,
+            feed,
+            maxOrderNotional,
+            maxInventory,
+            heartbeat,
+            version,
+            LEGACY_SLIPPAGE_BPS,
+            enabled,
+            enabled
+        );
+    }
+
+    function setMarket(
+        address stockToken,
+        IChainlinkFeed feed,
+        uint128 maxOrderNotional,
+        uint128 maxInventory,
+        uint64 heartbeat,
+        uint64 version,
+        uint16 maxSlippageBps,
+        bool entryEnabled,
+        bool exitEnabled
+    ) external onlyConfigAdmin {
+        _setMarket(
+            stockToken,
+            feed,
+            maxOrderNotional,
+            maxInventory,
+            heartbeat,
+            version,
+            maxSlippageBps,
+            entryEnabled,
+            exitEnabled
+        );
+    }
+
+    function authorize(ISpotExecution.SpotIntent calldata intent)
+        external
+        onlyExecutor
+        returns (uint256 notional, uint256 price, uint256 multiplier)
+    {
+        if (mode == Mode.Halted) revert Halted();
+        if (intent.side == ISpotExecution.Side.BuySpot && mode != Mode.Active) revert ReduceOnly();
+        if (
+            intent.id == bytes32(0) || intent.stockToken == address(0) || intent.amountIn == 0
+                || intent.minAmountOut == 0 || intent.expectedUIMultiplier == 0
+                || intent.minOracleRoundId == 0 || pending.id != bytes32(0)
+        ) revert InvalidIntent();
+        if (usedIntent[intent.id]) revert IntentAlreadyUsed(intent.id);
+        if (intent.deadline < block.timestamp) revert DeadlineExpired();
+        if (intent.deadline > block.timestamp + maxDeadlineDelay) revert DeadlineTooFar();
+
+        MarketConfig memory market = markets[intent.stockToken];
+        bool enabled =
+            intent.side == ISpotExecution.Side.BuySpot ? market.entryEnabled : market.exitEnabled;
+        if (!enabled) revert MarketDisabled(intent.stockToken);
+        if (intent.configVersion != market.version) {
+            revert StaleConfiguration(market.version, intent.configVersion);
+        }
+
+        _checkSequencer();
+        uint80 roundId;
+        (price, multiplier, roundId) = _readMarket(intent.stockToken, market);
+        if (roundId < intent.minOracleRoundId) {
+            revert OracleRoundTooOld(intent.minOracleRoundId, roundId);
+        }
+        if (multiplier != intent.expectedUIMultiplier) {
+            revert MultiplierMismatch(intent.expectedUIMultiplier, multiplier);
+        }
+
+        if (intent.side == ISpotExecution.Side.BuySpot) {
+            notional = intent.amountIn;
+            if (inventory[intent.stockToken] == 0 && activeMarketCount >= maxActiveMarkets) {
+                revert ActiveMarketLimitExceeded(activeMarketCount + 1, maxActiveMarkets);
+            }
+            uint256 currentGross = _currentGrossNotional(address(0), 0, 0);
+            uint256 projectedGross = currentGross + notional;
+            if (projectedGross > grossNotionalLimit) {
+                revert GrossLimitExceeded(projectedGross, grossNotionalLimit);
+            }
+            _consumeTurnover(notional);
+        } else {
+            uint256 available = inventory[intent.stockToken];
+            if (intent.amountIn > available) {
+                revert InsufficientInventory(intent.amountIn, available);
+            }
+            notional = _tokenNotional(intent.amountIn, price, market);
+        }
+        if (notional > market.maxOrderNotional) {
+            revert OrderLimitExceeded(notional, market.maxOrderNotional);
+        }
+        _checkMinimumOutput(intent, price, market);
+
+        usedIntent[intent.id] = true;
+        pending = PendingExecution({
+            id: intent.id,
+            stockToken: intent.stockToken,
+            side: intent.side,
+            amountIn: intent.amountIn,
+            minAmountOut: intent.minAmountOut,
+            expectedUIMultiplier: intent.expectedUIMultiplier,
+            minOracleRoundId: intent.minOracleRoundId
+        });
+
+        emit IntentAuthorized(
+            intent.id, intent.stockToken, intent.side, notional, price, multiplier
+        );
+    }
+
+    function settle(bytes32 id, uint256 actualIn, uint256 actualOut) external onlyExecutor {
+        PendingExecution memory execution = pending;
+        if (
+            execution.id != id || actualIn != execution.amountIn
+                || actualOut < execution.minAmountOut
+        ) revert SettlementMismatch();
+
+        MarketConfig memory market = markets[execution.stockToken];
+        uint256 currentInventory = inventory[execution.stockToken];
+        if (execution.side == ISpotExecution.Side.BuySpot) {
+            uint256 nextInventory = currentInventory + actualOut;
+            if (nextInventory > market.maxInventory) {
+                revert InventoryLimitExceeded(nextInventory, market.maxInventory);
+            }
+
+            _checkSequencer();
+            (uint256 price, uint256 multiplier, uint80 roundId) =
+                _readMarket(execution.stockToken, market);
+            if (roundId < execution.minOracleRoundId) {
+                revert OracleRoundTooOld(execution.minOracleRoundId, roundId);
+            }
+            if (multiplier != execution.expectedUIMultiplier) {
+                revert MultiplierMismatch(execution.expectedUIMultiplier, multiplier);
+            }
+            uint256 nextGross = _currentGrossNotional(execution.stockToken, nextInventory, price);
+            if (nextGross > grossNotionalLimit) {
+                revert GrossLimitExceeded(nextGross, grossNotionalLimit);
+            }
+            if (currentInventory == 0) _addActiveMarket(execution.stockToken);
+            inventory[execution.stockToken] = nextInventory;
+            inventoryCost[execution.stockToken] += actualIn;
+        } else {
+            if (actualIn > currentInventory) {
+                revert InsufficientInventory(actualIn, currentInventory);
+            }
+            uint256 currentCost = inventoryCost[execution.stockToken];
+            uint256 costRemoved = actualIn == currentInventory
+                ? currentCost
+                : Math.mulDiv(currentCost, actualIn, currentInventory);
+            uint256 nextInventory = currentInventory - actualIn;
+            inventory[execution.stockToken] = nextInventory;
+            inventoryCost[execution.stockToken] = currentCost - costRemoved;
+            if (nextInventory == 0) _removeActiveMarket(execution.stockToken);
+        }
+
+        delete pending;
+        emit ExecutionSettled(
+            id,
+            execution.stockToken,
+            actualIn,
+            actualOut,
+            inventory[execution.stockToken],
+            inventoryCost[execution.stockToken]
+        );
+    }
+
+    function isMarket(address stockToken) external view returns (bool) {
+        MarketConfig storage market = markets[stockToken];
+        return market.entryEnabled || market.exitEnabled;
+    }
+
+    function pendingIntent() external view returns (bytes32) {
+        return pending.id;
+    }
+
+    function activeMarketAt(uint256 index) external view returns (address) {
+        return activeMarkets[index];
+    }
+
+    function grossExposure() public view returns (uint256) {
+        if (activeMarketCount == 0) return 0;
+        _checkSequencer();
+        return _currentGrossNotional(address(0), 0, 0);
+    }
+
+    function currentGrossNotional() external view returns (uint256) {
+        return grossExposure();
+    }
+
+    function _setLimits(
+        uint256 grossNotionalLimit_,
+        uint256 turnoverLimit_,
+        uint64 turnoverWindow_,
+        uint64 maxDeadlineDelay_,
+        uint64 sequencerGracePeriod_,
+        uint8 maxActiveMarkets_
+    ) private {
+        if (
+            grossNotionalLimit_ == 0 || turnoverLimit_ == 0 || turnoverWindow_ == 0
+                || maxDeadlineDelay_ == 0 || sequencerGracePeriod_ == 0 || maxActiveMarkets_ == 0
+                || maxActiveMarkets_ < activeMarketCount
+        ) revert InvalidConfiguration();
+        grossNotionalLimit = grossNotionalLimit_;
+        turnoverLimit = turnoverLimit_;
+        turnoverWindow = turnoverWindow_;
+        maxDeadlineDelay = maxDeadlineDelay_;
+        sequencerGracePeriod = sequencerGracePeriod_;
+        maxActiveMarkets = maxActiveMarkets_;
+        emit LimitsSet(
+            grossNotionalLimit_,
+            turnoverLimit_,
+            turnoverWindow_,
+            maxDeadlineDelay_,
+            sequencerGracePeriod_,
+            maxActiveMarkets_
+        );
+    }
+
+    function _setMarket(
+        address stockToken,
+        IChainlinkFeed feed,
+        uint128 maxOrderNotional,
+        uint128 maxInventory,
+        uint64 heartbeat,
+        uint64 version,
+        uint16 maxSlippageBps,
+        bool entryEnabled,
+        bool exitEnabled
+    ) private {
         if (stockToken.code.length == 0 || address(feed).code.length == 0) {
             revert InvalidAddress();
         }
         if (
             maxOrderNotional == 0 || maxInventory == 0 || heartbeat == 0 || version == 0
-                || version <= markets[stockToken].version
+                || version <= markets[stockToken].version || maxSlippageBps > MAX_SLIPPAGE_BPS
         ) revert InvalidConfiguration();
 
         uint8 tokenDecimals = IERC20Metadata(stockToken).decimals();
@@ -250,157 +510,22 @@ contract MandateRiskManagerV1 {
             maxInventory: maxInventory,
             heartbeat: heartbeat,
             version: version,
+            maxSlippageBps: maxSlippageBps,
             tokenDecimals: tokenDecimals,
             feedDecimals: feedDecimals,
-            enabled: enabled
+            entryEnabled: entryEnabled,
+            exitEnabled: exitEnabled
         });
         emit MarketSet(
-            stockToken, address(feed), version, maxOrderNotional, maxInventory, heartbeat, enabled
-        );
-    }
-
-    function authorize(ISpotExecution.SpotIntent calldata intent)
-        external
-        onlyExecutor
-        returns (uint256 notional, uint256 price, uint256 multiplier)
-    {
-        if (mode == Mode.Halted) revert Halted();
-        if (mode == Mode.ReduceOnly && intent.side == ISpotExecution.Side.BuySpot) {
-            revert ReduceOnly();
-        }
-        if (
-            intent.id == bytes32(0) || intent.stockToken == address(0) || intent.amountIn == 0
-                || intent.minAmountOut == 0 || pending.id != bytes32(0)
-        ) revert InvalidIntent();
-        if (usedIntent[intent.id]) revert IntentAlreadyUsed(intent.id);
-        if (intent.deadline < block.timestamp) revert DeadlineExpired();
-        if (intent.deadline > block.timestamp + maxDeadlineDelay) revert DeadlineTooFar();
-
-        MarketConfig memory market = markets[intent.stockToken];
-        if (!market.enabled) revert MarketDisabled(intent.stockToken);
-        if (intent.configVersion != market.version) {
-            revert StaleConfiguration(market.version, intent.configVersion);
-        }
-
-        _checkSequencer();
-        (price, multiplier) = _readMarket(intent.stockToken, market);
-        if (intent.side == ISpotExecution.Side.BuySpot) {
-            notional = intent.amountIn;
-        } else {
-            uint256 available = inventory[intent.stockToken];
-            if (intent.amountIn > available) {
-                revert InsufficientInventory(intent.amountIn, available);
-            }
-            notional = _tokenNotional(intent.amountIn, price, market);
-        }
-        if (notional > market.maxOrderNotional) {
-            revert OrderLimitExceeded(notional, market.maxOrderNotional);
-        }
-
-        _consumeTurnover(notional);
-        usedIntent[intent.id] = true;
-        pending = PendingExecution({
-            id: intent.id,
-            stockToken: intent.stockToken,
-            side: intent.side,
-            amountIn: intent.amountIn,
-            minAmountOut: intent.minAmountOut
-        });
-
-        emit IntentAuthorized(
-            intent.id, intent.stockToken, intent.side, notional, price, multiplier
-        );
-    }
-
-    function settle(bytes32 id, uint256 actualIn, uint256 actualOut) external onlyExecutor {
-        PendingExecution memory execution = pending;
-        if (
-            execution.id != id || actualIn != execution.amountIn
-                || actualOut < execution.minAmountOut
-        ) {
-            revert SettlementMismatch();
-        }
-
-        MarketConfig memory market = markets[execution.stockToken];
-        uint256 currentInventory = inventory[execution.stockToken];
-        if (execution.side == ISpotExecution.Side.BuySpot) {
-            uint256 nextInventory = currentInventory + actualOut;
-            if (nextInventory > market.maxInventory) {
-                revert InventoryLimitExceeded(nextInventory, market.maxInventory);
-            }
-
-            uint256 nextGross = grossExposure + actualIn;
-            if (nextGross > grossNotionalLimit) {
-                revert GrossLimitExceeded(nextGross, grossNotionalLimit);
-            }
-            if (currentInventory == 0) {
-                uint256 nextCount = activeMarketCount + 1;
-                if (nextCount > maxActiveMarkets) {
-                    revert ActiveMarketLimitExceeded(nextCount, maxActiveMarkets);
-                }
-                activeMarketCount = nextCount;
-            }
-            inventory[execution.stockToken] = nextInventory;
-            inventoryCost[execution.stockToken] += actualIn;
-            grossExposure = nextGross;
-        } else {
-            if (actualIn > currentInventory) {
-                revert InsufficientInventory(actualIn, currentInventory);
-            }
-            uint256 currentCost = inventoryCost[execution.stockToken];
-            uint256 costRemoved = actualIn == currentInventory
-                ? currentCost
-                : Math.mulDiv(currentCost, actualIn, currentInventory);
-            inventory[execution.stockToken] = currentInventory - actualIn;
-            inventoryCost[execution.stockToken] = currentCost - costRemoved;
-            grossExposure -= costRemoved;
-            if (actualIn == currentInventory) activeMarketCount -= 1;
-        }
-
-        delete pending;
-        emit ExecutionSettled(
-            id,
-            execution.stockToken,
-            actualIn,
-            actualOut,
-            inventory[execution.stockToken],
-            grossExposure
-        );
-    }
-
-    function isMarket(address stockToken) external view returns (bool) {
-        return markets[stockToken].enabled;
-    }
-
-    function pendingIntent() external view returns (bytes32) {
-        return pending.id;
-    }
-
-    function _setLimits(
-        uint256 grossNotionalLimit_,
-        uint256 turnoverLimit_,
-        uint64 turnoverWindow_,
-        uint64 maxDeadlineDelay_,
-        uint64 sequencerGracePeriod_,
-        uint8 maxActiveMarkets_
-    ) private {
-        if (
-            grossNotionalLimit_ == 0 || turnoverLimit_ == 0 || turnoverWindow_ == 0
-                || maxDeadlineDelay_ == 0 || sequencerGracePeriod_ == 0 || maxActiveMarkets_ == 0
-        ) revert InvalidConfiguration();
-        grossNotionalLimit = grossNotionalLimit_;
-        turnoverLimit = turnoverLimit_;
-        turnoverWindow = turnoverWindow_;
-        maxDeadlineDelay = maxDeadlineDelay_;
-        sequencerGracePeriod = sequencerGracePeriod_;
-        maxActiveMarkets = maxActiveMarkets_;
-        emit LimitsSet(
-            grossNotionalLimit_,
-            turnoverLimit_,
-            turnoverWindow_,
-            maxDeadlineDelay_,
-            sequencerGracePeriod_,
-            maxActiveMarkets_
+            stockToken,
+            address(feed),
+            version,
+            maxOrderNotional,
+            maxInventory,
+            heartbeat,
+            maxSlippageBps,
+            entryEnabled,
+            exitEnabled
         );
     }
 
@@ -426,7 +551,7 @@ contract MandateRiskManagerV1 {
     function _readMarket(address stockToken, MarketConfig memory market)
         private
         view
-        returns (uint256 price, uint256 multiplier)
+        returns (uint256 price, uint256 multiplier, uint80 roundId)
     {
         IRobinhoodStockToken token = IRobinhoodStockToken(stockToken);
         if (token.oraclePaused()) revert OraclePaused(stockToken);
@@ -438,18 +563,63 @@ contract MandateRiskManagerV1 {
             revert MultiplierTransition(multiplier, nextMultiplier, effectiveAt);
         }
 
-        (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) =
-            market.feed.latestRoundData();
+        int256 answer;
+        uint256 updatedAt;
+        uint80 answeredInRound;
+        (roundId, answer,, updatedAt, answeredInRound) = market.feed.latestRoundData();
         if (
-            answer <= 0 || updatedAt == 0 || updatedAt > block.timestamp
+            roundId == 0 || answer <= 0 || updatedAt == 0 || updatedAt > block.timestamp
                 || answeredInRound < roundId
-        ) {
-            revert OracleInvalid(address(market.feed));
-        }
+        ) revert OracleInvalid(address(market.feed));
         if (block.timestamp - updatedAt > market.heartbeat) {
             revert OracleStale(address(market.feed), updatedAt);
         }
         price = SafeCast.toUint256(answer);
+    }
+
+    function _checkMinimumOutput(
+        ISpotExecution.SpotIntent calldata intent,
+        uint256 price,
+        MarketConfig memory market
+    ) private view {
+        uint256 retainedBps = BPS - market.maxSlippageBps;
+        uint256 minimum;
+        uint256 supplied;
+        if (intent.side == ISpotExecution.Side.BuySpot) {
+            minimum = Math.mulDiv(intent.amountIn, retainedBps, BPS, Math.Rounding.Ceil);
+            supplied = _tokenNotional(intent.minAmountOut, price, market);
+        } else {
+            uint256 inputNotional = _tokenNotional(intent.amountIn, price, market);
+            minimum = Math.mulDiv(inputNotional, retainedBps, BPS, Math.Rounding.Ceil);
+            supplied = intent.minAmountOut;
+        }
+        if (supplied < minimum) revert SlippageLimitExceeded(minimum, supplied);
+    }
+
+    function _currentGrossNotional(
+        address overrideMarket,
+        uint256 overrideInventory,
+        uint256 overridePrice
+    ) private view returns (uint256 gross) {
+        uint256 length = activeMarkets.length;
+        bool foundOverride;
+        for (uint256 i; i < length; ++i) {
+            address stockToken = activeMarkets[i];
+            MarketConfig memory market = markets[stockToken];
+            uint256 balance = inventory[stockToken];
+            uint256 price;
+            if (stockToken == overrideMarket) {
+                foundOverride = true;
+                balance = overrideInventory;
+                price = overridePrice;
+            } else {
+                (price,,) = _readMarket(stockToken, market);
+            }
+            gross += _tokenNotional(balance, price, market);
+        }
+        if (overrideMarket != address(0) && !foundOverride) {
+            gross += _tokenNotional(overrideInventory, overridePrice, markets[overrideMarket]);
+        }
     }
 
     function _tokenNotional(uint256 amount, uint256 price, MarketConfig memory market)
@@ -459,5 +629,31 @@ contract MandateRiskManagerV1 {
     {
         uint256 valueAtFeedDecimals = Math.mulDiv(amount, price, 10 ** market.tokenDecimals);
         return Math.mulDiv(valueAtFeedDecimals, 10 ** settlementDecimals, 10 ** market.feedDecimals);
+    }
+
+    function _addActiveMarket(address stockToken) private {
+        if (activeMarketIndexPlusOne[stockToken] != 0) return;
+        uint256 nextCount = activeMarkets.length + 1;
+        if (nextCount > maxActiveMarkets) {
+            revert ActiveMarketLimitExceeded(nextCount, maxActiveMarkets);
+        }
+        activeMarkets.push(stockToken);
+        activeMarketIndexPlusOne[stockToken] = nextCount;
+        activeMarketCount = nextCount;
+    }
+
+    function _removeActiveMarket(address stockToken) private {
+        uint256 indexPlusOne = activeMarketIndexPlusOne[stockToken];
+        if (indexPlusOne == 0) return;
+        uint256 index = indexPlusOne - 1;
+        uint256 lastIndex = activeMarkets.length - 1;
+        if (index != lastIndex) {
+            address lastMarket = activeMarkets[lastIndex];
+            activeMarkets[index] = lastMarket;
+            activeMarketIndexPlusOne[lastMarket] = index + 1;
+        }
+        activeMarkets.pop();
+        delete activeMarketIndexPlusOne[stockToken];
+        activeMarketCount = activeMarkets.length;
     }
 }

@@ -79,6 +79,8 @@ contract MockFeed is IChainlinkFeed {
     }
 }
 
+    contract MockAuthority { }
+
     contract MockPermit2 is IPermit2AllowanceTransfer {
         using SafeERC20 for IERC20;
 
@@ -146,14 +148,17 @@ contract MockFeed is IChainlinkFeed {
         UniswapV4SpotAdapter private adapter;
         RwaStrategyVault private vault;
         MandateRiskManagerV1.Mode private deployedMode;
+        uint256 private intentMultiplier = 1e18;
 
-        address private admin = makeAddr("admin");
-        address private recovery = makeAddr("recovery");
+        address private admin;
+        address private recovery;
         address private guardian = makeAddr("guardian");
         address private agent = makeAddr("agent");
 
         function setUp() public {
             vm.warp(2 days);
+            admin = address(new MockAuthority());
+            recovery = address(new MockAuthority());
             usdg = new MockToken("Global Dollar", "USDG", 6);
             stock = new MockStockToken();
             sequencer = new MockFeed(0, 0);
@@ -165,11 +170,10 @@ contract MockFeed is IChainlinkFeed {
             RwaDeploymentFactory factory = new RwaDeploymentFactory(
                 RwaDeploymentFactory.Config({
                     settlementAsset: usdg,
-                    sequencerFeed: sequencer,
                     router: router,
                     permit2: permit2,
-                    admin: admin,
-                    recoveryRecipient: recovery,
+                    configAdmin: admin,
+                    treasury: recovery,
                     guardian: guardian,
                     agent: agent,
                     routerCodeHash: address(router).codehash,
@@ -188,6 +192,7 @@ contract MockFeed is IChainlinkFeed {
             deployedMode = risk.mode();
 
             vm.startPrank(admin);
+            factory.sequencerGate().bindSource(sequencer, address(sequencer).codehash);
             risk.setMarket(address(stock), stockFeed, 1_000e6, 2_000e18, 1 hours, 1, true);
             adapter.setMarket(
                 address(stock),
@@ -204,12 +209,12 @@ contract MockFeed is IChainlinkFeed {
             risk.setMode(MandateRiskManagerV1.Mode.Active);
             vm.stopPrank();
 
-            usdg.mint(admin, 10_000e6);
+            usdg.mint(recovery, 10_000e6);
             stock.mint(address(router), 1_000_000e18);
             usdg.mint(address(router), 10_000e6);
-            vm.startPrank(admin);
+            vm.startPrank(recovery);
             usdg.approve(address(vault), type(uint256).max);
-            vault.deposit(usdg, 5_000e6);
+            vault.deposit(5_000e6);
             vm.stopPrank();
         }
 
@@ -217,7 +222,7 @@ contract MockFeed is IChainlinkFeed {
             assertEq(uint8(deployedMode), uint8(MandateRiskManagerV1.Mode.Halted));
             assertEq(risk.executor(), address(vault));
             assertEq(adapter.vault(), address(vault));
-            assertEq(vault.recoveryRecipient(), recovery);
+            assertEq(vault.treasury(), recovery);
             assertEq(vault.attestationAnchor().publisher(), address(vault));
         }
 
@@ -325,33 +330,37 @@ contract MockFeed is IChainlinkFeed {
         function test_sellNotionalUsesAlreadyAdjustedPerTokenOraclePrice() public {
             _execute(ISpotExecution.Side.BuySpot, 100e6, 100e18, bytes32("seed-price"));
             stock.setMultiplier(2e18, 2e18, 0);
-            stockFeed.set(2e8, block.timestamp, block.timestamp);
+            intentMultiplier = 2e18;
+            stockFeed.set(1e8, block.timestamp, block.timestamp);
 
             _execute(ISpotExecution.Side.SellSpot, 5e18, 5e6, bytes32("priced-sell"));
-            assertEq(risk.windowTurnover(), 110e6);
+            assertEq(risk.windowTurnover(), 100e6);
         }
 
         function test_recoveryRequiresHaltAndPaysSafeRecipient() public {
-            vm.prank(admin);
+            uint256 treasuryBalanceBefore = usdg.balanceOf(recovery);
+            vm.prank(recovery);
             vm.expectRevert(RwaStrategyVault.RecoveryRequiresHalt.selector);
             vault.recover(usdg, 10e6);
 
-            vm.startPrank(admin);
+            vm.prank(admin);
             risk.setMode(MandateRiskManagerV1.Mode.Halted);
+            vm.startPrank(recovery);
+            vault.finalizeRecovery();
             vault.recover(usdg, 10e6);
             vm.stopPrank();
-            assertEq(usdg.balanceOf(recovery), 10e6);
+            assertEq(usdg.balanceOf(recovery), treasuryBalanceBefore + 10e6);
             assertTrue(vault.recoveryFinalized());
 
             vm.prank(admin);
             risk.setMode(MandateRiskManagerV1.Mode.Active);
             vm.prank(agent);
-            vm.expectRevert(RwaStrategyVault.RecoveryFinalized.selector);
+            vm.expectRevert(RwaStrategyVault.NotAgent.selector);
             vault.executeSpot(_intent(ISpotExecution.Side.BuySpot, 1e6, 1e18, bytes32("final")));
 
-            vm.prank(admin);
+            vm.prank(recovery);
             vm.expectRevert(RwaStrategyVault.RecoveryFinalized.selector);
-            vault.deposit(usdg, 1e6);
+            vault.deposit(1e6);
         }
 
         function test_limitsAndRouteVersionAreEnforced() public {
@@ -413,7 +422,9 @@ contract MockFeed is IChainlinkFeed {
                 amountIn: amountIn,
                 minAmountOut: minOut,
                 deadline: uint64(block.timestamp + 2 minutes),
-                configVersion: 1
+                configVersion: 1,
+                expectedUIMultiplier: intentMultiplier,
+                minOracleRoundId: 1
             });
         }
     }

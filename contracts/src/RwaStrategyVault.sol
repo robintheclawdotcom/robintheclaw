@@ -16,13 +16,15 @@ contract RwaStrategyVault is ISpotExecution, ReentrancyGuard {
     MandateRiskManagerV1 public immutable riskManager;
     ISpotAdapter public immutable spotAdapter;
     AttestationAnchor public immutable attestationAnchor;
-    address public immutable admin;
-    address public immutable recoveryRecipient;
+    address public immutable configAdmin;
+    address public immutable treasury;
     address public agent;
     bool public recoveryFinalized;
 
     event AgentSet(address indexed agent);
+    event AgentRevoked(address indexed caller);
     event Deposited(address indexed token, uint256 amount);
+    event VaultRecoveryFinalized(address indexed treasury);
     event Recovered(address indexed token, uint256 amount);
     event SpotExecuted(
         bytes32 indexed id,
@@ -36,16 +38,23 @@ contract RwaStrategyVault is ISpotExecution, ReentrancyGuard {
     );
     event BatchAnchored(bytes32 indexed root, uint64 indexed sequence, uint64 tradeCount);
 
-    error NotAdmin();
+    error NotConfigAdmin();
+    error NotTreasury();
     error NotAgent();
     error InvalidAddress();
-    error UnsupportedToken();
+    error InvalidAmount();
     error RecoveryRequiresHalt();
+    error RecoveryNotFinalized();
     error RecoveryFinalized();
     error InvalidBalanceDelta();
 
-    modifier onlyAdmin() {
-        if (msg.sender != admin) revert NotAdmin();
+    modifier onlyConfigAdmin() {
+        if (msg.sender != configAdmin) revert NotConfigAdmin();
+        _;
+    }
+
+    modifier onlyTreasury() {
+        if (msg.sender != treasury) revert NotTreasury();
         _;
     }
 
@@ -53,51 +62,81 @@ contract RwaStrategyVault is ISpotExecution, ReentrancyGuard {
         IERC20 settlementAsset_,
         MandateRiskManagerV1 riskManager_,
         ISpotAdapter spotAdapter_,
-        address admin_,
-        address recoveryRecipient_,
+        address configAdmin_,
+        address treasury_,
         address agent_
     ) {
         if (
             address(settlementAsset_).code.length == 0 || address(riskManager_).code.length == 0
-                || address(spotAdapter_).code.length == 0 || admin_ == address(0)
-                || recoveryRecipient_ == address(0) || agent_ == address(0) || admin_ == agent_
+                || address(spotAdapter_).code.length == 0 || configAdmin_ == address(0)
+                || treasury_ == address(0) || configAdmin_ == treasury_
+                || (agent_ != address(0) && (agent_ == configAdmin_ || agent_ == treasury_))
         ) revert InvalidAddress();
         if (
             address(riskManager_.settlementAsset()) != address(settlementAsset_)
                 || address(UniswapV4SpotAdapterLike(address(spotAdapter_)).settlementAsset())
-                    != address(settlementAsset_) || riskManager_.admin() != admin_
-                || UniswapV4SpotAdapterLike(address(spotAdapter_)).admin() != admin_
+                    != address(settlementAsset_) || riskManager_.configAdmin() != configAdmin_
+                || UniswapV4SpotAdapterLike(address(spotAdapter_)).configAdmin() != configAdmin_
         ) revert InvalidAddress();
         settlementAsset = settlementAsset_;
         riskManager = riskManager_;
         spotAdapter = spotAdapter_;
-        admin = admin_;
-        recoveryRecipient = recoveryRecipient_;
+        configAdmin = configAdmin_;
+        treasury = treasury_;
         agent = agent_;
         attestationAnchor = new AttestationAnchor(address(this));
     }
 
-    function setAgent(address agent_) external onlyAdmin {
-        if (agent_ == address(0) || agent_ == admin) revert InvalidAddress();
+    function setAgent(address agent_) external onlyConfigAdmin {
+        if (recoveryFinalized) revert RecoveryFinalized();
+        if (agent_ == address(0) || agent_ == configAdmin || agent_ == treasury) {
+            revert InvalidAddress();
+        }
         agent = agent_;
         emit AgentSet(agent_);
     }
 
-    function deposit(IERC20 token, uint256 amount) external onlyAdmin {
-        if (recoveryFinalized) revert RecoveryFinalized();
-        if (address(token) != address(settlementAsset) && !riskManager.isMarket(address(token))) {
-            revert UnsupportedToken();
-        }
-        token.safeTransferFrom(admin, address(this), amount);
-        emit Deposited(address(token), amount);
+    function revokeAgent() external onlyTreasury {
+        agent = address(0);
+        emit AgentRevoked(msg.sender);
     }
 
-    function recover(IERC20 token, uint256 amount) external onlyAdmin {
+    function deposit(uint256 amount) external onlyTreasury nonReentrant {
+        if (recoveryFinalized) revert RecoveryFinalized();
+        if (amount == 0) revert InvalidAmount();
+        uint256 balanceBefore = settlementAsset.balanceOf(address(this));
+        settlementAsset.safeTransferFrom(treasury, address(this), amount);
+        uint256 balanceAfter = settlementAsset.balanceOf(address(this));
+        if (balanceAfter < balanceBefore || balanceAfter - balanceBefore != amount) {
+            revert InvalidBalanceDelta();
+        }
+        emit Deposited(address(settlementAsset), amount);
+    }
+
+    function finalizeRecovery() external onlyTreasury {
         if (riskManager.mode() != MandateRiskManagerV1.Mode.Halted) {
             revert RecoveryRequiresHalt();
         }
+        if (recoveryFinalized) revert RecoveryFinalized();
         recoveryFinalized = true;
-        token.safeTransfer(recoveryRecipient, amount);
+        agent = address(0);
+        emit AgentRevoked(msg.sender);
+        emit VaultRecoveryFinalized(treasury);
+    }
+
+    function recover(IERC20 token, uint256 amount) external onlyTreasury nonReentrant {
+        if (riskManager.mode() != MandateRiskManagerV1.Mode.Halted) {
+            revert RecoveryRequiresHalt();
+        }
+        if (!recoveryFinalized) revert RecoveryNotFinalized();
+        if (address(token).code.length == 0) revert InvalidAddress();
+        if (amount == 0) revert InvalidAmount();
+        uint256 balanceBefore = token.balanceOf(address(this));
+        token.safeTransfer(treasury, amount);
+        uint256 balanceAfter = token.balanceOf(address(this));
+        if (balanceAfter > balanceBefore || balanceBefore - balanceAfter != amount) {
+            revert InvalidBalanceDelta();
+        }
         emit Recovered(address(token), amount);
     }
 
@@ -147,5 +186,5 @@ contract RwaStrategyVault is ISpotExecution, ReentrancyGuard {
 
 interface UniswapV4SpotAdapterLike {
     function settlementAsset() external view returns (IERC20);
-    function admin() external view returns (address);
+    function configAdmin() external view returns (address);
 }
