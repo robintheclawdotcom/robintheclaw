@@ -8,6 +8,8 @@ pub const CANARY_GROSS_CAP_MICROS: u64 = 50 * USD_SCALE;
 pub const CANARY_DAILY_TURNOVER_CAP_MICROS: u64 = 50 * USD_SCALE;
 pub const PAIR_INTENT_VERSION: u8 = 2;
 pub const CANARY_RISK_VERSION: &str = "basis-aapl-v1";
+pub const BASIS_AAPL_V1_MANIFEST_SHA256: &str =
+    "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a";
 const PAIR_INTENT_DOMAIN: &[u8] = b"robin.execution.pair-intent.v2\0";
 const SPOT_UNWIND_DOMAIN: &[u8] = b"robin.execution.spot-unwind.v2\0";
 const MIN_ORDER_EXPIRY_MS: u64 = 5 * 60 * 1_000;
@@ -53,6 +55,7 @@ pub struct PairIntent {
     pub agent_id: String,
     pub source_evaluation_id: String,
     pub risk_version: String,
+    pub strategy_manifest_sha256: String,
     pub lighter_account_index: u64,
     pub lighter_api_key_index: u8,
     pub robinhood_vault: String,
@@ -185,6 +188,7 @@ impl PairIntent {
         }
         if self.risk_version != CANARY_RISK_VERSION
             || self.evidence.strategy_version != CANARY_RISK_VERSION
+            || self.strategy_manifest_sha256 != BASIS_AAPL_V1_MANIFEST_SHA256
             || self.symbol != "AAPL"
         {
             return Err(PairIntentError::InvalidRiskPolicy);
@@ -445,6 +449,7 @@ mod tests {
             source_evaluation_id:
                 "0x3333333333333333333333333333333333333333333333333333333333333333".into(),
             risk_version: CANARY_RISK_VERSION.into(),
+            strategy_manifest_sha256: BASIS_AAPL_V1_MANIFEST_SHA256.into(),
             lighter_account_index: 7,
             lighter_api_key_index: 2,
             robinhood_vault: "0x0000000000000000000000000000000000000002".into(),
@@ -507,6 +512,14 @@ mod tests {
         value.spot_side = SpotSide::Sell;
         value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::UnsupportedDirection));
+    }
+
+    #[test]
+    fn unapproved_strategy_manifest_is_rejected() {
+        let mut value = intent();
+        value.strategy_manifest_sha256 = "0".repeat(64);
+        value.derive_identifiers().unwrap();
+        assert_eq!(value.validate(), Err(PairIntentError::InvalidRiskPolicy));
     }
 
     #[test]

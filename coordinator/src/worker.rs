@@ -2031,6 +2031,7 @@ mod tests {
             source_evaluation_id:
                 "0x3333333333333333333333333333333333333333333333333333333333333333".into(),
             risk_version: execution::CANARY_RISK_VERSION.into(),
+            strategy_manifest_sha256: execution::BASIS_AAPL_V1_MANIFEST_SHA256.into(),
             lighter_account_index: 7,
             lighter_api_key_index: 2,
             robinhood_vault: "0x0000000000000000000000000000000000000002".into(),

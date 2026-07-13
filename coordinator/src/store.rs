@@ -4765,6 +4765,8 @@ async fn verify_execution_account(
         || account.robinhood_signer.as_deref() != Some(intent.robinhood_signer.as_str())
         || account.account_mode != "ACTIVE"
         || account.account_manifest_sha256.is_none()
+        || account.account_manifest_sha256.as_deref()
+            != Some(intent.strategy_manifest_sha256.as_str())
         || account.account_manifest_sha256 != account.strategy_manifest_sha256
         || account.strategy_mode != "ACTIVE"
         || account.owner_address.is_none()
