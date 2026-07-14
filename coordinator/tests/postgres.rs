@@ -11,7 +11,7 @@ use research::PromotionEvidence;
 use sqlx::PgPool;
 
 const BASIS_AAPL_V1_ROUTE_SHA256: &str =
-    "23559b51e5512cfa0ab21ceeb3fbf97fc0edf3993528ae7b68d40affec6df5c8";
+    "77d59f5e80e76ed507522b27ee6b7ddd1f8395f0337f0b230c5bba64bb335590";
 
 #[tokio::test]
 #[ignore = "requires a disposable PostgreSQL database"]

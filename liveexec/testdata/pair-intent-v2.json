@@ -6,7 +6,7 @@
   "agent_id": "agent-canary-1",
   "source_evaluation_id": "0xefe77b201dc216c0edf435a227df2b2898d3f6ea1ff16e5d4d0d4ec0cf593271",
   "risk_version": "basis-aapl-v1",
-  "strategy_manifest_sha256": "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a",
+  "strategy_manifest_sha256": "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f",
   "lighter_account_index": 7,
   "lighter_api_key_index": 4,
   "robinhood_vault": "0x0000000000000000000000000000000000000002",

@@ -180,7 +180,7 @@ pub struct AgentRecord {
 
 pub const LIVE_STRATEGY_VERSION: &str = "basis-aapl-v1";
 pub const LIVE_STRATEGY_MANIFEST_SHA256: &str =
-    "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a";
+    "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

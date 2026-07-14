@@ -4,15 +4,15 @@
   "chain_id": 4663,
   "symbol": "AAPL",
   "direction": "long_spot_short_perp",
-  "source_config_sha256": "b701b39cbce20ccef48527811299732812d14297750fc3eee2a3c4a4a3f29edd",
-  "route_sha256": "23559b51e5512cfa0ab21ceeb3fbf97fc0edf3993528ae7b68d40affec6df5c8",
-  "oracle_policy_sha256": "b6f928e078847713aaca6c308769a774f367ec89f5f02d7332e1989095e53578",
-  "risk_policy_sha256": "b6a73ad263d6b61fabda029282410dc8200e700c956d2804508b354bbfeb94f6",
-  "code_commit": "f39c9a9d11ac3ae2c551bc2df61b92e8431f3a0b",
+  "source_config_sha256": "59106a18758a95af45e6ac1a8257843cfbd2a45fd09b5b3c3f429d3dedb56c2a",
+  "route_sha256": "77d59f5e80e76ed507522b27ee6b7ddd1f8395f0337f0b230c5bba64bb335590",
+  "oracle_policy_sha256": "7f0d306267da767869c0bc5951ce911ac1cb9060294edfa8eeefa884e0ddf937",
+  "risk_policy_sha256": "a34ebfd2104eb062c9102f6fe68ad74d09a6e02f5c626fd17314228ae9bc398d",
+  "code_commit": "ae564ea252c88c0f2ef5a4884e849bbc0c315535",
   "max_leg_notional_micros": 25000000,
   "max_gross_notional_micros": 50000000,
   "max_daily_turnover_micros": 50000000,
   "max_leverage_ppm": 1000000,
   "max_active_episodes": 1,
-  "sha256": "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a"
+  "sha256": "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f"
 }

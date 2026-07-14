@@ -9,7 +9,7 @@ pub const CANARY_DAILY_TURNOVER_CAP_MICROS: u64 = 50 * USD_SCALE;
 pub const PAIR_INTENT_VERSION: u8 = 2;
 pub const CANARY_RISK_VERSION: &str = "basis-aapl-v1";
 pub const BASIS_AAPL_V1_MANIFEST_SHA256: &str =
-    "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a";
+    "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f";
 const PAIR_INTENT_DOMAIN: &[u8] = b"robin.execution.pair-intent.v2\0";
 const SPOT_UNWIND_DOMAIN: &[u8] = b"robin.execution.spot-unwind.v2\0";
 const MIN_ORDER_EXPIRY_MS: u64 = 5 * 60 * 1_000;

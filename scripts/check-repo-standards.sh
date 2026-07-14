@@ -46,6 +46,7 @@ req=(
   runtime/live-evaluation/cmd/live-evaluation/main.go
   runtime/live-evaluation/migrations/0001_live_evaluation.sql
   runtime/live-scheduler/cmd/live-scheduler/main.go
+  runtime/live-scheduler/migrations/0003_repin_strategy_manifest.sql
   runtime/sequencer-publisher/cmd/aapl-relay/main.go
   runtime/sequencer-publisher/cmd/sequencer-publisher/main.go
   provisioner/lighter/main.go

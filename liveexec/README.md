@@ -43,7 +43,7 @@ The runner submits the episode-bound exit once through authenticated `/v1/exits`
 The protocol pins:
 
 - strategy `basis-aapl-v1`;
-- manifest `4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a`;
+- manifest `da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f`;
 - Robinhood Chain `4663`, AAPL/USDG, and the checked-in router;
 - a reviewed Lighter mainnet AAPL market index supplied explicitly to both services;
 - a Lighter trading API key index from `4` through `254`; indices `0` through `3` are reserved;

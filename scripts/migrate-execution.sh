@@ -20,6 +20,7 @@ migrations=(
   coordinator/migrations/0016_enable_basis_aapl_canary.sql
   runtime/live-scheduler/migrations/0001_live_scheduler.sql
   runtime/live-scheduler/migrations/0002_natural_strategy_exit.sql
+  runtime/live-scheduler/migrations/0003_repin_strategy_manifest.sql
   runtime/live-evaluation/migrations/0001_live_evaluation.sql
   runtime/live-evaluation/migrations/0002_market_config_bootstrap.sql
 )

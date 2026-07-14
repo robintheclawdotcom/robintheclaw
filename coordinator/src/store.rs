@@ -16,7 +16,7 @@ const MAX_EXIT_SUBMISSION_WINDOW_MS: u64 = 15 * 60 * 1_000;
 const MAX_EXIT_RECONCILIATION_WINDOW_MS: u64 = 24 * 60 * 60 * 1_000;
 const ROBINHOOD_CHAIN_ID: u64 = 4663;
 const BASIS_AAPL_V1_ROUTE_SHA256: &str =
-    "23559b51e5512cfa0ab21ceeb3fbf97fc0edf3993528ae7b68d40affec6df5c8";
+    "77d59f5e80e76ed507522b27ee6b7ddd1f8395f0337f0b230c5bba64bb335590";
 
 #[derive(Clone)]
 pub struct Store {

@@ -67,7 +67,7 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', '4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a', 'provisioning')",
+        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f', 'provisioning')",
     )
     .bind(account_id)
     .bind(user_id)
@@ -150,7 +150,7 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
         strategy_version: "basis-aapl-v1".into(),
         risk_version: "basis-aapl-v1".into(),
         strategy_manifest_sha256:
-            "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a".into(),
+            "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f".into(),
         lighter_account_index: account_index,
         lighter_api_key_index: 254,
         robinhood_owner: random_address().to_ascii_lowercase(),
@@ -272,7 +272,7 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', '4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a', 'provisioning')",
+        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f', 'provisioning')",
     )
     .bind(other_account)
     .bind(other_user)
@@ -430,7 +430,7 @@ async fn unregistered_agent_closes_locally_without_dispatch() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', '4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a', 'provisioning')",
+        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f', 'provisioning')",
     )
     .bind(account_id)
     .bind(user_id)
@@ -463,7 +463,7 @@ async fn unregistered_agent_closes_locally_without_dispatch() {
         strategy_version: "basis-aapl-v1".into(),
         risk_version: "basis-aapl-v1".into(),
         strategy_manifest_sha256:
-            "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a".into(),
+            "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f".into(),
         lighter_account_index: i64::from(u32::from_be_bytes(
             account_id.as_bytes()[..4].try_into().unwrap(),
         )) + 1,
@@ -619,7 +619,7 @@ async fn robinhood_graph_binding_is_immutable_and_provisioner_authoritative() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', '4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a', 'provisioning')",
+        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f', 'provisioning')",
     )
     .bind(account_id)
     .bind(user_id)

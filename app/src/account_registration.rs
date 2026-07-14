@@ -49,7 +49,7 @@ impl AccountRegistration {
         if self.strategy_version != "basis-aapl-v1"
             || self.risk_version != "basis-aapl-v1"
             || self.strategy_manifest_sha256
-                != "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a"
+                != "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f"
             || self.lighter_account_index <= 0
             || !(4..=254).contains(&self.lighter_api_key_index)
             || !valid_address(&self.robinhood_owner)
@@ -416,7 +416,7 @@ mod tests {
             strategy_version: "basis-aapl-v1".into(),
             risk_version: "basis-aapl-v1".into(),
             strategy_manifest_sha256:
-                "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a".into(),
+                "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f".into(),
             lighter_account_index: 7,
             lighter_api_key_index: 254,
             robinhood_owner: "0x1111111111111111111111111111111111111111".into(),

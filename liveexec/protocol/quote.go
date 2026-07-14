@@ -15,11 +15,11 @@ import (
 
 const (
 	StrategyVersion             = "basis-aapl-v1"
-	StrategyManifestSHA256      = "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a"
-	SourceConfigSHA256          = "b701b39cbce20ccef48527811299732812d14297750fc3eee2a3c4a4a3f29edd"
-	RouteSHA256                 = "23559b51e5512cfa0ab21ceeb3fbf97fc0edf3993528ae7b68d40affec6df5c8"
-	OraclePolicySHA256          = "b6f928e078847713aaca6c308769a774f367ec89f5f02d7332e1989095e53578"
-	RiskPolicySHA256            = "b6a73ad263d6b61fabda029282410dc8200e700c956d2804508b354bbfeb94f6"
+	StrategyManifestSHA256      = "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f"
+	SourceConfigSHA256          = "59106a18758a95af45e6ac1a8257843cfbd2a45fd09b5b3c3f429d3dedb56c2a"
+	RouteSHA256                 = "77d59f5e80e76ed507522b27ee6b7ddd1f8395f0337f0b230c5bba64bb335590"
+	OraclePolicySHA256          = "7f0d306267da767869c0bc5951ce911ac1cb9060294edfa8eeefa884e0ddf937"
+	RiskPolicySHA256            = "a34ebfd2104eb062c9102f6fe68ad74d09a6e02f5c626fd17314228ae9bc398d"
 	RiskVersion                 = StrategyVersion
 	ChainID                     = uint64(4663)
 	Symbol                      = "AAPL"
