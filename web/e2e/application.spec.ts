@@ -94,7 +94,7 @@ test("user launches a Robin agent from the strategy page", async ({ page }) => {
   await expect(page.getByText("basis-aapl-v1")).toBeVisible();
   await expect(page.getByText("Robinhood USDG")).toBeVisible();
   await expect(page.getByText("Lighter USDC")).toBeVisible();
-  await expect(page.getByText("Alchemy sponsorship is optional", { exact: false })).toBeVisible();
+  await expect(page.getByText("Pays deployment and owner transactions without sponsorship", { exact: false })).toBeVisible();
 });
 
 test("owner pays ETH to deploy the prepared mainnet graph", async ({ page }) => {
@@ -173,7 +173,7 @@ test("deployment finality retry reuses the submitted transaction", async ({ page
 });
 
 test("user completes the live mainnet lifecycle from account setup to withdrawal", async ({ page }) => {
-  await mockApplication(page, { withVault: false, withAgent: false, liveJourney: true });
+  const journey = await mockApplication(page, { withVault: false, withAgent: false, liveJourney: true });
   await page.goto("/app/onboarding");
   await page.getByRole("button", { name: "Create execution account" }).click();
   await expect(page).toHaveURL(/\/app\/strategy$/);
@@ -184,19 +184,57 @@ test("user completes the live mainnet lifecycle from account setup to withdrawal
   await page.getByRole("button", { name: "Deploy with owner ETH" }).click();
   await page.getByRole("button", { name: "Authorize execution agent" }).click();
 
+  await page.getByLabel("USDG to deposit").fill("25");
+  await page.getByRole("button", { name: "Deposit USDG with owner ETH" }).click();
+  journey.observeRobinhoodFunding();
+  await expect(page.getByText("Fund Lighter account 42 with USDC", { exact: false })).toBeVisible();
+  journey.observeLighterFunding();
+  journey.observeExecutionGas();
   for (const requirement of ["Robinhood USDG", "Lighter USDC", "User ETH gas", "Execution ETH gas"]) {
     await expect(page.getByText(requirement, { exact: true })).toBeVisible();
   }
   await expect(page.getByText("Ready", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Launch agent" }).click();
   await expect(page.getByRole("heading", { name: "Agent running" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Live execution" })).toBeVisible();
+  await expect(page.getByText("hedged", { exact: true })).toBeVisible();
+  await expect(page.getByText("0.1 AAPL", { exact: true })).toBeVisible();
+  await expect(page.getByText("0.1 AAPL-PERP", { exact: true })).toBeVisible();
+  await expect(page.getByText("50 USD", { exact: true })).toBeVisible();
+  await expect(page.getByText("Lighter entry order lighte…-123", { exact: false })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Robinhood entry transaction", exact: false })).toHaveAttribute("href", /\/tx\/0x3434/);
+  await page.goto("/app");
+  await expect(page.getByRole("heading", { name: "Live execution" })).toBeVisible();
+  await expect(page.getByText("0.1 AAPL", { exact: true })).toBeVisible();
+  await page.goto("/app/activity");
+  await expect(page.getByRole("heading", { name: "Live execution" })).toBeVisible();
+  await expect(page.getByText("0.1 AAPL-PERP", { exact: true })).toBeVisible();
+  await page.goto("/app/strategy");
   await page.getByRole("button", { name: "Pause and unwind" }).click();
+  await expect(page.getByRole("heading", { name: "Agent reducing" })).toBeVisible();
+  await expect(page.getByText("Reducing", { exact: true })).toBeVisible();
+  await page.evaluate(() => localStorage.removeItem("robin:agent-command:agent-id:pause"));
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Agent reducing" })).toBeVisible();
+  journey.reconcilePause();
   await expect(page.getByRole("heading", { name: "Agent paused" })).toBeVisible();
+  await expect(page.getByText("Flat", { exact: true })).toBeVisible();
+  await expect(page.getByText("Lighter unwind order lighte…-456", { exact: false })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Robinhood unwind transaction", exact: false })).toHaveAttribute("href", /\/tx\/0x7878/);
   await page.getByRole("button", { name: "Resume agent" }).click();
   await expect(page.getByRole("heading", { name: "Agent running" })).toBeVisible();
   await page.getByRole("button", { name: "Close agent" }).click();
   await expect(page.getByRole("heading", { name: "Agent closed" })).toBeVisible();
+  await expect(page.getByText("Flat", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Prepare owner withdrawal" }).click();
+  await expect(page.getByRole("button", { name: "Prepare owner withdrawal" })).toBeHidden();
   await page.getByRole("button", { name: "Sign owner withdrawal" }).click();
   await expect(page.getByRole("button", { name: "Awaiting reconciliation" })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Awaiting reconciliation" })).toBeVisible();
+  journey.reconcileWithdrawal();
+  await expect(page.getByText("Owner withdrawal completed.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Submitted owner transaction", exact: false })).toHaveAttribute("href", /\/tx\/0xefef/);
+  await page.reload();
+  await expect(page.getByRole("link", { name: "Submitted owner transaction", exact: false })).toHaveAttribute("href", /\/tx\/0xefef/);
 });

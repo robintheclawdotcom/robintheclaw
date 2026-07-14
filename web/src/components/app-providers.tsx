@@ -77,11 +77,6 @@ const SmartWalletContext = createContext<SmartWalletContextValue | null>(null);
 const ApiContext = createContext<AppApi | null>(null);
 
 export function AppProviders({ children }: { children: React.ReactNode }) {
-  const [queryClient] = useState(() => new QueryClient({
-    defaultOptions: {
-      queries: { staleTime: 10_000, retry: 1, refetchOnWindowFocus: false },
-    },
-  }));
   const appId = process.env.NEXT_PUBLIC_PRIVY_APP_ID;
   const mock = process.env.NEXT_PUBLIC_E2E_AUTH === "1";
 
@@ -112,7 +107,7 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
     content = <UnconfiguredSession>{children}</UnconfiguredSession>;
   }
 
-  return <QueryClientProvider client={queryClient}>{content}</QueryClientProvider>;
+  return content;
 }
 
 function LiveSession({ children }: { children: React.ReactNode }) {
@@ -396,13 +391,32 @@ function SessionContexts({
   smartWallet: SmartWalletContextValue;
   children: React.ReactNode;
 }) {
+  return <IdentitySession key={auth.userId ?? "anonymous"} auth={auth} smartWallet={smartWallet}>{children}</IdentitySession>;
+}
+
+function IdentitySession({
+  auth,
+  smartWallet,
+  children,
+}: {
+  auth: AuthContextValue;
+  smartWallet: SmartWalletContextValue;
+  children: React.ReactNode;
+}) {
+  const [queryClient] = useState(() => new QueryClient({
+    defaultOptions: {
+      queries: { staleTime: 10_000, retry: 1, refetchOnWindowFocus: false },
+    },
+  }));
   const api = useMemo(() => new AppApi(auth.getAccessToken), [auth.getAccessToken]);
   return (
-    <AuthContext.Provider value={auth}>
-      <SmartWalletContext.Provider value={smartWallet}>
-        <ApiContext.Provider value={api}>{children}</ApiContext.Provider>
-      </SmartWalletContext.Provider>
-    </AuthContext.Provider>
+    <QueryClientProvider client={queryClient}>
+      <AuthContext.Provider value={auth}>
+        <SmartWalletContext.Provider value={smartWallet}>
+          <ApiContext.Provider value={api}>{children}</ApiContext.Provider>
+        </SmartWalletContext.Provider>
+      </AuthContext.Provider>
+    </QueryClientProvider>
   );
 }
 

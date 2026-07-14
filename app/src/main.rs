@@ -119,6 +119,7 @@ async fn main() -> std::io::Result<()> {
         lighter_provisioner,
         robinhood_provisioner,
         readiness_auth,
+        coordinator_registration: registration_client.clone(),
     });
 
     orchestrator::spawn_background_services(state.clone());

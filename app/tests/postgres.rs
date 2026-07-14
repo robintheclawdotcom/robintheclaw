@@ -188,6 +188,55 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
     assert!(registered.coordinator_registered);
     assert!(registered.can_launch);
 
+    sqlx::query("UPDATE agents SET status = 'running' WHERE id = $1")
+        .bind(agent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let pause = store
+        .create_agent_command(&did, agent_id, "pause-integration", "pause")
+        .await
+        .unwrap();
+    assert_eq!(pause.status, "pending");
+    assert_eq!(pause.agent_status, "reducing");
+    assert_eq!(pause.target_agent_status, "paused");
+    let reducing = sqlx::query_scalar::<_, String>("SELECT status FROM agents WHERE id = $1")
+        .bind(agent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reducing, "reducing");
+    assert_eq!(
+        store
+            .pending_agent_command(&did, agent_id)
+            .await
+            .unwrap()
+            .map(|command| command.id),
+        Some(pause.id)
+    );
+    let claimed_pause = store
+        .claim_agent_commands("pause-integration-worker", 1)
+        .await
+        .unwrap();
+    assert_eq!(claimed_pause.len(), 1);
+    assert_eq!(claimed_pause[0].id, pause.id);
+    let paused = store
+        .complete_reconciled_agent_command(pause.id, &"f".repeat(64), None)
+        .await
+        .unwrap();
+    assert_eq!(paused.status, "completed");
+    assert_eq!(paused.agent_status, "paused");
+    assert!(store
+        .pending_agent_command(&did, agent_id)
+        .await
+        .unwrap()
+        .is_none());
+    sqlx::query("UPDATE agents SET status = 'provisioning' WHERE id = $1")
+        .bind(agent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     let future_snapshot_id = Uuid::new_v4();
     let future_observed_at = Utc::now() + Duration::hours(1);
     for check_name in [

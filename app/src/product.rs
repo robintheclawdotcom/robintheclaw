@@ -211,6 +211,35 @@ pub struct ExecutionAccountRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentExecutionStatus {
+    pub execution_account_id: String,
+    pub agent_id: String,
+    pub strategy_version: String,
+    pub strategy_manifest_sha256: String,
+    pub account_status: String,
+    pub control_mode: String,
+    pub active: bool,
+    pub flat: bool,
+    pub intent_id: Option<String>,
+    pub symbol: Option<String>,
+    pub state: String,
+    pub spot_amount_raw: String,
+    pub spot_decimals: u8,
+    pub perp_open_base: String,
+    pub perp_base_decimals: u8,
+    pub spot_notional_micros: String,
+    pub perp_notional_micros: String,
+    pub lighter_order_id: Option<String>,
+    pub lighter_transaction_hash: Option<String>,
+    pub robinhood_transaction_hash: Option<String>,
+    pub lighter_unwind_order_id: Option<String>,
+    pub lighter_unwind_transaction_hash: Option<String>,
+    pub robinhood_unwind_transaction_hash: Option<String>,
+    pub updated_at_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionBindingRecord {

@@ -1,3 +1,4 @@
+use crate::product::ExecutionAccountRecord;
 use crate::product_store::ProductStore;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -11,6 +12,7 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 const REGISTRATION_PATH: &str = "/v1/account-registrations";
+const EXECUTION_PATH: &str = "/v1/account-executions";
 const MAX_RESPONSE_BYTES: usize = 64 << 10;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, sqlx::FromRow)]
@@ -95,6 +97,165 @@ pub struct AccountRegistrationResponse {
     pub account_status: String,
     pub control_mode: String,
     pub readiness: AccountRegistrationReadiness,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountExecutionResponse {
+    pub schema_version: u8,
+    pub execution_account_id: String,
+    pub agent_id: String,
+    pub strategy_version: String,
+    pub strategy_manifest_sha256: String,
+    pub account_status: String,
+    pub control_mode: String,
+    pub active: bool,
+    pub flat: bool,
+    pub intent_id: Option<String>,
+    pub symbol: Option<String>,
+    pub state: String,
+    pub spot_amount_raw: String,
+    pub spot_decimals: u8,
+    pub perp_open_base: String,
+    pub perp_base_decimals: u8,
+    pub spot_notional_micros: String,
+    pub perp_notional_micros: String,
+    pub lighter_order_id: Option<String>,
+    pub lighter_transaction_hash: Option<String>,
+    pub robinhood_transaction_hash: Option<String>,
+    pub lighter_unwind_order_id: Option<String>,
+    pub lighter_unwind_transaction_hash: Option<String>,
+    pub robinhood_unwind_transaction_hash: Option<String>,
+    pub updated_at_ms: u64,
+}
+
+impl AccountExecutionResponse {
+    fn matches(&self, account: &ExecutionAccountRecord) -> bool {
+        let identity_matches = self.schema_version == 1
+            && self.execution_account_id == account.id.to_string()
+            && self.agent_id == account.agent_id.to_string()
+            && self.strategy_version == account.strategy_version
+            && self.strategy_manifest_sha256 == account.strategy_manifest_sha256
+            && matches!(
+                self.account_status.as_str(),
+                "active" | "blocked" | "closed"
+            )
+            && matches!(
+                self.control_mode.as_str(),
+                "ACTIVE" | "REDUCE_ONLY" | "HALTED"
+            )
+            && matches!(
+                self.state.as_str(),
+                "flat"
+                    | "created"
+                    | "prechecked"
+                    | "perp_submitted"
+                    | "perp_partial"
+                    | "perp_filled"
+                    | "spot_submitted"
+                    | "hedged"
+                    | "exiting"
+                    | "unwinding"
+                    | "closed"
+                    | "cancelled"
+                    | "expired"
+                    | "unhedged"
+                    | "failed_safe"
+            );
+        if !identity_matches
+            || self.spot_decimals > 18
+            || self.perp_base_decimals > 18
+            || !bounded_decimal(&self.spot_amount_raw)
+            || !bounded_decimal(&self.perp_open_base)
+            || !bounded_notional(&self.spot_notional_micros)
+            || !bounded_notional(&self.perp_notional_micros)
+            || self.lighter_order_id.as_deref().is_some_and(|value| {
+                value.is_empty()
+                    || value.len() > 128
+                    || !value.bytes().all(|byte| byte.is_ascii_graphic())
+            })
+            || self.lighter_order_id.is_some() != self.lighter_transaction_hash.is_some()
+            || self
+                .lighter_transaction_hash
+                .as_deref()
+                .is_some_and(|value| !valid_bytes32(value))
+            || self
+                .robinhood_transaction_hash
+                .as_deref()
+                .is_some_and(|value| !valid_bytes32(value))
+            || self
+                .lighter_unwind_order_id
+                .as_deref()
+                .is_some_and(|value| {
+                    value.is_empty()
+                        || value.len() > 128
+                        || !value.bytes().all(|byte| byte.is_ascii_graphic())
+                })
+            || self.lighter_unwind_order_id.is_some()
+                != self.lighter_unwind_transaction_hash.is_some()
+            || self
+                .lighter_unwind_transaction_hash
+                .as_deref()
+                .is_some_and(|value| !valid_bytes32(value))
+            || self
+                .robinhood_unwind_transaction_hash
+                .as_deref()
+                .is_some_and(|value| !valid_bytes32(value))
+        {
+            return false;
+        }
+        match (&self.intent_id, &self.symbol) {
+            (None, None) => {
+                !self.active
+                    && self.flat
+                    && self.state == "flat"
+                    && self.spot_amount_raw == "0"
+                    && self.perp_open_base == "0"
+                    && self.spot_notional_micros == "0"
+                    && self.perp_notional_micros == "0"
+                    && self.lighter_order_id.is_none()
+                    && self.lighter_transaction_hash.is_none()
+                    && self.robinhood_transaction_hash.is_none()
+                    && self.lighter_unwind_order_id.is_none()
+                    && self.lighter_unwind_transaction_hash.is_none()
+                    && self.robinhood_unwind_transaction_hash.is_none()
+                    && self.updated_at_ms == 0
+            }
+            (Some(intent_id), Some(symbol)) => {
+                let expected_flat =
+                    matches!(self.state.as_str(), "closed" | "cancelled" | "expired");
+                let requires_lighter_proof = self.perp_open_base != "0"
+                    || matches!(
+                        self.state.as_str(),
+                        "perp_partial"
+                            | "perp_filled"
+                            | "spot_submitted"
+                            | "hedged"
+                            | "exiting"
+                            | "unwinding"
+                            | "closed"
+                            | "unhedged"
+                    );
+                let requires_robinhood_proof = self.spot_amount_raw != "0"
+                    || matches!(self.state.as_str(), "hedged" | "exiting");
+                let closed = self.state == "closed";
+                valid_bytes32(intent_id)
+                    && symbol == "AAPL"
+                    && self.state != "flat"
+                    && self.flat == expected_flat
+                    && self.active != self.flat
+                    && (!self.flat || (self.spot_amount_raw == "0" && self.perp_open_base == "0"))
+                    && (!requires_lighter_proof || self.lighter_order_id.is_some())
+                    && (!requires_robinhood_proof || self.robinhood_transaction_hash.is_some())
+                    && (!closed || self.lighter_unwind_order_id.is_some())
+                    && (!closed
+                        || self.robinhood_transaction_hash.is_none()
+                        || self.robinhood_unwind_transaction_hash.is_some())
+                    && self.updated_at_ms > 0
+            }
+            _ => false,
+        }
+    }
 }
 
 impl AccountRegistrationResponse {
@@ -257,6 +418,23 @@ impl CoordinatorRegistrationClient {
         Ok(response)
     }
 
+    pub async fn execution(
+        &self,
+        account: &ExecutionAccountRecord,
+    ) -> Result<AccountExecutionResponse, RegistrationClientError> {
+        let path = format!("{EXECUTION_PATH}/{}", account.id);
+        let (status, body) = self.request("GET", &path, Vec::new()).await?;
+        if !status.is_success() {
+            return Err(RegistrationClientError::Rejected(status.as_u16()));
+        }
+        let response: AccountExecutionResponse =
+            serde_json::from_slice(&body).map_err(|_| RegistrationClientError::InvalidResponse)?;
+        if !response.matches(account) {
+            return Err(RegistrationClientError::InvalidResponse);
+        }
+        Ok(response)
+    }
+
     async fn request(
         &self,
         method: &str,
@@ -320,6 +498,26 @@ impl CoordinatorRegistrationClient {
         }
         Ok((status, body))
     }
+}
+
+fn bounded_decimal(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 40 && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn bounded_notional(value: &str) -> bool {
+    bounded_decimal(value)
+        && value
+            .parse::<u64>()
+            .is_ok_and(|notional| notional <= 25_000_000)
+}
+
+fn valid_bytes32(value: &str) -> bool {
+    value.len() == 66
+        && value.starts_with("0x")
+        && value[2..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && value[2..].bytes().any(|byte| byte != b'0')
 }
 
 pub fn spawn(store: ProductStore, client: CoordinatorRegistrationClient, worker_id: String) {
@@ -459,5 +657,122 @@ mod tests {
             "00"
         )
         .is_err());
+    }
+
+    #[test]
+    fn execution_status_is_bound_to_the_product_account() {
+        let registration = registration();
+        let account = ExecutionAccountRecord {
+            id: registration.execution_account_id,
+            agent_id: registration.agent_id,
+            strategy_version: registration.strategy_version.clone(),
+            strategy_manifest_sha256: registration.strategy_manifest_sha256.clone(),
+            chain_id: 4663,
+            status: "ready".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mut response = AccountExecutionResponse {
+            schema_version: 1,
+            execution_account_id: account.id.to_string(),
+            agent_id: account.agent_id.to_string(),
+            strategy_version: account.strategy_version.clone(),
+            strategy_manifest_sha256: account.strategy_manifest_sha256.clone(),
+            account_status: "active".into(),
+            control_mode: "ACTIVE".into(),
+            active: true,
+            flat: false,
+            intent_id: Some(format!("0x{}", "a".repeat(64))),
+            symbol: Some("AAPL".into()),
+            state: "hedged".into(),
+            spot_amount_raw: "100000000000000000".into(),
+            spot_decimals: 18,
+            perp_open_base: "100".into(),
+            perp_base_decimals: 3,
+            spot_notional_micros: "25000000".into(),
+            perp_notional_micros: "25000000".into(),
+            lighter_order_id: Some("lighter-order-1".into()),
+            lighter_transaction_hash: Some(format!("0x{}", "b".repeat(64))),
+            robinhood_transaction_hash: Some(format!("0x{}", "c".repeat(64))),
+            lighter_unwind_order_id: None,
+            lighter_unwind_transaction_hash: None,
+            robinhood_unwind_transaction_hash: None,
+            updated_at_ms: 1,
+        };
+        assert!(response.matches(&account));
+        response.agent_id = Uuid::new_v4().to_string();
+        assert!(!response.matches(&account));
+        response.agent_id = account.agent_id.to_string();
+        response.spot_notional_micros = "25000001".into();
+        assert!(!response.matches(&account));
+        response.spot_notional_micros = "25000000".into();
+        response.active = false;
+        assert!(!response.matches(&account));
+        response.active = true;
+        response.lighter_transaction_hash = None;
+        assert!(!response.matches(&account));
+        response.lighter_order_id = None;
+        response.lighter_transaction_hash = Some(format!("0x{}", "b".repeat(64)));
+        assert!(!response.matches(&account));
+        response.lighter_order_id = Some("lighter-order-1".into());
+        response.robinhood_transaction_hash = None;
+        assert!(!response.matches(&account));
+        response.robinhood_transaction_hash = Some(format!("0x{}", "c".repeat(64)));
+        response.state = "closed".into();
+        response.active = false;
+        response.flat = true;
+        response.spot_amount_raw = "0".into();
+        response.perp_open_base = "0".into();
+        response.lighter_unwind_order_id = Some("lighter-unwind-1".into());
+        response.lighter_unwind_transaction_hash = Some(format!("0x{}", "d".repeat(64)));
+        response.robinhood_unwind_transaction_hash = Some(format!("0x{}", "e".repeat(64)));
+        assert!(response.matches(&account));
+        response.robinhood_unwind_transaction_hash = None;
+        assert!(!response.matches(&account));
+    }
+
+    #[test]
+    fn empty_execution_status_is_strictly_flat() {
+        let registration = registration();
+        let account = ExecutionAccountRecord {
+            id: registration.execution_account_id,
+            agent_id: registration.agent_id,
+            strategy_version: registration.strategy_version.clone(),
+            strategy_manifest_sha256: registration.strategy_manifest_sha256.clone(),
+            chain_id: 4663,
+            status: "ready".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mut response = AccountExecutionResponse {
+            schema_version: 1,
+            execution_account_id: account.id.to_string(),
+            agent_id: account.agent_id.to_string(),
+            strategy_version: account.strategy_version.clone(),
+            strategy_manifest_sha256: account.strategy_manifest_sha256.clone(),
+            account_status: "active".into(),
+            control_mode: "REDUCE_ONLY".into(),
+            active: false,
+            flat: true,
+            intent_id: None,
+            symbol: None,
+            state: "flat".into(),
+            spot_amount_raw: "0".into(),
+            spot_decimals: 0,
+            perp_open_base: "0".into(),
+            perp_base_decimals: 0,
+            spot_notional_micros: "0".into(),
+            perp_notional_micros: "0".into(),
+            lighter_order_id: None,
+            lighter_transaction_hash: None,
+            robinhood_transaction_hash: None,
+            lighter_unwind_order_id: None,
+            lighter_unwind_transaction_hash: None,
+            robinhood_unwind_transaction_hash: None,
+            updated_at_ms: 0,
+        };
+        assert!(response.matches(&account));
+        response.active = true;
+        assert!(!response.matches(&account));
     }
 }

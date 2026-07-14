@@ -39,6 +39,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
             get(account_registration),
         )
         .route(
+            "/v1/account-executions/{execution_account_id}",
+            get(account_execution),
+        )
+        .route(
             "/v1/open-episodes/{execution_account_id}/{intent_id}",
             get(open_episode),
         )
@@ -109,6 +113,33 @@ async fn account_registration(
         .await
     {
         Ok(response) => (StatusCode::OK, Json(serde_json::json!(response))).into_response(),
+        Err(error) => store_error_response(error),
+    }
+}
+
+async fn account_execution(
+    State(state): State<Arc<AppState>>,
+    Path(execution_account_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let path = format!("/v1/account-executions/{execution_account_id}");
+    if let Err((status, message)) = authorize_method(
+        &state,
+        AuthScope::AccountRegistration,
+        "GET",
+        &path,
+        &headers,
+        &[],
+    )
+    .await
+    {
+        return error(status, message);
+    }
+    let Some(store) = &state.store else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled");
+    };
+    match store.account_execution_status(&execution_account_id).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(error) => store_error_response(error),
     }
 }
@@ -754,7 +785,10 @@ fn store_error_response(error: StoreError) -> axum::response::Response {
         | StoreError::IntentPayloadConflict
         | StoreError::ExitPayloadConflict
         | StoreError::MarketQuoteConflict => StatusCode::CONFLICT,
+        StoreError::AccountCapacityExceeded => StatusCode::TOO_MANY_REQUESTS,
         StoreError::AccountRegistrationMissing => StatusCode::NOT_FOUND,
+        StoreError::AccountExecutionAmbiguous => StatusCode::CONFLICT,
+        StoreError::AccountExecutionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         StoreError::OpenEpisodeMissing => StatusCode::NOT_FOUND,
         StoreError::OpenEpisodeAmbiguous => StatusCode::CONFLICT,
         StoreError::OpenEpisodeUnavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -771,6 +805,14 @@ struct Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_capacity_uses_retryable_status() {
+        assert_eq!(
+            store_error_response(StoreError::AccountCapacityExceeded).status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
 
     #[test]
     fn request_signature_binds_body() {

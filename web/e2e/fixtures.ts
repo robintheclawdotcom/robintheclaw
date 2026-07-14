@@ -86,8 +86,21 @@ export async function mockApplication(page: Page, options: { withVault?: boolean
     robinhoodLinked: false,
     liveJourney: options.liveJourney ?? false,
     command: null,
+    executed: false,
+    lighterFunded: false,
+    robinhoodFunded: false,
+    executionGasReady: false,
+    pauseReconciled: false,
+    withdrawalReconciled: false,
   };
   await page.route("**/api/app/**", async (route) => respond(route, withVault, state));
+  return {
+    observeLighterFunding: () => { state.lighterFunded = true; },
+    observeRobinhoodFunding: () => { state.robinhoodFunded = true; },
+    observeExecutionGas: () => { state.executionGasReady = true; },
+    reconcilePause: () => { state.pauseReconciled = true; },
+    reconcileWithdrawal: () => { state.withdrawalReconciled = true; },
+  };
 }
 
 type MockState = {
@@ -97,6 +110,12 @@ type MockState = {
   robinhoodLinked: boolean;
   liveJourney: boolean;
   command: Record<string, unknown> | null;
+  executed: boolean;
+  lighterFunded: boolean;
+  robinhoodFunded: boolean;
+  executionGasReady: boolean;
+  pauseReconciled: boolean;
+  withdrawalReconciled: boolean;
 };
 
 async function respond(route: Route, withVault: boolean, state: MockState) {
@@ -113,23 +132,63 @@ async function respond(route: Route, withVault: boolean, state: MockState) {
     return json(route, { id: "execution-account-id", agentId: liveAgent.id, strategyVersion: "basis-aapl-v1", chainId: 4663, status: "provisioning", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt }, 202);
   }
   if (path.endsWith("/readiness")) {
-    const ready = state.liveJourney && state.lighterLinked && state.robinhoodLinked;
-    return json(route, ready ? {
+    const registered = state.liveJourney && state.lighterLinked && state.robinhoodLinked;
+    const ready = registered && state.lighterFunded && state.robinhoodFunded && state.executionGasReady;
+    const status = (state.agent as { status?: string } | null)?.status;
+    if (ready && matchesSetupStatus(status)) state.agent = { ...liveAgent, status: "ready" };
+    return json(route, registered ? {
       ...readiness,
       lighterAccountIndex: 42,
       coordinatorRegistered: true,
       lighterLinked: true,
-      lighterFunded: true,
+      lighterFunded: state.lighterFunded,
       robinhoodDeployed: true,
-      robinhoodFunded: true,
+      robinhoodFunded: state.robinhoodFunded,
       userGasReady: true,
-      executionGasReady: true,
+      executionGasReady: state.executionGasReady,
       policyActive: true,
       reconciled: true,
-      canLaunch: true,
-      validUntil: "2026-07-13T10:10:00Z",
-      blockers: [],
+      canLaunch: ready,
+      validUntil: "2099-01-01T00:00:00Z",
+      blockers: [
+        !state.lighterFunded && "lighter_usdc_not_funded",
+        !state.robinhoodFunded && "robinhood_vault_not_funded",
+        !state.executionGasReady && "execution_signer_gas_not_ready",
+      ].filter(Boolean),
     } : readiness);
+  }
+  if (path.endsWith("/execution") && request.method() === "GET") {
+    const status = (state.agent as { status?: string } | null)?.status;
+    const running = state.executed && status === "running";
+    const reducing = state.executed && status === "reducing";
+    const active = running || reducing;
+    const hasEpisode = state.executed;
+    return json(route, {
+      executionAccountId: "execution-account-id",
+      agentId: liveAgent.id,
+      strategyVersion: "basis-aapl-v1",
+      strategyManifestSha256: "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f",
+      accountStatus: status === "closed" ? "closed" : "active",
+      controlMode: active ? "ACTIVE" : status === "closed" ? "HALTED" : "REDUCE_ONLY",
+      active,
+      flat: hasEpisode ? !active : true,
+      intentId: hasEpisode ? `0x${"ab".repeat(32)}` : null,
+      symbol: hasEpisode ? "AAPL" : null,
+      state: running ? "hedged" : reducing ? "unwinding" : hasEpisode ? "closed" : "flat",
+      spotAmountRaw: active ? "100000000000000000" : "0",
+      spotDecimals: active ? 18 : 0,
+      perpOpenBase: active ? "100" : "0",
+      perpBaseDecimals: active ? 3 : 0,
+      spotNotionalMicros: hasEpisode ? "25000000" : "0",
+      perpNotionalMicros: hasEpisode ? "25000000" : "0",
+      lighterOrderId: hasEpisode ? "lighter-order-123" : null,
+      lighterTransactionHash: hasEpisode ? `0x${"12".repeat(32)}` : null,
+      robinhoodTransactionHash: hasEpisode ? `0x${"34".repeat(32)}` : null,
+      lighterUnwindOrderId: hasEpisode && !active ? "lighter-unwind-456" : null,
+      lighterUnwindTransactionHash: hasEpisode && !active ? `0x${"56".repeat(32)}` : null,
+      robinhoodUnwindTransactionHash: hasEpisode && !active ? `0x${"78".repeat(32)}` : null,
+      updatedAtMs: hasEpisode ? Date.parse(liveAgent.updatedAt) : 0,
+    });
   }
   if (path.endsWith("/lighter/link-request")) {
     const body = request.postDataJSON() as Record<string, unknown>;
@@ -197,7 +256,7 @@ async function respond(route: Route, withVault: boolean, state: MockState) {
     }
     if (authorized) {
       state.robinhoodLinked = true;
-      if (state.liveJourney && state.lighterLinked) state.agent = { ...liveAgent, status: "ready" };
+      if (state.liveJourney && state.lighterLinked) state.agent = { ...liveAgent, status: "awaiting_funding" };
     }
     return json(route, {
     bindingRef: "robinhood-binding", requestId: "robinhood-request", providerRequestId: "execution-account-id",
@@ -225,25 +284,55 @@ async function respond(route: Route, withVault: boolean, state: MockState) {
   if (path.endsWith("/commands") && request.method() === "POST") {
     const { command } = request.postDataJSON() as { command: "launch" | "pause" | "resume" | "close" | "withdraw" };
     const nextStatus = command === "launch" || command === "resume" ? "running"
-      : command === "pause" ? "paused"
+      : command === "pause" ? "reducing"
         : command === "close" || command === "withdraw" ? "closed" : "blocked";
     if (command !== "withdraw") state.agent = { ...liveAgent, status: nextStatus };
+    if (command === "launch" || command === "resume") state.executed = true;
     state.command = {
       id: `command-${command}`, agentId: liveAgent.id, executionAccountId: "execution-account-id",
       idempotencyKey: request.headers()["idempotency-key"] ?? "fixture-key", command,
-      status: command === "withdraw" ? "awaiting_signature" : "completed",
+      status: command === "withdraw" ? "awaiting_signature" : command === "pause" ? "processing" : "completed",
       agentStatus: nextStatus, targetAgentStatus: nextStatus, errorReason: null,
       resultEvidenceDigest: command === "withdraw" ? null : `0x${"45".repeat(32)}`,
       ownerActions: command === "withdraw" ? [{
         chain_id: 4663, from: embedded, to: readiness.robinhoodVaultAddress,
         data: `0x142834dd${"0".repeat(63)}1`, value: "0",
       }] : [],
-      completedAt: command === "withdraw" ? null : liveAgent.updatedAt,
+      completedAt: command === "withdraw" || command === "pause" ? null : liveAgent.updatedAt,
       createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt,
     };
     return json(route, state.command, command === "withdraw" ? 202 : 200);
   }
-  if (path.includes("/commands/") && request.method() === "GET" && state.command) return json(route, state.command);
+  if (path.endsWith("/commands/pending") && request.method() === "GET") {
+    const active = state.command
+      && typeof state.command.status === "string"
+      && !["completed", "rejected", "failed"].includes(state.command.status)
+      ? state.command
+      : null;
+    return json(route, active);
+  }
+  if (path.includes("/commands/") && request.method() === "GET" && state.command) {
+    if (state.pauseReconciled && state.command.command === "pause") {
+      state.agent = { ...liveAgent, status: "paused" };
+      state.command = {
+        ...state.command,
+        status: "completed",
+        agentStatus: "paused",
+        targetAgentStatus: "paused",
+        completedAt: liveAgent.updatedAt,
+      };
+    }
+    if (state.withdrawalReconciled && state.command.command === "withdraw") {
+      state.command = {
+        ...state.command,
+        status: "completed",
+        resultEvidenceDigest: `0x${"67".repeat(32)}`,
+        ownerActions: [],
+        completedAt: liveAgent.updatedAt,
+      };
+    }
+    return json(route, state.command);
+  }
   if (path.includes("/agents/") && request.method() === "PUT") return json(route, agent);
   if (path.endsWith("/activity")) return json(route, { items: [], nextCursor: null });
   if (path.endsWith("/preferences")) return json(route, me(withVault).preferences);
@@ -260,4 +349,11 @@ async function respond(route: Route, withVault: boolean, state: MockState) {
 
 function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+}
+
+function matchesSetupStatus(status?: string) {
+  return status === "provisioning"
+    || status === "awaiting_signatures"
+    || status === "awaiting_funding"
+    || status === "ready";
 }

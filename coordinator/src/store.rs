@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 const MAX_EXIT_SUBMISSION_WINDOW_MS: u64 = 15 * 60 * 1_000;
 const MAX_EXIT_RECONCILIATION_WINDOW_MS: u64 = 24 * 60 * 60 * 1_000;
+const CANARY_MAX_ACCOUNTS: i64 = 1;
 const ROBINHOOD_CHAIN_ID: u64 = 4663;
 const BASIS_AAPL_V1_ROUTE_SHA256: &str =
     "77d59f5e80e76ed507522b27ee6b7ddd1f8395f0337f0b230c5bba64bb335590";
@@ -304,6 +305,36 @@ pub struct OpenEpisode {
     pub spot_amount: String,
     pub perp_base_amount: u64,
     pub observed_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AccountExecutionStatus {
+    pub schema_version: u8,
+    pub execution_account_id: String,
+    pub agent_id: String,
+    pub strategy_version: String,
+    pub strategy_manifest_sha256: String,
+    pub account_status: String,
+    pub control_mode: String,
+    pub active: bool,
+    pub flat: bool,
+    pub intent_id: Option<String>,
+    pub symbol: Option<String>,
+    pub state: String,
+    pub spot_amount_raw: String,
+    pub spot_decimals: u8,
+    pub perp_open_base: String,
+    pub perp_base_decimals: u8,
+    pub spot_notional_micros: String,
+    pub perp_notional_micros: String,
+    pub lighter_order_id: Option<String>,
+    pub lighter_transaction_hash: Option<String>,
+    pub robinhood_transaction_hash: Option<String>,
+    pub lighter_unwind_order_id: Option<String>,
+    pub lighter_unwind_transaction_hash: Option<String>,
+    pub robinhood_unwind_transaction_hash: Option<String>,
+    pub updated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -700,8 +731,14 @@ pub enum StoreError {
     AccountCommandBlocked,
     #[error("execution account registration conflicts with authoritative binding")]
     AccountRegistrationConflict,
+    #[error("execution account canary capacity is full")]
+    AccountCapacityExceeded,
     #[error("execution account registration does not exist")]
     AccountRegistrationMissing,
+    #[error("account execution status is ambiguous")]
+    AccountExecutionAmbiguous,
+    #[error("account execution status is unavailable")]
+    AccountExecutionUnavailable,
     #[error("open execution episode does not exist")]
     OpenEpisodeMissing,
     #[error("open execution episode is ambiguous")]
@@ -722,6 +759,360 @@ impl Store {
 
     pub fn from_pool(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    pub async fn account_execution_status(
+        &self,
+        execution_account_id: &str,
+    ) -> Result<AccountExecutionStatus, StoreError> {
+        if !valid_control_id(execution_account_id) {
+            return Err(StoreError::InvalidAction);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let account = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                i64,
+                i16,
+                String,
+                String,
+                String,
+                String,
+            ),
+        >(
+            r#"
+            SELECT registration.agent_id, registration.strategy_version,
+                   registration.risk_version, registration.strategy_manifest_sha256,
+                   registration.lighter_account_index, registration.lighter_api_key_index,
+                   registration.robinhood_vault, registration.robinhood_signer,
+                   account.status,
+                   CASE
+                       WHEN strategy_control.strategy_manifest_sha256 IS DISTINCT FROM
+                              account.strategy_manifest_sha256
+                         OR account_control.mode = 'HALTED'
+                         OR strategy_control.mode = 'HALTED'
+                         OR global_control.mode = 'HALTED' THEN 'HALTED'
+                       WHEN account_control.mode = 'REDUCE_ONLY'
+                         OR strategy_control.mode = 'REDUCE_ONLY'
+                         OR global_control.mode = 'REDUCE_ONLY' THEN 'REDUCE_ONLY'
+                       ELSE 'ACTIVE'
+                   END AS effective_control_mode
+            FROM execution_account_registrations registration
+            JOIN execution_accounts account USING (execution_account_id)
+            JOIN execution_account_control account_control USING (execution_account_id)
+            JOIN execution_strategy_control strategy_control
+              ON strategy_control.strategy_version = account.strategy_version
+            JOIN execution_control global_control ON global_control.singleton
+            WHERE registration.execution_account_id = $1
+              AND account.agent_id = registration.agent_id
+              AND account.strategy_version = registration.strategy_version
+              AND account.risk_version = registration.risk_version
+              AND account.strategy_manifest_sha256 = registration.strategy_manifest_sha256
+              AND account.lighter_account_index = registration.lighter_account_index
+              AND account.lighter_api_key_index = registration.lighter_api_key_index
+              AND account.robinhood_vault = registration.robinhood_vault
+              AND account.robinhood_signer = registration.robinhood_signer
+              AND account.owner_address = registration.robinhood_owner
+              AND account.binding_sha256 = registration.binding_sha256
+            FOR SHARE OF registration, account, account_control, strategy_control, global_control
+            "#,
+        )
+        .bind(execution_account_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StoreError::AccountRegistrationMissing)?;
+        if !valid_hash(&account.3) {
+            return Err(StoreError::AccountExecutionUnavailable);
+        }
+        let strategy_manifest_sha256 = account.3.clone();
+        let rows = sqlx::query_as::<_, (String, Value, Value, i64, bool, i64)>(
+            r#"
+            SELECT id, payload, saga, saga_version, active,
+                   (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint
+            FROM execution_intents
+            WHERE execution_account_id = $1
+            ORDER BY active DESC, updated_at DESC, id DESC
+            LIMIT 2
+            FOR SHARE
+            "#,
+        )
+        .bind(execution_account_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if rows.iter().filter(|row| row.4).count() > 1 {
+            transaction.commit().await?;
+            return Err(StoreError::AccountExecutionAmbiguous);
+        }
+        let Some((intent_id, payload, saga, saga_version, active, updated_at_ms)) =
+            rows.into_iter().next()
+        else {
+            let response = AccountExecutionStatus {
+                schema_version: 1,
+                execution_account_id: execution_account_id.to_owned(),
+                agent_id: account.0,
+                strategy_version: account.1,
+                strategy_manifest_sha256,
+                account_status: account.8,
+                control_mode: account.9,
+                active: false,
+                flat: true,
+                intent_id: None,
+                symbol: None,
+                state: "flat".to_owned(),
+                spot_amount_raw: "0".to_owned(),
+                spot_decimals: 0,
+                perp_open_base: "0".to_owned(),
+                perp_base_decimals: 0,
+                spot_notional_micros: "0".to_owned(),
+                perp_notional_micros: "0".to_owned(),
+                lighter_order_id: None,
+                lighter_transaction_hash: None,
+                robinhood_transaction_hash: None,
+                lighter_unwind_order_id: None,
+                lighter_unwind_transaction_hash: None,
+                robinhood_unwind_transaction_hash: None,
+                updated_at_ms: 0,
+            };
+            transaction.commit().await?;
+            return Ok(response);
+        };
+        let intent: PairIntent =
+            serde_json::from_value(payload).map_err(|_| StoreError::AccountExecutionUnavailable)?;
+        let saga: ExecutionSaga =
+            serde_json::from_value(saga).map_err(|_| StoreError::AccountExecutionUnavailable)?;
+        let version =
+            u64::try_from(saga_version).map_err(|_| StoreError::AccountExecutionUnavailable)?;
+        let updated_at_ms =
+            u64::try_from(updated_at_ms).map_err(|_| StoreError::AccountExecutionUnavailable)?;
+        let lighter_account_index =
+            u64::try_from(account.4).map_err(|_| StoreError::AccountExecutionUnavailable)?;
+        let lighter_api_key_index =
+            u8::try_from(account.5).map_err(|_| StoreError::AccountExecutionUnavailable)?;
+        let flat = saga.state.exposure_resolved();
+        if intent.validate().is_err()
+            || intent.id != intent_id
+            || intent.execution_account_id != execution_account_id
+            || intent.agent_id != account.0
+            || intent.evidence.strategy_version != account.1
+            || intent.risk_version != account.2
+            || intent.strategy_manifest_sha256 != strategy_manifest_sha256
+            || intent.lighter_account_index != lighter_account_index
+            || intent.lighter_api_key_index != lighter_api_key_index
+            || intent.robinhood_vault != account.6
+            || intent.robinhood_signer != account.7
+            || saga.intent_id != intent_id
+            || saga.version != version
+            || saga.perp_unwound_base > saga.perp_filled_base
+            || (flat && saga.perp_unwound_base != saga.perp_filled_base)
+            || active == flat
+        {
+            transaction.commit().await?;
+            return Err(StoreError::AccountExecutionUnavailable);
+        }
+        let proof_rows = sqlx::query_as::<_, (String, String, String, Value, String, Value)>(
+            r#"
+            WITH proofs AS (
+                SELECT CASE
+                           WHEN event.kind IN ('perp_partial', 'perp_filled', 'perp_rejected') THEN 'lighter_entry'
+                           WHEN event.kind = 'spot_confirmed' THEN 'robinhood_entry'
+                           WHEN event.kind IN ('unwind_partial', 'unwind_filled', 'unwind_rejected') THEN 'lighter_unwind'
+                           WHEN event.kind = 'spot_unwind_confirmed' THEN 'robinhood_unwind'
+                       END AS proof_kind,
+                       event.source, event.kind, event.payload,
+                       action.kind AS action_kind, action.payload AS action_payload,
+                       applied.applied_at, event.id
+                FROM execution_venue_events event
+                JOIN execution_applied_venue_events applied ON applied.venue_event_id = event.id
+                JOIN execution_actions action
+                  ON action.id = applied.action_id AND action.intent_id = event.intent_id
+                WHERE event.execution_account_id = $1
+                  AND event.intent_id = $2
+                  AND event.kind IN (
+                      'perp_partial', 'perp_filled', 'perp_rejected', 'spot_confirmed',
+                      'unwind_partial', 'unwind_filled', 'unwind_rejected',
+                      'spot_unwind_confirmed'
+                  )
+                  AND NOT (
+                      event.kind IN ('perp_rejected', 'unwind_rejected')
+                      AND event.payload ->> 'filled_base' = '0'
+                  )
+            )
+            SELECT DISTINCT ON (proof_kind)
+                   proof_kind, source, kind, payload, action_kind, action_payload
+            FROM proofs
+            ORDER BY proof_kind, applied_at DESC, id DESC
+            "#,
+        )
+        .bind(execution_account_id)
+        .bind(&intent_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut lighter_order_id = None;
+        let mut lighter_transaction_hash = None;
+        let mut robinhood_transaction_hash = None;
+        let mut lighter_unwind_order_id = None;
+        let mut lighter_unwind_transaction_hash = None;
+        let mut robinhood_unwind_transaction_hash = None;
+        for (proof_kind, source, kind, payload, action_kind, action_payload) in proof_rows {
+            if proof_kind == "lighter_entry"
+                && source == "lighter-auth"
+                && matches!(
+                    kind.as_str(),
+                    "perp_partial" | "perp_filled" | "perp_rejected"
+                )
+                && action_kind == "reconcile_perp"
+            {
+                let observation = serde_json::from_value::<PerpObservation>(payload)
+                    .map_err(|_| StoreError::AccountExecutionUnavailable)?;
+                let expected_transaction_hash = action_payload
+                    .get("tx_hash")
+                    .and_then(Value::as_str)
+                    .filter(|value| valid_hash(value))
+                    .ok_or(StoreError::AccountExecutionUnavailable)?;
+                if !valid_perp_observation(&observation, true, true)
+                    || observation.client_order_index != intent.client_order_index
+                    || observation.market_index != intent.lighter_market_index
+                    || !observation.is_ask
+                    || observation.reduce_only
+                    || observation.filled_base() != Some(saga.perp_filled_base)
+                    || !observation
+                        .transaction_hash
+                        .eq_ignore_ascii_case(expected_transaction_hash)
+                {
+                    return Err(StoreError::AccountExecutionUnavailable);
+                }
+                lighter_order_id = Some(observation.order_id);
+                lighter_transaction_hash = Some(observation.transaction_hash);
+            } else if proof_kind == "robinhood_entry"
+                && source == "robinhood-chain"
+                && kind == "spot_confirmed"
+                && action_kind == "reconcile_spot"
+            {
+                let observation = serde_json::from_value::<SpotObservation>(payload)
+                    .map_err(|_| StoreError::AccountExecutionUnavailable)?;
+                if !valid_spot_observation(&observation, true)
+                    || observation.spot_intent_id != intent.id
+                    || observation.config_version != intent.spot_config_version
+                    || observation.amount_out() != Some(saga.spot_received_raw)
+                {
+                    return Err(StoreError::AccountExecutionUnavailable);
+                }
+                robinhood_transaction_hash = Some(observation.tx_hash);
+            } else if proof_kind == "lighter_unwind"
+                && source == "lighter-auth"
+                && matches!(
+                    kind.as_str(),
+                    "unwind_partial" | "unwind_filled" | "unwind_rejected"
+                )
+                && action_kind == "reconcile_unwind"
+            {
+                let observation = serde_json::from_value::<PerpObservation>(payload)
+                    .map_err(|_| StoreError::AccountExecutionUnavailable)?;
+                let expected_order_index = action_payload
+                    .get("client_order_index")
+                    .and_then(Value::as_u64)
+                    .ok_or(StoreError::AccountExecutionUnavailable)?;
+                let expected_transaction_hash = action_payload
+                    .get("tx_hash")
+                    .and_then(Value::as_str)
+                    .filter(|value| valid_hash(value))
+                    .ok_or(StoreError::AccountExecutionUnavailable)?;
+                let unwound_before = action_payload
+                    .get("unwound_before")
+                    .and_then(Value::as_u64)
+                    .ok_or(StoreError::AccountExecutionUnavailable)?;
+                let observed_fill = observation
+                    .filled_base()
+                    .ok_or(StoreError::AccountExecutionUnavailable)?;
+                let cumulative_unwind = unwound_before
+                    .checked_add(observed_fill)
+                    .ok_or(StoreError::AccountExecutionUnavailable)?;
+                if !valid_perp_observation(&observation, true, true)
+                    || observation.client_order_index != expected_order_index
+                    || observation.market_index != intent.lighter_market_index
+                    || observation.is_ask
+                    || !observation.reduce_only
+                    || cumulative_unwind != saga.perp_unwound_base
+                    || !observation
+                        .transaction_hash
+                        .eq_ignore_ascii_case(expected_transaction_hash)
+                {
+                    return Err(StoreError::AccountExecutionUnavailable);
+                }
+                lighter_unwind_order_id = Some(observation.order_id);
+                lighter_unwind_transaction_hash = Some(observation.transaction_hash);
+            } else if proof_kind == "robinhood_unwind"
+                && source == "robinhood-chain"
+                && kind == "spot_unwind_confirmed"
+                && action_kind == "reconcile_unwind_spot"
+            {
+                let observation = serde_json::from_value::<SpotObservation>(payload)
+                    .map_err(|_| StoreError::AccountExecutionUnavailable)?;
+                if !valid_spot_observation(&observation, true)
+                    || observation.spot_intent_id != intent.spot_unwind_intent_id
+                    || observation.config_version != intent.spot_config_version
+                    || observation.amount_in() != Some(saga.spot_received_raw)
+                {
+                    return Err(StoreError::AccountExecutionUnavailable);
+                }
+                robinhood_unwind_transaction_hash = Some(observation.tx_hash);
+            } else {
+                return Err(StoreError::AccountExecutionUnavailable);
+            }
+        }
+        if (saga.perp_filled_base > 0 && lighter_order_id.is_none())
+            || (saga.spot_received_raw > 0 && robinhood_transaction_hash.is_none())
+            || (saga.perp_unwound_base > 0 && lighter_unwind_order_id.is_none())
+            || (flat && saga.spot_received_raw > 0 && robinhood_unwind_transaction_hash.is_none())
+        {
+            return Err(StoreError::AccountExecutionUnavailable);
+        }
+        let response = AccountExecutionStatus {
+            schema_version: 1,
+            execution_account_id: execution_account_id.to_owned(),
+            agent_id: account.0,
+            strategy_version: account.1,
+            strategy_manifest_sha256,
+            account_status: account.8,
+            control_mode: account.9,
+            active,
+            flat,
+            intent_id: Some(intent_id),
+            symbol: Some(intent.symbol),
+            state: serde_json::to_value(saga.state)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .ok_or(StoreError::AccountExecutionUnavailable)?,
+            spot_amount_raw: if flat {
+                "0".to_owned()
+            } else {
+                saga.spot_received_raw.to_string()
+            },
+            spot_decimals: intent.spot_decimals,
+            perp_open_base: if flat {
+                "0".to_owned()
+            } else {
+                saga.perp_filled_base
+                    .saturating_sub(saga.perp_unwound_base)
+                    .to_string()
+            },
+            perp_base_decimals: intent.perp_base_decimals,
+            spot_notional_micros: intent.spot_notional_micros.to_string(),
+            perp_notional_micros: intent.perp_notional_micros.to_string(),
+            lighter_order_id,
+            lighter_transaction_hash,
+            robinhood_transaction_hash,
+            lighter_unwind_order_id,
+            lighter_unwind_transaction_hash,
+            robinhood_unwind_transaction_hash,
+            updated_at_ms,
+        };
+        transaction.commit().await?;
+        Ok(response)
     }
 
     pub async fn open_episode(
@@ -1265,6 +1656,26 @@ impl Store {
             halt_execution(&mut transaction, "account_registration_identity_conflict").await?;
             transaction.commit().await?;
             return Err(StoreError::AccountRegistrationConflict);
+        }
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('robin:canary-cap:' || $1, 0))")
+            .bind(&request.strategy_version)
+            .execute(&mut *transaction)
+            .await?;
+        let registered_accounts = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM execution_account_registrations registration
+            JOIN execution_accounts account USING (execution_account_id)
+            WHERE registration.strategy_version = $1
+              AND account.status <> 'closed'
+            "#,
+        )
+        .bind(&request.strategy_version)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if registered_accounts >= CANARY_MAX_ACCOUNTS {
+            transaction.commit().await?;
+            return Err(StoreError::AccountCapacityExceeded);
         }
         sqlx::query(
             r#"

@@ -353,6 +353,76 @@ async fn migration_and_promotion_gate_are_enforced() {
         .unwrap();
     assert_eq!(persisted.status, "persisted");
     assert_eq!(persisted.saga, Some(admitted.saga.clone()));
+    let execution = store
+        .account_execution_status("singleton-mainnet-canary")
+        .await
+        .unwrap();
+    assert!(execution.active);
+    assert!(!execution.flat);
+    assert_eq!(execution.intent_id, Some(intent().id));
+    assert_eq!(execution.state, "prechecked");
+    sqlx::query("UPDATE execution_control SET mode = 'HALTED' WHERE singleton")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .account_execution_status("singleton-mainnet-canary")
+            .await
+            .unwrap()
+            .control_mode,
+        "HALTED"
+    );
+    sqlx::query("UPDATE execution_control SET mode = 'ACTIVE' WHERE singleton")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE execution_strategy_control SET mode = 'REDUCE_ONLY' WHERE strategy_version = $1",
+    )
+    .bind(CANARY_RISK_VERSION)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .account_execution_status("singleton-mainnet-canary")
+            .await
+            .unwrap()
+            .control_mode,
+        "REDUCE_ONLY"
+    );
+    sqlx::query(
+        "UPDATE execution_strategy_control SET mode = 'ACTIVE' WHERE strategy_version = $1",
+    )
+    .bind(CANARY_RISK_VERSION)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_strategy_control SET strategy_manifest_sha256 = $2 WHERE strategy_version = $1",
+    )
+    .bind(CANARY_RISK_VERSION)
+    .bind("f".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .account_execution_status("singleton-mainnet-canary")
+            .await
+            .unwrap()
+            .control_mode,
+        "HALTED"
+    );
+    sqlx::query(
+        "UPDATE execution_strategy_control SET strategy_manifest_sha256 = $2 WHERE strategy_version = $1",
+    )
+    .bind(CANARY_RISK_VERSION)
+    .bind(execution::BASIS_AAPL_V1_MANIFEST_SHA256)
+    .execute(&pool)
+    .await
+    .unwrap();
     let collision = store
         .intent_status(&IntentStatusRequest {
             intent_id: intent().id,
@@ -1332,6 +1402,18 @@ async fn migration_and_promotion_gate_are_enforced() {
     assert_eq!(withdrawal.status, "completed");
     assert!(withdrawal.owner_actions.is_empty());
 
+    sqlx::query(
+        r#"
+        UPDATE execution_accounts
+        SET status = 'closed'
+        WHERE execution_account_id IN (
+            SELECT execution_account_id FROM execution_account_registrations
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let first_registration = registration(
         "registry-account-one",
         "registry-agent-one",
@@ -1392,6 +1474,15 @@ async fn migration_and_promotion_gate_are_enforced() {
         "0x0000000000000000000000000000000000000025",
         "0x0000000000000000000000000000000000000026",
     );
+    assert!(matches!(
+        store.register_execution_account(&second_registration).await,
+        Err(StoreError::AccountCapacityExceeded)
+    ));
+    sqlx::query("UPDATE execution_accounts SET status = 'closed' WHERE execution_account_id = $1")
+        .bind(&first_registration.execution_account_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     store
         .register_execution_account(&second_registration)
         .await
@@ -1402,6 +1493,37 @@ async fn migration_and_promotion_gate_are_enforced() {
         .unwrap();
     assert_eq!(second.binding_sha256, second_registration.binding_sha256);
     assert_eq!(second.control_mode, "HALTED");
+
+    sqlx::query("UPDATE execution_accounts SET status = 'closed' WHERE execution_account_id = $1")
+        .bind(&second_registration.execution_account_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let concurrent_one = registration(
+        "registry-race-one",
+        "registry-race-agent-one",
+        73,
+        "0x0000000000000000000000000000000000000031",
+        "0x0000000000000000000000000000000000000032",
+        "0x0000000000000000000000000000000000000033",
+    );
+    let concurrent_two = registration(
+        "registry-race-two",
+        "registry-race-agent-two",
+        74,
+        "0x0000000000000000000000000000000000000034",
+        "0x0000000000000000000000000000000000000035",
+        "0x0000000000000000000000000000000000000036",
+    );
+    let (first_race, second_race) = tokio::join!(
+        store.register_execution_account(&concurrent_one),
+        store.register_execution_account(&concurrent_two),
+    );
+    assert!(matches!(
+        (&first_race, &second_race),
+        (Ok(_), Err(StoreError::AccountCapacityExceeded))
+            | (Err(StoreError::AccountCapacityExceeded), Ok(_))
+    ));
 
     let mutation = sqlx::query(
         "UPDATE execution_accounts SET robinhood_signer = $2 WHERE execution_account_id = $1",

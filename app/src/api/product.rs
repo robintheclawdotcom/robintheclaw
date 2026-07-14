@@ -3,10 +3,11 @@ use crate::auth::require_user;
 use crate::evm::abi;
 use crate::lighter_provisioner::{ConfirmLink, LighterProvisionerError, PrepareLink};
 use crate::product::{
-    ActivityPage, AgentCommandInput, AgentCreateInput, AgentStatusInput, Amount, ConfirmVaultInput,
-    ConfirmedVault, DashboardSnapshot, LighterConfirmInput, LighterLinkRequestInput, MetricInput,
-    OpportunitySnapshot, PreferencesInput, RobinhoodConfirmInput, TransactionCall, TransactionPlan,
-    VaultSnapshot, WalletBalanceSnapshot, LIVE_STRATEGY_VERSION,
+    ActivityPage, AgentCommandInput, AgentCreateInput, AgentExecutionStatus, AgentStatusInput,
+    Amount, ConfirmVaultInput, ConfirmedVault, DashboardSnapshot, LighterConfirmInput,
+    LighterLinkRequestInput, MetricInput, OpportunitySnapshot, PreferencesInput,
+    RobinhoodConfirmInput, TransactionCall, TransactionPlan, VaultSnapshot, WalletBalanceSnapshot,
+    LIVE_STRATEGY_VERSION,
 };
 use crate::product_store::normalize_address;
 use crate::robinhood_provisioner::{ConfirmGraph, PrepareGraph};
@@ -601,6 +602,51 @@ pub async fn agent_readiness(
     Ok(HttpResponse::Ok().json(readiness))
 }
 
+pub async fn agent_execution(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    let account = state
+        .product_store
+        .execution_account(&auth.did, path.into_inner())
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let execution = state
+        .coordinator_registration
+        .execution(&account)
+        .await
+        .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
+    Ok(HttpResponse::Ok().json(AgentExecutionStatus {
+        execution_account_id: execution.execution_account_id,
+        agent_id: execution.agent_id,
+        strategy_version: execution.strategy_version,
+        strategy_manifest_sha256: execution.strategy_manifest_sha256,
+        account_status: execution.account_status,
+        control_mode: execution.control_mode,
+        active: execution.active,
+        flat: execution.flat,
+        intent_id: execution.intent_id,
+        symbol: execution.symbol,
+        state: execution.state,
+        spot_amount_raw: execution.spot_amount_raw,
+        spot_decimals: execution.spot_decimals,
+        perp_open_base: execution.perp_open_base,
+        perp_base_decimals: execution.perp_base_decimals,
+        spot_notional_micros: execution.spot_notional_micros,
+        perp_notional_micros: execution.perp_notional_micros,
+        lighter_order_id: execution.lighter_order_id,
+        lighter_transaction_hash: execution.lighter_transaction_hash,
+        robinhood_transaction_hash: execution.robinhood_transaction_hash,
+        lighter_unwind_order_id: execution.lighter_unwind_order_id,
+        lighter_unwind_transaction_hash: execution.lighter_unwind_transaction_hash,
+        robinhood_unwind_transaction_hash: execution.robinhood_unwind_transaction_hash,
+        updated_at_ms: execution.updated_at_ms,
+    }))
+}
+
 pub async fn create_agent_command(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -660,6 +706,21 @@ pub async fn agent_command(
     let command = state
         .product_store
         .agent_command(&auth.did, agent_id, command_id)
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok(HttpResponse::Ok().json(command))
+}
+
+pub async fn pending_agent_command(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    let command = state
+        .product_store
+        .pending_agent_command(&auth.did, path.into_inner())
         .await
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     Ok(HttpResponse::Ok().json(command))

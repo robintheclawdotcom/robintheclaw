@@ -1556,6 +1556,16 @@ impl ProductStore {
             Ok(next) => ("pending", next, None),
             Err(reason) => ("rejected", agent_status.as_str(), Some(reason)),
         };
+        let inflight_status = if command_status == "pending" {
+            match (agent_status.as_str(), command) {
+                ("running", "pause") => "reducing",
+                ("closed", "close") => "closed",
+                (_, "close") => "closing",
+                _ => agent_status.as_str(),
+            }
+        } else {
+            agent_status.as_str()
+        };
         if local_close {
             sqlx::query(
                 r#"
@@ -1591,12 +1601,20 @@ impl ProductStore {
             .bind(agent_id)
             .execute(&mut *tx)
             .await?;
+        } else if inflight_status != agent_status {
+            sqlx::query(
+                "UPDATE agents SET status = $2, blocked_reason = NULL, updated_at = now() WHERE id = $1",
+            )
+            .bind(agent_id)
+            .bind(inflight_status)
+            .execute(&mut *tx)
+            .await?;
         }
         let command_id = Uuid::new_v4();
         let recorded_agent_status = if local_close {
             next_status
         } else {
-            agent_status.as_str()
+            inflight_status
         };
         let record = sqlx::query_as::<_, AgentCommandRecord>(
             r#"
@@ -1657,6 +1675,33 @@ impl ProductStore {
         .fetch_optional(self.pool()?)
         .await?
         .ok_or_else(|| anyhow!("agent command not found"))
+    }
+
+    pub async fn pending_agent_command(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+    ) -> Result<Option<AgentCommandRecord>> {
+        let user = self.ensure_user(did).await?;
+        sqlx::query_as::<_, AgentCommandRecord>(
+            r#"
+            SELECT c.id, c.agent_id, c.execution_account_id, c.idempotency_key,
+                c.command, c.status, c.agent_status, c.target_agent_status,
+                c.error_reason, c.result_evidence_digest,
+                c.result_owner_actions AS owner_actions, c.completed_at,
+                c.created_at, c.updated_at
+            FROM agent_commands c JOIN agents a ON a.id = c.agent_id
+            WHERE c.agent_id = $1 AND a.user_id = $2
+              AND c.status IN ('pending', 'processing', 'awaiting_signature')
+            ORDER BY c.created_at DESC, c.id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(agent_id)
+        .bind(user.id)
+        .fetch_optional(self.pool()?)
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn record_readiness_snapshot(

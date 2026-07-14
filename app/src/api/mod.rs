@@ -56,8 +56,16 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
                             web::get().to(product::agent_readiness),
                         )
                         .route(
+                            "/agents/{id}/execution",
+                            web::get().to(product::agent_execution),
+                        )
+                        .route(
                             "/agents/{id}/commands",
                             web::post().to(product::create_agent_command),
+                        )
+                        .route(
+                            "/agents/{id}/commands/pending",
+                            web::get().to(product::pending_agent_command),
                         )
                         .route(
                             "/agents/{id}/commands/{command_id}",

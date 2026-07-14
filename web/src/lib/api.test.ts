@@ -117,6 +117,26 @@ describe("mainnet agent API", () => {
     expect(api.pendingAgentCommand("agent-id", "pause")).toBeNull();
   });
 
+  it("recovers the active command from the server", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: "command-id",
+      command: "close",
+      status: "processing",
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetch);
+    const api = new AppApi(async () => null);
+
+    await api.activeAgentCommand("agent-id");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/app/v1/agents/agent-id/commands/pending",
+      expect.any(Object),
+    );
+  });
+
   it("confirms Robinhood deployment without accepting graph addresses", async () => {
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "linked" }), {
       status: 200,

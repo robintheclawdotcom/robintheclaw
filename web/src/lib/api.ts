@@ -2,6 +2,7 @@ import type {
   ActivityPage,
   AgentCommand,
   AgentCommandRecord,
+  AgentExecutionStatus,
   AgentReadiness,
   AgentRecord,
   DashboardSnapshot,
@@ -77,6 +78,10 @@ export class AppApi {
     return this.request(`/v1/agents/${encodeURIComponent(agentId)}/readiness`);
   }
 
+  agentExecution(agentId: string): Promise<AgentExecutionStatus> {
+    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/execution`);
+  }
+
   requestLighterLink(agentId: string, input: LighterLinkRequest): Promise<ExecutionBindingRecord> {
     return this.request(`/v1/agents/${encodeURIComponent(agentId)}/lighter/link-request`, {
       method: "POST",
@@ -130,6 +135,10 @@ export class AppApi {
       this.clearPendingCommand(this.commandStorageKey(agentId, result.command));
     }
     return result;
+  }
+
+  activeAgentCommand(agentId: string): Promise<AgentCommandRecord | null> {
+    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/commands/pending`);
   }
 
   pendingAgentCommand(agentId: string, command: AgentCommand): string | null {

@@ -1,3 +1,4 @@
+use crate::account_registration::CoordinatorRegistrationClient;
 use crate::auth::AuthService;
 use crate::config::Config;
 use crate::event_bus::EventBus;
@@ -27,4 +28,5 @@ pub struct AppState {
     pub lighter_provisioner: LighterProvisioner,
     pub robinhood_provisioner: RobinhoodProvisioner,
     pub readiness_auth: ServiceAuth,
+    pub coordinator_registration: CoordinatorRegistrationClient,
 }

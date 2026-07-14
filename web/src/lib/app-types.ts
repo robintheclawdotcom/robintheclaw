@@ -189,6 +189,33 @@ export type AgentReadiness = {
   blockers: string[];
 };
 
+export type AgentExecutionStatus = {
+  executionAccountId: string;
+  agentId: string;
+  strategyVersion: string;
+  strategyManifestSha256: string;
+  accountStatus: "active" | "blocked" | "closed";
+  controlMode: "ACTIVE" | "REDUCE_ONLY" | "HALTED";
+  active: boolean;
+  flat: boolean;
+  intentId: string | null;
+  symbol: "AAPL" | null;
+  state: string;
+  spotAmountRaw: string;
+  spotDecimals: number;
+  perpOpenBase: string;
+  perpBaseDecimals: number;
+  spotNotionalMicros: string;
+  perpNotionalMicros: string;
+  lighterOrderId: string | null;
+  lighterTransactionHash: string | null;
+  robinhoodTransactionHash: string | null;
+  lighterUnwindOrderId: string | null;
+  lighterUnwindTransactionHash: string | null;
+  robinhoodUnwindTransactionHash: string | null;
+  updatedAtMs: number;
+};
+
 export type AgentCommand = "launch" | "pause" | "resume" | "close" | "withdraw";
 
 export type AgentCommandRecord = {
