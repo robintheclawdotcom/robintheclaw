@@ -24,6 +24,7 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
     address public immutable owner;
     address public agent;
     bool public agentEnabled;
+    bool public initialAgentAuthorized;
     bool public recoveryFinalized;
 
     event AgentSet(address indexed agent);
@@ -51,6 +52,7 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
     error NotOwner();
     error NotAgent();
     error AgentNotEnabled();
+    error InitialAgentAlreadyAuthorized();
     error InvalidAddress();
     error InvalidAmount();
     error RecoveryRequiresHalt();
@@ -62,6 +64,8 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
     error GlobalHalt();
     error GlobalReduceOnly();
     error UnregisteredVault();
+    error EpisodeAlreadyActive();
+    error FullExitRequired(uint256 expected, uint256 actual);
 
     modifier onlyRegistry() {
         if (msg.sender != address(registry)) revert NotRegistry();
@@ -108,13 +112,22 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
 
     function setAgent(address agent_) external onlyRegistry {
         if (recoveryFinalized) revert RecoveryFinalized();
-        if (
-            agent_ == address(0) || agent_ == owner || agent_ == address(registry)
-                || agent_ == registry.guardian()
-        ) revert InvalidAddress();
+        _validateAgent(agent_);
         agent = agent_;
         agentEnabled = false;
+        initialAgentAuthorized = true;
         emit AgentSet(agent_);
+    }
+
+    function authorizeInitialAgent(address agent_) external onlyOwner {
+        if (recoveryFinalized) revert RecoveryFinalized();
+        if (initialAgentAuthorized) revert InitialAgentAlreadyAuthorized();
+        _validateAgent(agent_);
+        agent = agent_;
+        agentEnabled = true;
+        initialAgentAuthorized = true;
+        emit AgentSet(agent_);
+        emit AgentEnabled(owner, agent_);
     }
 
     function enableAgent() external onlyOwner {
@@ -213,6 +226,7 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
         if (recoveryFinalized) revert RecoveryFinalized();
         _checkSettlementCode();
         _checkGlobalMode(intent.side);
+        _checkEpisodeShape(intent);
         (uint256 notional, uint256 price, uint256 multiplier) = riskManager.authorize(intent);
 
         IERC20 input = intent.side == Side.BuySpot ? settlementAsset : IERC20(intent.stockToken);
@@ -266,6 +280,22 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
                 address(settlementAsset), settlementAssetCodeHash, actual
             );
         }
+    }
+
+    function _checkEpisodeShape(SpotIntent calldata intent) private view {
+        uint256 inventory = riskManager.inventory(intent.stockToken);
+        if (intent.side == Side.BuySpot) {
+            if (inventory != 0) revert EpisodeAlreadyActive();
+        } else if (intent.amountIn != inventory) {
+            revert FullExitRequired(inventory, intent.amountIn);
+        }
+    }
+
+    function _validateAgent(address agent_) private view {
+        if (
+            agent_ == address(0) || agent_ == owner || agent_ == address(registry)
+                || agent_ == registry.configAdmin() || agent_ == registry.guardian()
+        ) revert InvalidAddress();
     }
 }
 

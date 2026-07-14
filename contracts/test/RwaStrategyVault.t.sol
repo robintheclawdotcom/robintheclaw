@@ -106,6 +106,7 @@ contract MockFeed is IChainlinkFeed {
         MockPermit2 public immutable permit2;
         address public immutable settlementAsset;
         bool public malformedOutput;
+        uint256 public stockOutputMultiplier = 1e18;
 
         constructor(MockPermit2 permit2_, address settlementAsset_) {
             permit2 = permit2_;
@@ -114,6 +115,10 @@ contract MockFeed is IChainlinkFeed {
 
         function setMalformedOutput(bool malformed) external {
             malformedOutput = malformed;
+        }
+
+        function setStockOutputMultiplier(uint256 multiplier) external {
+            stockOutputMultiplier = multiplier;
         }
 
         function execute(bytes calldata commands, bytes[] calldata inputs, uint256 deadline)
@@ -131,7 +136,7 @@ contract MockFeed is IChainlinkFeed {
             permit2.transferFrom(msg.sender, address(this), swap.amountIn, input);
             uint256 outputAmount = input == settlementAsset
                 ? uint256(swap.amountIn) * 1e12
-                : uint256(swap.amountIn) / 1e12;
+                : (uint256(swap.amountIn) / 1e12) * stockOutputMultiplier / 1e18;
             if (malformedOutput) outputAmount = minAmount - 1;
             IERC20(output).safeTransfer(msg.sender, outputAmount);
         }
@@ -327,14 +332,15 @@ contract MockFeed is IChainlinkFeed {
             vault.executeSpot(_intent(ISpotExecution.Side.BuySpot, 1e6, 1e18, bytes32("stale")));
         }
 
-        function test_sellNotionalUsesAlreadyAdjustedPerTokenOraclePrice() public {
+        function test_sellNotionalAppliesCurrentMultiplier() public {
             _execute(ISpotExecution.Side.BuySpot, 100e6, 100e18, bytes32("seed-price"));
             stock.setMultiplier(2e18, 2e18, 0);
+            router.setStockOutputMultiplier(2e18);
             intentMultiplier = 2e18;
             stockFeed.set(1e8, block.timestamp, block.timestamp);
 
-            _execute(ISpotExecution.Side.SellSpot, 5e18, 5e6, bytes32("priced-sell"));
-            assertEq(risk.windowTurnover(), 105e6);
+            _execute(ISpotExecution.Side.SellSpot, 5e18, 10e6, bytes32("priced-sell"));
+            assertEq(risk.windowTurnover(), 110e6);
         }
 
         function test_recoveryRequiresHaltAndPaysSafeRecipient() public {

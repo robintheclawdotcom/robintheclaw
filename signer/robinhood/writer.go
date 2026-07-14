@@ -140,6 +140,10 @@ func (writer *Writer) verifyClient(ctx context.Context, client chainClient) (*ty
 			return nil, fmt.Errorf("vault %s mismatch", check.method)
 		}
 	}
+	agentEnabled, err := writer.readBool(ctx, client, writer.config.VaultAddress, "agentEnabled", head.Number)
+	if err != nil || !agentEnabled {
+		return nil, errors.New("vault execution agent is not owner-authorized")
+	}
 	settlementAsset, err := writer.readAddress(ctx, client, writer.config.VaultAddress, "settlementAsset", head.Number)
 	if err != nil {
 		return nil, errors.New("read vault settlement asset")
@@ -556,6 +560,18 @@ func (writer *Writer) readHash(ctx context.Context, client chainClient, target c
 		return common.Hash{}, err
 	}
 	return unpackHash(method, output)
+}
+
+func (writer *Writer) readBool(ctx context.Context, client chainClient, target common.Address, method string, blockNumber *big.Int) (bool, error) {
+	input, err := vaultABI.Pack(method)
+	if err != nil {
+		return false, err
+	}
+	output, err := client.CallContract(ctx, ethereum.CallMsg{To: &target, Data: input}, blockNumber)
+	if err != nil {
+		return false, err
+	}
+	return unpackBool(method, output)
 }
 
 func (writer *Writer) RunReconciler(ctx context.Context) {

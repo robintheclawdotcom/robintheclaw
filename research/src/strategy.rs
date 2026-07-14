@@ -25,6 +25,7 @@ impl StrategyPromotionState {
         matches!(
             (self, next),
             (Self::Paper, Self::Shadow)
+                | (Self::Paper, Self::Canary)
                 | (Self::Shadow, Self::Canary)
                 | (Self::Canary, Self::Cohort)
                 | (Self::Cohort, Self::Public)
@@ -203,6 +204,7 @@ mod tests {
     #[test]
     fn promotion_sequence_is_monotonic() {
         assert!(StrategyPromotionState::Paper.can_transition_to(StrategyPromotionState::Shadow));
+        assert!(StrategyPromotionState::Paper.can_transition_to(StrategyPromotionState::Canary));
         assert!(!StrategyPromotionState::Paper.can_transition_to(StrategyPromotionState::Public));
         assert!(StrategyPromotionState::Cohort.admits_live_capital());
         assert!(!StrategyPromotionState::Shadow.admits_live_capital());

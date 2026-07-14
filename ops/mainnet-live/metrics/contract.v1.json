@@ -1,10 +1,10 @@
 {
   "schemaVersion": "robin.mainnet.metrics.v1",
-  "status": "instrumentation-required",
+  "status": "canary-active",
   "assumptions": {
-    "capitalEnabled": false,
-    "servicesEnabled": false,
-    "telemetryClaim": "This contract defines required emissions. It is not evidence that any producer is deployed or emitting live data.",
+    "capitalEnabled": true,
+    "servicesEnabled": true,
+    "telemetryClaim": "The repository authorizes one capped canary. Runtime readiness still requires live emissions from every declared producer.",
     "accountIdentity": "execution_account_id is an opaque identifier and must never contain a wallet, user name, email, or venue credential"
   },
   "commonLabels": [

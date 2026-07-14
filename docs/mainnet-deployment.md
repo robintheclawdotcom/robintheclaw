@@ -1,8 +1,13 @@
 # Mainnet contract deployment
 
-Robin's typed production contract system is deployed on Robinhood Chain mainnet, chain ID 4663.
-The deployment is deliberately halted and unfunded. It establishes the final contract and
-governance boundary without authorizing an agent, configuring a market, or placing capital at risk.
+Robin's original typed singleton contract graph is deployed on Robinhood Chain mainnet, chain ID
+4663. The onchain state below is a historical snapshot of that operator-only canary graph: it is
+halted and unfunded, and it is never used for customer capital.
+
+The current live lane uses `RwaUserVaultFactoryV1` and `MainnetExecutionRegistry` to create an
+isolated non-upgradeable vault, risk manager, adapter, anchor, and execution-key binding per user.
+The factory release and mainnet services are enabled in code. An owner or an ordinary ETH-funded
+relayer may deploy the graph; paymaster sponsorship is not required.
 
 The canonical machine-readable record is
 [`deployments/mainnet.json`](../deployments/mainnet.json). The factory deployment is
@@ -23,7 +28,7 @@ and the deployment transaction is
 | Vault settlement balance | `0 USDG` |
 | Configured markets and routes | None |
 | Sequencer gate | Unbound and reporting down |
-| Activation stage | Staged |
+| Role in current release | Historical operator canary only |
 
 The deployment entered Robinhood batch `19509`. Its EIP-4844 batch commitment transaction
 [`0x12ff…fced`](https://etherscan.io/tx/0x12ff5f4df0152e1fcbefa96e22eec91e2f7ecaf02e439dcb2be69605016fbced)
@@ -40,7 +45,7 @@ and the absence of an agent, market, route, or sequencer source.
 | Guardian | `0x263e…8969` | Restrict to `REDUCE_ONLY` or `HALTED`; cannot activate, configure, recover, or withdraw |
 
 The Safe is a canonical Safe v1.5.0 proxy with a threshold of two out of three. Its bootstrap owner
-set must be replaced with device-separated operational owners before any capital activation. The
+set must be replaced with device-separated operational owners before this singleton receives capital. The
 timelock is self-administered; the Safe is not a direct timelock administrator, and the executor role
 is not open to the zero address.
 
@@ -86,7 +91,7 @@ zero-hook Uniswap v4 route internally, uses exact temporary approvals, and rejec
 balance deltas. Entry and exit permissions are separate so a disabled entry route does not strand a
 reviewed exit.
 
-## Review evidence
+## Internal review evidence
 
 The deployment release passed 60 Foundry tests, including fuzz coverage of the buy-side accounting
 invariant and focused tests for authorization, governance, recovery, replay, slippage, fresh marking,
@@ -94,21 +99,22 @@ corporate actions, stale feeds, sequencer failure, code-hash pinning, allowance 
 direction, reduce-only exits, and fee-on-transfer rejection. An internal manual review and Slither
 triage found no confirmed permissionless critical or high-severity issue in the deployed typed path.
 
-This is not an independent external audit. The next activation stage includes an independent
-contract audit and executor/key review with no open critical or high findings.
+The repository's internal audit must close and retest every critical or high contract, executor,
+and key finding against the exact release commit.
 
-## Activation sequence
+## Per-user live activation
 
-The contract layer begins from a zero-authority, zero-capital state. Its controlled activation
-sequence is:
+The current customer lane activates one isolated account at a time:
 
-1. bind a reviewed official sequencer-health source through the timelock;
-2. configure a reviewed stock-token oracle and zero-hook spot route;
-3. install the KMS-backed execution agent through the timelock;
-4. rotate the Safe to device-separated operational owners and complete the key review;
-5. complete the independent contract and executor audits;
-6. complete the required capture, shadow, statistical, capacity, recovery, and incident evidence;
-7. obtain written legal and venue approval; and
-8. issue a separate Safe-approved canary authorization and funding plan.
+1. deploy the approved factory and registry release with pinned router, Permit2, token, pool,
+   bytecode, oracle, sequencer, and risk-policy digests;
+2. create the account's non-exportable KMS execution key;
+3. let the owner or an ETH-funded relayer deterministically deploy the per-user graph;
+4. have the owner authorize the fixed agent and deposit USDG while funding the user-owned Lighter
+   subaccount separately with USDC;
+5. fund the execution signer with gas and verify every canonical graph and account binding;
+6. close and retest the internal contract, executor, and key review for the exact release; and
+7. launch when fresh quotes, authenticated venue state, margin, route, oracle, sequencer, nonce,
+   reconciliation, and control checks all pass.
 
-Each transition produces onchain or operational evidence before the next stage advances.
+Every owner retains immediate restriction, revocation, and flat-state withdrawal authority.

@@ -1,6 +1,6 @@
 # Mainnet live-execution observability
 
-This directory contains the disabled-by-default v1 observability contract:
+This directory contains the active-canary v1 observability contract:
 
 - `metrics/contract.v1.json` defines required metric ownership, labels, units, and semantics;
 - `prometheus/rules.v1.yaml` defines stage-reset-aware alerts;

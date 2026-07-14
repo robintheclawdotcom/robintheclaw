@@ -1,66 +1,66 @@
-# Production audit: full system
-
-## Status
-
-This audit is subordinate to [production-audit-mainnet-readiness.md](production-audit-mainnet-readiness.md),
-which contains the current release decision and gate inventory.
-
-The typed strategy contracts are deployed halted and unfunded on Robinhood Chain mainnet. The
-repository also contains durable execution-state machinery, restricted signer services, a
-production-oriented research collector, and an authenticated product application. Capital
-activation remains a separate promotion after these components form a closed, independently
-verified trading system.
-
-## Trust-boundary assessment
-
-The deployed topology separates the public interface, private product API, research collector,
-execution coordinator, Lighter signer, Robinhood signer, and research database. Coordinator and
-signer services enter deployment disabled. Signing keys are not shared across venue boundaries, and
-the coordinator holds no private key.
-
-The product API and future operator control plane are distinct surfaces. The product API handles
-authenticated user workflows and personal-vault preparation. The operator control plane does not
-yet exist; when implemented, it must be private, read-only, identity-aware, and incapable of
-transaction or order submission.
-
-## Activation workstreams
-
-- Authenticated Lighter account, order, fill, collateral, and position events are not yet wired into
-  the durable reconciliation ledger.
-- Canonical Robinhood Chain observations, dual-RPC reconciliation, and Ethereum-final evidence are
-  not yet production-proven.
-- The block-pinned Uniswap v4 execution-authority publisher and live account-risk gate do not yet
-  exist as deployable services.
-- The shadow/research processor, deterministic production replay, promotion artefacts, and required
-  elapsed evidence windows are incomplete.
-- Render, PostgreSQL, R2, production RPC, KMS, telemetry, paging, backup, and restore controls require
-  account-level provisioning and retained verification evidence.
-- Independent contract, execution, key, custody, legal, venue, and operational reviews remain open.
-
-## Security assessment
-
-The execution path is designed to fail closed around replay, authorization scope, control version,
-market configuration, authoritative quotes, unknown transaction outcomes, and recovery. That design
-has not yet been validated against production dependencies or an independent audit. In particular,
-a compromised authenticated collector, quote publisher, RPC pair, KMS policy, or venue subaccount
-could still corrupt the decision boundary if identity, freshness, and reconciliation controls are
-misconfigured.
-
-Separate HMAC keys are required for intent admission, exit and recovery, venue events, market
-authority, and each signer. Startup rejects missing, malformed, or duplicate keys. The Blueprint's
-secret groups express intended distribution but do not replace startup enforcement or account-level
-access review.
-
-## Reliability and performance assessment
-
-The runtime has durable staging and archival boundaries; the coordinator uses leases, append-only
-evidence, native event identities, and durable recovery actions. No production capacity claim is
-justified until the one-hour 2x-peak benchmark, 24-hour chaos test, 72-hour soak, crash-boundary
-tests, database failover, archive reconciliation, and deterministic replay gates produce retained
-evidence.
+# Mainnet live-execution readiness
 
 ## Release decision
 
-The halted, unfunded typed contract deployment is complete and source-verified. Funding and a canary
-remain a separate promotion governed by the complete empirical, legal, venue, audit, key, and
-operational gate set.
+The capped `basis-aapl-v1` mainnet canary and live-execution services are enabled in code and in the
+production Blueprint. The repository's internal audit of the exact release is the audit gate.
+
+This decision enables the live lane; it does not bypass technical account readiness. The control
+plane admits an account only while its canonical binding, funding, signer gas, authenticated venue
+state, executable quotes, margin, oracle and sequencer health, nonces, reconciliation, and kill
+switches are current.
+
+## Released system
+
+The live path includes:
+
+- one isolated, non-upgradeable vault, risk manager, adapter, anchor, and KMS execution key per user;
+- a registry binding execution accounts to approved factory versions, agents, and canonical graphs;
+- account-scoped Lighter and Robinhood signers that resolve credentials and contract bindings privately;
+- authenticated Lighter account-state and Robinhood dual-RPC finality publishers;
+- an executable quote authority and keyless runner for the fixed `basis-aapl-v1` strategy;
+- durable paired-entry, repair, unwind, reconciliation, and account-control state;
+- owner launch, pause, resume, close, and flat-only withdrawal commands;
+- global, strategy, account, guardian, and owner restriction paths.
+
+Users pay deployment gas directly or through an ordinary funded relayer. Execution signers maintain
+their own gas balances. Paymaster sponsorship is optional and is not part of launch readiness.
+
+## Internal audit gate
+
+The exact release is eligible only when repository checks pass and no internal critical or high
+finding remains open across contracts, execution, signing, custody binding, keys, reconciliation,
+and operational recovery. Remediated findings are retested against the release commit and recorded
+with their evidence.
+
+The internal review covers cross-user isolation, unauthorized withdrawal, deterministic deployment,
+owner revocation, halt precedence, oracle and sequencer failure, signer substitution, nonce reuse,
+partial and ambiguous fills, stream gaps, dual-RPC disagreement, reorgs, crash recovery, pause during
+each saga phase, and flat-only close and withdrawal.
+
+## Runtime admission
+
+For every entry, the control plane requires:
+
+1. the approved strategy and risk-policy digests for the execution account;
+2. canonical account, signer, Lighter subaccount, vault, adapter, risk manager, and factory bindings;
+3. verified user funding, Lighter collateral, owner gas where needed, and execution-signer gas;
+4. authenticated venue state and executable quotes less than five seconds old;
+5. at least twice maintenance-margin coverage and no unknown orders or positions;
+6. aligned EVM and Lighter nonces with no unresolved submission ambiguity;
+7. healthy route, oracle, and sequencer quorum;
+8. `ACTIVE` global, strategy, and account controls.
+
+Any cross-account signature, nonce reuse, unapproved send, unresolved ambiguity, or shared integrity
+failure stops new admission. Reduce-only recovery remains available. An account-specific failure
+restricts that tenant unless the evidence indicates a shared failure.
+
+## Current product state
+
+The product exposes the complete agent lifecycle: provision an execution account, associate a
+user-owned Lighter subaccount, deploy and authorize the per-user Robinhood graph, verify funding and
+gas, launch, pause, resume, close, and withdraw after both venues reconcile flat. The UI reports each
+technical readiness item directly and does not depend on a sponsorship policy.
+
+The historical singleton deployment remains an operator-only canary artifact. Customer capital uses
+only isolated per-user graphs created by the approved factory release.

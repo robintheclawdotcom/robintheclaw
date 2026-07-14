@@ -20,9 +20,9 @@ describe("mainnet agent lifecycle", () => {
   });
 
   it("uses commands only at actionable states", () => {
-    expect(agentAction(live("ready"))).toMatchObject({ kind: "command", command: "launch" });
-    expect(agentAction(live("running"))).toMatchObject({ kind: "command", command: "pause" });
-    expect(agentAction(live("paused"))).toMatchObject({ kind: "command", command: "resume" });
+    expect(agentAction(live("ready"))).toEqual({ kind: "command", label: "Launch agent", command: "launch" });
+    expect(agentAction(live("running"))).toEqual({ kind: "command", label: "Pause and unwind", command: "pause" });
+    expect(agentAction(live("paused"))).toEqual({ kind: "command", label: "Resume agent", command: "resume" });
     expect(agentAction(live("blocked"))).toBeNull();
   });
 

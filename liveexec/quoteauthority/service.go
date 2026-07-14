@@ -12,8 +12,10 @@ import (
 )
 
 type AdapterRequest struct {
+	RequestID          string
 	ExecutionAccountID string
 	IntentID           string
+	MarketManifest     string
 	Action             protocol.Action
 	EntryNotional      uint64
 }
@@ -77,8 +79,10 @@ func (s *Service) Quote(ctx context.Context, request protocol.QuoteRequest) (pro
 		entryNotional = protocol.EntryNotionalMicros
 	}
 	result, err := s.adapter.Quote(ctx, AdapterRequest{
+		RequestID:          request.RequestID,
 		ExecutionAccountID: request.ExecutionAccountID,
 		IntentID:           request.IntentID,
+		MarketManifest:     request.MarketManifest,
 		Action:             request.Action,
 		EntryNotional:      entryNotional,
 	})
@@ -107,24 +111,28 @@ func (s *Service) Quote(ctx context.Context, request protocol.QuoteRequest) (pro
 		ObservedAtMS:           result.ObservedAtMS,
 		ExpiresAtMS:            result.ExpiresAtMS,
 	}
+	reconciliationDeadline := uint64(0)
 	if request.Action == protocol.ActionUnwind {
-		reconciliationDeadline, ok := addUint64(result.ExpiresAtMS, protocol.MaximumExitReconciliationMS)
+		var ok bool
+		reconciliationDeadline, ok = addUint64(result.ExpiresAtMS, protocol.MaximumExitReconciliationMS)
 		if !ok {
 			return protocol.QuoteBundle{}, errors.New("exit quote deadlines overflow")
 		}
-		publication, ok := exitPublication(request, result, reconciliationDeadline)
-		if !ok {
-			return protocol.QuoteBundle{}, errors.New("exit quote cannot be persisted")
-		}
-		receipt, err := s.publisher.Publish(ctx, publication)
-		if err != nil {
-			return protocol.QuoteBundle{}, err
-		}
-		if (receipt.Status != "recorded" && receipt.Status != "duplicate") ||
-			receipt.SourceSession != result.DurableSource.Session || receipt.SourceEventID != result.DurableSource.EventID ||
-			!validDigest(receipt.PayloadSHA256) {
-			return protocol.QuoteBundle{}, errors.New("coordinator did not prove quote persistence")
-		}
+	}
+	publication, ok := marketPublication(request, result, reconciliationDeadline)
+	if !ok {
+		return protocol.QuoteBundle{}, errors.New("executable quote cannot be persisted")
+	}
+	receipt, err := s.publisher.Publish(ctx, publication)
+	if err != nil {
+		return protocol.QuoteBundle{}, err
+	}
+	if (receipt.Status != "recorded" && receipt.Status != "duplicate") ||
+		receipt.SourceSession != result.DurableSource.Session || receipt.SourceEventID != result.DurableSource.EventID ||
+		!validDigest(receipt.PayloadSHA256) {
+		return protocol.QuoteBundle{}, errors.New("coordinator did not prove quote persistence")
+	}
+	if request.Action == protocol.ActionUnwind {
 		bundle.ExitAuthority = &protocol.ExitQuoteAuthority{
 			Source:                   "execution-authority",
 			SourceSession:            receipt.SourceSession,
@@ -177,21 +185,34 @@ func validateAdapterResult(action protocol.Action, result AdapterResult, lighter
 	if !ok {
 		return errors.New("adapter returned invalid stock amount")
 	}
+	multiplier, multiplierOK := positiveDecimal(spot.ExpectedUIMultiplier)
+	minimumRound, minimumRoundOK := positiveDecimal(spot.MinOracleRoundID)
+	if !multiplierOK || !minimumRoundOK || multiplier.BitLen() > 256 || minimumRound.BitLen() > 80 ||
+		result.Source.OracleRound != spot.MinOracleRoundID {
+		return errors.New("adapter returned invalid execution policy")
+	}
+	if action == protocol.ActionEntry && perp.Phase != "" {
+		return errors.New("entry quote contains an unwind phase")
+	}
+	if action == protocol.ActionUnwind && perp.Phase != "perp_and_spot" && perp.Phase != "spot_only" {
+		return errors.New("unwind quote phase is invalid")
+	}
+	spotOnly := action == protocol.ActionUnwind && perp.Phase == "spot_only"
 	minimum, ok := positiveDecimal(spot.MinimumAmountOut)
 	if !ok || (action == protocol.ActionEntry && minimum.Cmp(stock) > 0) ||
 		(action == protocol.ActionUnwind && minimum.Cmp(settlement) > 0) ||
-		spot.ReferencePriceMicros == 0 || perp.BaseAmount == 0 || perp.LimitPrice == 0 || perp.MarkPrice == 0 {
+		spot.ReferencePriceMicros == 0 || (!spotOnly && perp.BaseAmount == 0) || perp.LimitPrice == 0 || perp.MarkPrice == 0 {
 		return errors.New("adapter returned invalid executable amounts")
 	}
 	if action == protocol.ActionEntry {
-		if settlement.Cmp(new(big.Int).SetUint64(protocol.EntryNotionalMicros)) != 0 ||
-			perpNotional(perp).Cmp(new(big.Int).SetUint64(protocol.EntryNotionalMicros)) != 0 {
-			return errors.New("entry quote does not match the fixed notional")
+		derivedPerpNotional := perpNotional(perp)
+		cap := new(big.Int).SetUint64(protocol.EntryNotionalMicros)
+		gross := new(big.Int).Add(new(big.Int).Set(settlement), derivedPerpNotional)
+		if settlement.Cmp(cap) > 0 || derivedPerpNotional.Cmp(cap) > 0 || gross.Cmp(new(big.Int).Mul(cap, big.NewInt(2))) > 0 {
+			return errors.New("entry quote exceeds the canary notional caps")
 		}
-		if result.DurableSource != (DurableSource{}) {
-			return errors.New("entry quote contains exit persistence identity")
-		}
-	} else if !validSourcePart(result.DurableSource.Session, 128) ||
+	}
+	if !validSourcePart(result.DurableSource.Session, 128) ||
 		!validSourcePart(result.DurableSource.EventID, 256) || result.DurableSource.Sequence < 0 ||
 		result.DurableSource.ReceivedAtMS < result.ObservedAtMS || result.DurableSource.ReceivedAtMS >= result.ExpiresAtMS ||
 		result.DurableSource.ReceivedAtMS > nowMS {
@@ -200,16 +221,16 @@ func validateAdapterResult(action protocol.Action, result AdapterResult, lighter
 	return nil
 }
 
-func exitPublication(request protocol.QuoteRequest, result AdapterResult, reconciliationDeadline uint64) (protocol.MarketQuotePublication, bool) {
+func marketPublication(request protocol.QuoteRequest, result AdapterResult, reconciliationDeadline uint64) (protocol.MarketQuotePublication, bool) {
 	publisherAt, publisherOK := toInt64(result.ObservedAtMS)
 	receivedAt, receivedOK := toInt64(result.DurableSource.ReceivedAtMS)
 	expiresAt, expiresOK := toInt64(result.ExpiresAtMS)
 	reconciliation, reconciliationOK := toInt64(reconciliationDeadline)
-	if !publisherOK || !receivedOK || !expiresOK || !reconciliationOK {
+	if !publisherOK || !receivedOK || !expiresOK || (request.Action == protocol.ActionUnwind && !reconciliationOK) {
 		return protocol.MarketQuotePublication{}, false
 	}
-	return protocol.MarketQuotePublication{
-		Source:                      "execution-authority",
+	publication := protocol.MarketQuotePublication{
+		Source:                      "lighter-auth",
 		SourceSession:               result.DurableSource.Session,
 		SourceEventID:               result.DurableSource.EventID,
 		SourceSequence:              result.DurableSource.Sequence,
@@ -220,15 +241,37 @@ func exitPublication(request protocol.QuoteRequest, result AdapterResult, reconc
 		LighterMarketIndex:          result.Perp.MarketIndex,
 		QuoteBlockHash:              result.Spot.BlockHash,
 		MarkPrice:                   result.Perp.MarkPrice,
+		ExpectedUIMultiplier:        result.Spot.ExpectedUIMultiplier,
+		MinOracleRoundID:            result.Spot.MinOracleRoundID,
 		PublisherAtMS:               publisherAt,
 		ReceivedAtMS:                receivedAt,
 		ExpiresAtMS:                 expiresAt,
 		IntentID:                    request.IntentID,
 		SpotUnwindAmountIn:          result.Spot.StockAmount,
 		SpotUnwindExpectedAmountOut: result.Spot.SettlementAmount,
+		UnwindPhase:                 result.Perp.Phase,
+		PerpUnwindBaseAmount:        result.Perp.BaseAmount,
+		PerpUnwindLimitPrice:        result.Perp.LimitPrice,
 		SubmissionDeadlineMS:        expiresAt,
 		ReconciliationDeadlineMS:    reconciliation,
-	}, true
+	}
+	if request.Action == protocol.ActionEntry {
+		publication.ExecutionAccountID = ""
+		publication.StrategyManifestSHA256 = ""
+		publication.RouteSHA256 = ""
+		publication.LighterMarketIndex = 0
+		publication.IntentID = ""
+		publication.SpotUnwindAmountIn = ""
+		publication.SpotUnwindExpectedAmountOut = ""
+		publication.UnwindPhase = ""
+		publication.PerpUnwindBaseAmount = 0
+		publication.PerpUnwindLimitPrice = 0
+		publication.SubmissionDeadlineMS = 0
+		publication.ReconciliationDeadlineMS = 0
+	} else {
+		publication.Source = "execution-authority"
+	}
+	return publication, true
 }
 
 func addUint64(left, right uint64) (uint64, bool) {

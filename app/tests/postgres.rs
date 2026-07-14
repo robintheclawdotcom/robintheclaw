@@ -22,6 +22,16 @@ fn deploy_data(owner: &str) -> String {
     )
 }
 
+fn authorize_data(signer: &str) -> String {
+    let selector = Keccak256::digest(b"authorizeInitialAgent(address)");
+    format!(
+        "0x{}{}{}",
+        hex::encode(&selector[..4]),
+        "0".repeat(24),
+        signer.trim_start_matches("0x").to_ascii_lowercase()
+    )
+}
+
 fn random_hash() -> String {
     format!("0x{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
@@ -338,6 +348,226 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
         .unwrap();
     assert_eq!(record.status, "completed");
     assert!(record.owner_actions.is_empty());
+
+    let blocked_command_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO agent_commands (
+            id, agent_id, execution_account_id, idempotency_key, command,
+            status, agent_status, target_agent_status
+        ) VALUES ($1, $2, $3, 'blocked-integration', 'pause',
+                  'processing', 'provisioning', 'paused')
+        "#,
+    )
+    .bind(blocked_command_id)
+    .bind(agent_id)
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO agent_command_outbox (command_id) VALUES ($1)")
+        .bind(blocked_command_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let blocked = store
+        .complete_reconciled_agent_command(
+            blocked_command_id,
+            &"c".repeat(64),
+            Some("coordinator blocked the command"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked.status, "failed");
+    let lifecycle = sqlx::query_as::<_, (String, String, Option<String>)>(
+        r#"
+        SELECT account.status, agent.status, agent.blocked_reason
+        FROM execution_accounts account
+        JOIN agents agent ON agent.id = account.agent_id
+        WHERE account.id = $1
+        "#,
+    )
+    .bind(account_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        lifecycle,
+        (
+            "blocked".into(),
+            "blocked".into(),
+            Some("coordinator blocked the command".into())
+        )
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires APP_TEST_DATABASE_URL"]
+async fn unregistered_agent_closes_locally_without_dispatch() {
+    let database_url = std::env::var("APP_TEST_DATABASE_URL").expect("APP_TEST_DATABASE_URL");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let user_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let account_id = Uuid::new_v4();
+    let did = format!("did:test:{user_id}");
+    sqlx::query("INSERT INTO users (id, privy_did) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(&did)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, user_id, strategy_version, mode, status) VALUES ($1, $2, 'basis-aapl-v1', 'live', 'provisioning')",
+    )
+    .bind(agent_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', '4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a', 'provisioning')",
+    )
+    .bind(account_id)
+    .bind(user_id)
+    .bind(agent_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let store = ProductStore::from_pool(pool.clone());
+    for command in ["launch", "pause", "resume", "withdraw"] {
+        let rejected = store
+            .create_agent_command(
+                &did,
+                agent_id,
+                &format!("pre-registration-{command}"),
+                command,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status, "rejected");
+        assert_eq!(
+            rejected.error_reason.as_deref(),
+            Some("coordinator_account_not_registered")
+        );
+    }
+
+    let mut registration = AccountRegistration {
+        execution_account_id: account_id,
+        agent_id,
+        strategy_version: "basis-aapl-v1".into(),
+        risk_version: "basis-aapl-v1".into(),
+        strategy_manifest_sha256:
+            "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a".into(),
+        lighter_account_index: i64::from(u32::from_be_bytes(
+            account_id.as_bytes()[..4].try_into().unwrap(),
+        )) + 1,
+        lighter_api_key_index: 254,
+        robinhood_owner: random_address().to_ascii_lowercase(),
+        robinhood_vault: random_address().to_ascii_lowercase(),
+        robinhood_signer: random_address().to_ascii_lowercase(),
+        binding_sha256: String::new(),
+    };
+    registration.binding_sha256 = registration.calculate_binding_sha256();
+    sqlx::query(
+        r#"
+        INSERT INTO coordinator_account_registrations (
+            execution_account_id, agent_id, strategy_version, risk_version,
+            strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+            robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(registration.execution_account_id)
+    .bind(registration.agent_id)
+    .bind(&registration.strategy_version)
+    .bind(&registration.risk_version)
+    .bind(&registration.strategy_manifest_sha256)
+    .bind(registration.lighter_account_index)
+    .bind(registration.lighter_api_key_index)
+    .bind(&registration.robinhood_owner)
+    .bind(&registration.robinhood_vault)
+    .bind(&registration.robinhood_signer)
+    .bind(&registration.binding_sha256)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO coordinator_account_registration_outbox (execution_account_id) VALUES ($1)",
+    )
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let closed = store
+        .create_agent_command(&did, agent_id, "pre-registration-close", "close")
+        .await
+        .unwrap();
+    assert_eq!(closed.status, "completed");
+    assert_eq!(closed.agent_status, "closed");
+    assert_eq!(closed.target_agent_status, "closed");
+    assert!(closed.completed_at.is_some());
+    assert!(closed.result_evidence_digest.is_none());
+    assert!(closed.owner_actions.is_empty());
+
+    let replay = store
+        .create_agent_command(&did, agent_id, "pre-registration-close", "close")
+        .await
+        .unwrap();
+    assert_eq!(replay.id, closed.id);
+    let lifecycle = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT account.status, agent.status
+        FROM execution_accounts account
+        JOIN agents agent ON agent.id = account.agent_id
+        WHERE account.id = $1
+        "#,
+    )
+    .bind(account_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lifecycle, ("closed".into(), "closed".into()));
+    let outbox_rows = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM agent_command_outbox outbox
+        JOIN agent_commands command ON command.id = outbox.command_id
+        WHERE command.agent_id = $1
+        "#,
+    )
+    .bind(agent_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(outbox_rows, 0);
+    let registration_state = sqlx::query_as::<_, (String, Option<String>, bool)>(
+        r#"
+        SELECT registration.status, registration.last_error,
+            outbox.delivered_at IS NOT NULL
+        FROM coordinator_account_registrations registration
+        JOIN coordinator_account_registration_outbox outbox USING (execution_account_id)
+        WHERE registration.execution_account_id = $1
+        "#,
+    )
+    .bind(account_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        registration_state,
+        (
+            "blocked".into(),
+            Some("owner_closed_before_registration".into()),
+            true
+        )
+    );
 }
 
 #[tokio::test]
@@ -419,6 +649,8 @@ async fn robinhood_graph_binding_is_immutable_and_provisioner_authoritative() {
         status: "awaiting_deployment".into(),
         deployment_transaction_hash: None,
         deployment_block: None,
+        authorization_transaction_hash: None,
+        authorization_block: None,
         actions: vec![UnsignedAction {
             kind: "deploy_user_graph".into(),
             chain_id: "4663".into(),
@@ -446,25 +678,57 @@ async fn robinhood_graph_binding_is_immutable_and_provisioner_authoritative() {
         .await
         .is_err());
 
-    let transaction_hash = random_hash();
+    let deployment_transaction_hash = random_hash();
     let mut confirmed = prepared;
-    confirmed.status = "active".into();
-    confirmed.actions.clear();
-    confirmed.deployment_transaction_hash = Some(transaction_hash.clone());
+    confirmed.status = "confirming".into();
+    confirmed.actions = vec![UnsignedAction {
+        kind: "authorize_execution_agent".into(),
+        chain_id: "4663".into(),
+        to: confirmed.graph.vault.clone(),
+        value: "0".into(),
+        data: authorize_data(&confirmed.signer_address),
+    }];
+    confirmed.deployment_transaction_hash = Some(deployment_transaction_hash.clone());
     confirmed.deployment_block = Some(123);
     let bound = store
         .apply_robinhood_confirmation(
             &did,
             agent_id,
             pending.request_id,
-            &transaction_hash,
+            &deployment_transaction_hash,
+            &confirmed,
+        )
+        .await
+        .unwrap();
+    assert_eq!(bound.status, "awaiting_signature");
+    assert_eq!(
+        bound.proof_transaction_hash,
+        Some(deployment_transaction_hash)
+    );
+    assert!(bound.robinhood_deployment_action.is_some());
+
+    let authorization_transaction_hash = random_hash();
+    confirmed.status = "active".into();
+    confirmed.actions.clear();
+    confirmed.authorization_transaction_hash = Some(authorization_transaction_hash.clone());
+    confirmed.authorization_block = Some(124);
+    let bound = store
+        .apply_robinhood_confirmation(
+            &did,
+            agent_id,
+            pending.request_id,
+            &authorization_transaction_hash,
             &confirmed,
         )
         .await
         .unwrap();
     assert_eq!(bound.status, "linked");
-    assert_eq!(bound.proof_transaction_hash, Some(transaction_hash));
     assert_eq!(bound.robinhood_deployment_block, Some(123));
+    assert_eq!(
+        bound.robinhood_authorization_transaction_hash,
+        Some(authorization_transaction_hash)
+    );
+    assert_eq!(bound.robinhood_authorization_block, Some(124));
     assert!(bound.robinhood_deployment_action.is_none());
 
     let readiness = store.agent_readiness(&did, agent_id).await.unwrap();

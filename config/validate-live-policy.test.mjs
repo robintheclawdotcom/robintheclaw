@@ -16,6 +16,9 @@ const executionFlags = [
   "ROBINHOOD_SIGNER_ENABLED",
   "ROBIN_QUOTE_AUTHORITY_ENABLED",
   "ROBIN_STRATEGY_RUNNER_ENABLED",
+  "ROBIN_LIVE_SCHEDULER_ENABLED",
+  "ROBIN_LIVE_EVALUATION_ENABLED",
+  "ROBIN_EXIT_QUOTE_PUBLISHER_ENABLED",
 ];
 
 function fixture() {
@@ -48,7 +51,7 @@ function enable(input, stage, accounts, aggregate) {
   }
 }
 
-test("accepts the canonical disabled build policy", () => {
+test("accepts the canonical capped canary policy", () => {
   assert.doesNotThrow(() => validateLivePolicy(fixture()));
 });
 
@@ -67,20 +70,20 @@ test("accepts only the canonical allocations for live stages", () => {
 
 test("rejects a missing required gate even when every remaining value is true", () => {
   const input = fixture();
-  delete input.policy.requiredGates.legalApproval;
+  delete input.policy.requiredGates.internalAudit;
   assert.throws(() => validateLivePolicy(input), /required gates keys/);
 });
 
 test("rejects an unknown gate that replaces a required gate", () => {
   const input = fixture();
-  delete input.policy.requiredGates.legalApproval;
+  delete input.policy.requiredGates.internalAudit;
   input.policy.requiredGates.notARealGate = true;
   assert.throws(() => validateLivePolicy(input), /required gates keys/);
 });
 
 test("rejects non-boolean gates and activation flags", () => {
   const gateInput = fixture();
-  gateInput.policy.requiredGates.legalApproval = "false";
+  gateInput.policy.requiredGates.internalAudit = "false";
   assert.throws(() => validateLivePolicy(gateInput), /required gates must be boolean/);
 
   const flagInput = fixture();
@@ -102,22 +105,22 @@ test("rejects unknown policy and limit fields", () => {
 test("rejects activation with an open gate", () => {
   const input = fixture();
   enable(input, "canary", 1, 25_000_000);
-  input.policy.requiredGates.legalApproval = false;
+  input.policy.requiredGates.oracleReview = false;
   assert.throws(() => validateLivePolicy(input), /open gate/);
 });
 
 test("rejects incongruent execution and capital flags", () => {
   const input = fixture();
-  input.policy.executionEnabled = true;
+  input.policy.capitalActivationAllowed = false;
   assert.throws(() => validateLivePolicy(input), /activation flags must match/);
 });
 
 test("rejects activation flags that disagree with the rollout stage", () => {
   const input = fixture();
-  input.policy.rolloutStage = "canary";
-  input.policy.limits.maxAccounts = 1;
-  input.policy.limits.maxAggregatePerVenueMicros = 25_000_000;
-  assert.throws(() => validateLivePolicy(input), /activation flags are invalid for canary/);
+  input.policy.rolloutStage = "build";
+  input.policy.limits.maxAccounts = 0;
+  input.policy.limits.maxAggregatePerVenueMicros = 0;
+  assert.throws(() => validateLivePolicy(input), /activation flags are invalid for build/);
 });
 
 test("rejects non-canonical canary and cohort allocations", () => {
@@ -139,10 +142,26 @@ test("rejects a raised fixed strategy cap", () => {
 test("requires every blueprint execution flag to match policy activation", () => {
   const disabled = fixture();
   disabled.render = disabled.render.replace(
-    /(key:\s*LIGHTER_SIGNER_ENABLED\s*\n\s*value:\s*["']?)false(["']?)/,
-    "$1true$2",
+    /(key:\s*LIGHTER_SIGNER_ENABLED\s*\n\s*value:\s*["']?)true(["']?)/,
+    "$1false$2",
   );
   assert.throws(() => validateLivePolicy(disabled), /LIGHTER_SIGNER_ENABLED must match/);
+
+  const schedulerDisabled = fixture();
+  schedulerDisabled.render = schedulerDisabled.render.replace(
+    /(key:\s*ROBIN_LIVE_SCHEDULER_ENABLED\s*\n\s*value:\s*["']?)true(["']?)/,
+    "$1false$2",
+  );
+  assert.throws(() => validateLivePolicy(schedulerDisabled), /ROBIN_LIVE_SCHEDULER_ENABLED must match/);
+
+  for (const flag of ["ROBIN_LIVE_EVALUATION_ENABLED", "ROBIN_EXIT_QUOTE_PUBLISHER_ENABLED"]) {
+    const workerDisabled = fixture();
+    workerDisabled.render = workerDisabled.render.replace(
+      new RegExp(`(key:\\s*${flag}\\s*\\n\\s*value:\\s*["']?)true(["']?)`),
+      "$1false$2",
+    );
+    assert.throws(() => validateLivePolicy(workerDisabled), new RegExp(`${flag} must match`));
+  }
 
   const enabled = fixture();
   enable(enabled, "canary", 1, 25_000_000);

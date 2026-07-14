@@ -2,8 +2,8 @@
 
 ## Assets to protect
 
-- Custodied USDG balances in `RwaStrategyVault` and testnet balances in personal vaults.
-- Safe, timelock, guardian, agent, and personal-vault owner authority.
+- Custodied USDG balances in isolated `RwaUserStrategyVaultV1` instances and the historical operator vault.
+- User-owner, registry, guardian, agent, Safe, and timelock authority.
 - Venue credentials and any collateral held outside the vault.
 - Integrity of the disclosed trade-log record.
 - Availability of the owner halt action and public verification path.
@@ -20,7 +20,10 @@ of unobserved market data.
 
 ## Controls in place
 
-- Source-verified typed mainnet contract graph deployed halted and unfunded with a zero agent.
+- Non-upgradeable per-user mainnet graphs with immutable owner and treasury bindings.
+- `MainnetExecutionRegistry` bindings for approved factories, execution accounts, graphs, and agents.
+- One non-exportable KMS execution key and one user-owned Lighter subaccount per execution account.
+- Historical source-verified singleton graph retained only for the operator canary.
 - Canonical 2-of-3 Safe treasury, 48-hour timelock config authority, and restrict-only guardian.
 - No agent-selected target, selector, route, recipient, arbitrary calldata, or declared notional.
 - Intent replay protection and binding to asset, side, amounts, deadline, config version, multiplier,
@@ -29,10 +32,10 @@ of unobserved market data.
   turnover, fresh gross-exposure, market-count, and operating-mode checks.
 - Canonical Universal Router and Permit2 runtime code-hash pinning.
 - Exact temporary approvals, mandatory allowance cleanup, measured vault deltas, and zero adapter retention.
-- Safe-only funding and terminal recovery; Safe-only immediate agent revocation.
+- Owner-only withdrawal and terminal recovery; owner-only immediate agent revocation.
 - One-time vault anchor configuration and strict append-only anchor sequence.
 - Canonical integer-scaled records with finite/range validation before hashing.
-- Testnet proof vault with no execution target.
+- Historical proof vault with no execution target.
 - Ignored secret paths and a repository leak scan before release.
 - Private worker-only R2 credentials and a no-public-IP research database.
 - Runtime contains no signer, wallet material, or venue write client.
@@ -42,36 +45,37 @@ of unobserved market data.
 - Privy server-side wallet resolution, cross-user address uniqueness, and no automatic account merge.
 - Stable smart-account vault ownership independent of the active funding wallet.
 - Idempotent receipt verification against the exact factory event and deployed contract state.
-- Optional sponsorship limited by managed target, selector, and per-account policy.
+- Optional sponsorship limited by managed target, selector, and per-account policy; owner-paid gas is the default fallback.
 - Dedicated application database with user-scoped reads and writes.
 
 ## Known limitations
 
-The production vault does not implement public deposits, shares, pooled NAV, a perp adapter, or
-off-chain fill reconciliation. USDG treasury funding is Safe-controlled, and the deployed spot
-adapter has no configured market. Perpetual execution, margin management, paired-leg repair, and
-continuous reconciliation remain in the private execution layer.
+The live strategy is intentionally fixed to long AAPL Stock Token and short the matching Lighter
+perpetual. It does not accept user-selected markets, leverage, routes, calldata, thresholds, or
+strategy code. The vault is not a pooled fund and does not issue shares. Perpetual execution,
+margin management, paired-leg repair, and continuous reconciliation run in the private execution
+layer rather than inside the EVM vault.
 
-The Safe owner set is still bootstrap custody and must move to device-separated operational owners
-before capital activation. The one-time sequencer gate remains unbound until a reviewed official
-source exists. USDG is treated as one settlement dollar by the contract; depeg handling is an
-operational halt condition.
+The historical singleton remains halted and unfunded until used for an operator canary; it is not a
+customer custody path. USDG is treated as one settlement dollar by the contract, so depeg evidence
+restricts admission operationally. Oracle or sequencer quorum failure also fails closed.
 
 The anchor cannot force record publication. It can prove a published batch was committed, and it
 can make an absence of a matching publication visible to observers.
 
-## Required controls for capital activation
+## Live admission controls
 
-1. Verified venue contract/API specification and authenticated testnet order lifecycle.
-2. Simulate-before-send, explicit slippage, partial-fill hedge/unwind, and reconciliation logic.
-3. Perp collateral, leverage, liquidation, funding, and margin-health controls.
-4. Sequencer/oracle staleness policy and a venue-mark fallback with bounded exposure.
-5. Independent smart-contract audit and an operational key-management review.
-6. Human per-trade approval for the first capped mainnet experiments.
+1. Verified account, factory, vault, signer, Lighter subaccount, route, and code-hash bindings.
+2. Simulate-before-send, explicit slippage, partial-fill repair, bounded unwind, and reconciliation.
+3. Current collateral, maintenance margin, liquidation distance, funding, and position evidence.
+4. Fresh executable quotes plus fail-closed oracle and sequencer quorum.
+5. Aligned account-scoped EVM and Lighter nonces with no unknown orders, positions, or sends.
+6. No open internal critical or high contract, execution, signer, key, or recovery finding.
+7. `ACTIVE` global, strategy, and account controls, with reduce-only recovery always available.
 
-The typed mainnet boundary already enforces the onchain portion of this list. The remaining controls
-govern its staged transition from a halted deployment to a separately approved canary.
+User launch is the explicit instruction to start the fixed strategy; per-trade approval is not
+required.
 
-The generic `MandateGuard`/personal-vault call path is testnet-only and is not a production venue
-adapter. Mainnet custody uses only `RwaStrategyVault`, `MandateRiskManagerV1`,
-`UniswapV4SpotAdapter`, and the associated Safe/timelock governance boundary.
+The generic `MandateGuard`/personal-vault call path remains a historical proof path and is not a
+production venue adapter. Customer mainnet custody uses only graphs created by the approved
+`RwaUserVaultFactoryV1` release and bound through `MainnetExecutionRegistry`.

@@ -95,9 +95,7 @@ func activatePublisherCredential(t *testing.T, server *server, lighter *fakeLigh
 	link, err := server.service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
-		AccountIndex:       42,
 		APIKeyIndex:        4,
-		Nonce:              7,
 	})
 	if err != nil {
 		t.Fatal(err)

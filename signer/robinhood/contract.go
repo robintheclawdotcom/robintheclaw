@@ -10,8 +10,9 @@ import (
 )
 
 const vaultABIJSON = `[
-  {"type":"function","name":"executeSpot","stateMutability":"nonpayable","inputs":[{"name":"intent","type":"tuple","components":[{"name":"id","type":"bytes32"},{"name":"stockToken","type":"address"},{"name":"side","type":"uint8"},{"name":"amountIn","type":"uint128"},{"name":"minAmountOut","type":"uint128"},{"name":"deadline","type":"uint64"},{"name":"configVersion","type":"uint64"}]}],"outputs":[{"name":"amountOut","type":"uint256"}]},
+  {"type":"function","name":"executeSpot","stateMutability":"nonpayable","inputs":[{"name":"intent","type":"tuple","components":[{"name":"id","type":"bytes32"},{"name":"stockToken","type":"address"},{"name":"side","type":"uint8"},{"name":"amountIn","type":"uint128"},{"name":"minAmountOut","type":"uint128"},{"name":"expectedUIMultiplier","type":"uint256"},{"name":"minOracleRoundId","type":"uint80"},{"name":"deadline","type":"uint64"},{"name":"configVersion","type":"uint64"}]}],"outputs":[{"name":"amountOut","type":"uint256"}]},
   {"type":"function","name":"agent","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+  {"type":"function","name":"agentEnabled","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"}]},
   {"type":"function","name":"riskManager","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"spotAdapter","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"settlementAsset","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
@@ -32,24 +33,28 @@ const vaultABIJSON = `[
 var vaultABI = mustABI(vaultABIJSON)
 
 type abiSpotIntent struct {
-	ID            [32]byte       `abi:"id"`
-	StockToken    common.Address `abi:"stockToken"`
-	Side          uint8          `abi:"side"`
-	AmountIn      *big.Int       `abi:"amountIn"`
-	MinAmountOut  *big.Int       `abi:"minAmountOut"`
-	Deadline      uint64         `abi:"deadline"`
-	ConfigVersion uint64         `abi:"configVersion"`
+	ID                   [32]byte       `abi:"id"`
+	StockToken           common.Address `abi:"stockToken"`
+	Side                 uint8          `abi:"side"`
+	AmountIn             *big.Int       `abi:"amountIn"`
+	MinAmountOut         *big.Int       `abi:"minAmountOut"`
+	ExpectedUIMultiplier *big.Int       `abi:"expectedUIMultiplier"`
+	MinOracleRoundID     *big.Int       `abi:"minOracleRoundId"`
+	Deadline             uint64         `abi:"deadline"`
+	ConfigVersion        uint64         `abi:"configVersion"`
 }
 
 func packExecuteSpot(intent SpotIntent) ([]byte, error) {
 	return vaultABI.Pack("executeSpot", abiSpotIntent{
-		ID:            intent.ID,
-		StockToken:    intent.StockToken,
-		Side:          uint8(intent.Side),
-		AmountIn:      intent.AmountIn,
-		MinAmountOut:  intent.MinAmountOut,
-		Deadline:      intent.Deadline,
-		ConfigVersion: intent.ConfigVersion,
+		ID:                   intent.ID,
+		StockToken:           intent.StockToken,
+		Side:                 uint8(intent.Side),
+		AmountIn:             intent.AmountIn,
+		MinAmountOut:         intent.MinAmountOut,
+		ExpectedUIMultiplier: intent.ExpectedUIMultiplier,
+		MinOracleRoundID:     intent.MinOracleRoundID,
+		Deadline:             intent.Deadline,
+		ConfigVersion:        intent.ConfigVersion,
 	})
 }
 
@@ -75,6 +80,18 @@ func unpackHash(method string, output []byte) (common.Hash, error) {
 		return common.Hash{}, errors.New("invalid contract hash response")
 	}
 	return common.BytesToHash(value[:]), nil
+}
+
+func unpackBool(method string, output []byte) (bool, error) {
+	values, err := vaultABI.Unpack(method, output)
+	if err != nil || len(values) != 1 {
+		return false, errors.New("invalid contract response")
+	}
+	value, ok := values[0].(bool)
+	if !ok {
+		return false, errors.New("invalid contract boolean response")
+	}
+	return value, nil
 }
 
 func mustABI(source string) abi.ABI {

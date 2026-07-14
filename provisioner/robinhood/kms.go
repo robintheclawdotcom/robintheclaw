@@ -18,6 +18,7 @@ type kmsAPI interface {
 	CreateAlias(context.Context, *awskms.CreateAliasInput, ...func(*awskms.Options)) (*awskms.CreateAliasOutput, error)
 	DescribeKey(context.Context, *awskms.DescribeKeyInput, ...func(*awskms.Options)) (*awskms.DescribeKeyOutput, error)
 	GetPublicKey(context.Context, *awskms.GetPublicKeyInput, ...func(*awskms.Options)) (*awskms.GetPublicKeyOutput, error)
+	ListResourceTags(context.Context, *awskms.ListResourceTagsInput, ...func(*awskms.Options)) (*awskms.ListResourceTagsOutput, error)
 }
 
 type kmsKey struct {
@@ -74,6 +75,10 @@ func (value *keyProvisioner) ensure(ctx context.Context, executionID string) (km
 		return kmsKey{}, errors.New("Robinhood execution key metadata mismatch")
 	}
 	keyID := *described.KeyMetadata.Arn
+	tags, err := value.client.ListResourceTags(ctx, &awskms.ListResourceTagsInput{KeyId: &keyID})
+	if err != nil || !hasTag(tags, "service", "robinhood-provisioner") || !hasTag(tags, "executionAccountId", executionID) {
+		return kmsKey{}, errors.New("Robinhood execution key ownership mismatch")
+	}
 	output, err := value.client.GetPublicKey(ctx, &awskms.GetPublicKeyInput{KeyId: &keyID})
 	if err != nil || output.KeySpec != types.KeySpecEccSecgP256k1 || output.KeyUsage != types.KeyUsageTypeSignVerify {
 		return kmsKey{}, errors.New("read Robinhood execution public key")
@@ -91,6 +96,18 @@ func (value *keyProvisioner) ensure(ctx context.Context, executionID string) (km
 		return kmsKey{}, errors.New("Robinhood execution public key produced zero address")
 	}
 	return kmsKey{ID: keyID, Address: address}, nil
+}
+
+func hasTag(output *awskms.ListResourceTagsOutput, key, value string) bool {
+	if output == nil {
+		return false
+	}
+	for _, tag := range output.Tags {
+		if tag.TagKey != nil && tag.TagValue != nil && *tag.TagKey == key && *tag.TagValue == value {
+			return true
+		}
+	}
+	return false
 }
 
 func stringsPtr(value string) *string { return &value }

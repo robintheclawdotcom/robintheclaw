@@ -1,14 +1,10 @@
 # Audits
 
-Security reviews of the Robin the Claw contracts and verifier are collected here.
+Security reviews of the Robin the Claw contracts and execution system are collected here.
 
-No third-party audit has been completed yet. The typed contracts are source-verified on mainnet in
-a halted, unfunded state, but they remain pre-external-audit and are not approved for capital
-activation.
+The release audit is performed in-repository and records its exact commit, scope, tests, findings,
+and remediations. It is the audit gate for release. The current review is
+[production-audit-mainnet-live-execution.md](../docs/production-audit-mainnet-live-execution.md).
 
-The current audit handoff is [scope-v1.md](scope-v1.md). It freezes the deployed mainnet scope and
-defines the invariants an independent review must assess.
-
-When a review is completed, the report is added here along with its exact scope: the commit hash
-reviewed, the contracts covered, and the resolution of each finding. Releases reference the audit
-that applies to them.
+[scope-v1.md](scope-v1.md) defines the contract and execution invariants for that review. Every
+release must reference an audit covering its exact source and reproducible bytecode.

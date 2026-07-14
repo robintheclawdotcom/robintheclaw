@@ -5,12 +5,19 @@ export function canonicalDeploymentAction(binding: ExecutionBindingRecord) {
   const owner = binding.ownerAddress.toLowerCase();
   const factory = binding.robinhoodFactoryAddress?.toLowerCase();
   if (!action || !/^0x[0-9a-f]{40}$/.test(owner) || !factory) return false;
-  const expectedData = `0x4c96a389${"0".repeat(24)}${owner.slice(2)}`;
-  return action.kind === "deploy_user_graph"
-    && action.chainId === "4663"
-    && action.value === "0"
-    && action.to.toLowerCase() === factory
-    && action.data.toLowerCase() === expectedData;
+  if (action.chainId !== "4663" || action.value !== "0") return false;
+  if (action.kind === "deploy_user_graph") {
+    const expectedData = `0x4c96a389${"0".repeat(24)}${owner.slice(2)}`;
+    return action.to.toLowerCase() === factory && action.data.toLowerCase() === expectedData;
+  }
+  if (action.kind === "authorize_execution_agent") {
+    const vault = binding.robinhoodVaultAddress?.toLowerCase();
+    const signer = binding.robinhoodSignerAddress?.toLowerCase();
+    if (!vault || !signer) return false;
+    const expectedData = `0xa7d1c2a0${"0".repeat(24)}${signer.slice(2)}`;
+    return action.to.toLowerCase() === vault && action.data.toLowerCase() === expectedData;
+  }
+  return false;
 }
 
 export function canonicalOwnerActionSet(

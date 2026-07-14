@@ -19,6 +19,11 @@ const (
 	statusBlocked    = "blocked"
 )
 
+var (
+	errNoEmptySubaccount         = errors.New("no eligible empty Lighter subaccount found; create a new empty subaccount in the Lighter app, then retry")
+	errAmbiguousEmptySubaccounts = errors.New("multiple eligible empty Lighter subaccounts found; leave exactly one new empty subaccount, then retry")
+)
+
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 type binding struct {

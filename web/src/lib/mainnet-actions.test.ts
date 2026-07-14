@@ -31,6 +31,8 @@ function deployment(): ExecutionBindingRecord {
       data: `0x4c96a389${"0".repeat(24)}${owner.slice(2)}`,
       value: "0",
     },
+    robinhoodAuthorizationTransactionHash: null,
+    robinhoodAuthorizationBlock: null,
     publicIdentifier: vault,
     publicKey: null,
     associationPayload: null,
@@ -52,6 +54,22 @@ describe("mainnet owner actions", () => {
     expect(canonicalDeploymentAction({
       ...binding,
       robinhoodDeploymentAction: { ...binding.robinhoodDeploymentAction!, data: "0x4c96a389" },
+    })).toBe(false);
+  });
+
+  it("accepts only the canonical owner agent authorization", () => {
+    const binding = deployment();
+    binding.robinhoodDeploymentAction = {
+      kind: "authorize_execution_agent",
+      chainId: "4663",
+      to: vault,
+      data: `0xa7d1c2a0${"0".repeat(24)}${binding.robinhoodSignerAddress!.slice(2)}`,
+      value: "0",
+    };
+    expect(canonicalDeploymentAction(binding)).toBe(true);
+    expect(canonicalDeploymentAction({
+      ...binding,
+      robinhoodDeploymentAction: { ...binding.robinhoodDeploymentAction, to: factory },
     })).toBe(false);
   });
 

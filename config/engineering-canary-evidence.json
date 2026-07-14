@@ -1,0 +1,13 @@
+{
+  "approval_type": "engineering_canary",
+  "max_accounts": 1,
+  "max_leg_notional_micros": 25000000,
+  "max_gross_notional_micros": 50000000,
+  "max_daily_turnover_micros": 50000000,
+  "max_leverage_ppm": 1000000,
+  "internal_audit_sha256": "d271fbd0579d1e2753cf5d1e763a4973beb18552426c309994d56e3f81d8f39c",
+  "internal_audit_approved": true,
+  "executor_review_approved": true,
+  "key_review_approved": true,
+  "restore_drill_approved": true
+}

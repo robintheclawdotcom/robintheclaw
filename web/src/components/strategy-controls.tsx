@@ -80,8 +80,6 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
   const [robinhoodTransactionHash, setRobinhoodTransactionHash] = useState<string | null>(null);
   const [lifecycleCommand, setLifecycleCommand] = useState<AgentCommandRecord | null>(null);
   const [submittedOwnerActions, setSubmittedOwnerActions] = useState<string[]>([]);
-  const [lighterAccountIndex, setLighterAccountIndex] = useState("");
-  const [lighterNonce, setLighterNonce] = useState("0");
   const [robinhoodDepositAmount, setRobinhoodDepositAmount] = useState("");
   const [lighterOwner, setLighterOwner] = useState<string>(auth.embeddedAddress ?? auth.accounts[0]?.address ?? "");
   useEffect(() => {
@@ -117,11 +115,7 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
   const lighter = useMutation({
     mutationFn: () => {
       if (!agent || !lighterOwner) throw new Error("Link an execution wallet first.");
-      const accountIndex = Number(lighterAccountIndex);
-      const nonce = Number(lighterNonce);
-      if (!Number.isSafeInteger(accountIndex) || accountIndex <= 0) throw new Error("Enter the new Lighter subaccount index.");
-      if (!Number.isSafeInteger(nonce) || nonce < 0) throw new Error("Enter the current Lighter change nonce.");
-      return api.requestLighterLink(agent.id, lighterOwner, accountIndex, nonce);
+      return api.requestLighterLink(agent.id, { ownerAddress: lighterOwner });
     },
     onSuccess: (binding) => {
       setLighterBinding(binding);
@@ -167,23 +161,27 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
         throw new Error("The prepared Robinhood deployment is invalid.");
       }
       const key = deploymentStorageKey(robinhoodBinding.requestId);
-      let transactionHash = readTransactionHashes(key)[0];
-      if (!transactionHash) {
-        transactionHash = await smartWallet.executeMainnetCall(action, robinhoodBinding.ownerAddress, (submitted) => {
-          window.localStorage.setItem(key, JSON.stringify([submitted]));
+      const hashes = readTransactionHashes(key);
+      const actionIndex = action.kind === "deploy_user_graph" ? 0 : 1;
+      if (!hashes[actionIndex]) {
+        await smartWallet.executeMainnetCall(action, robinhoodBinding.ownerAddress, (submitted) => {
+          hashes[actionIndex] = submitted;
+          window.localStorage.setItem(key, JSON.stringify(hashes));
           setRobinhoodTransactionHash(submitted);
         });
       }
+      const transactionHash = hashes[actionIndex];
+      if (!transactionHash) throw new Error("The verified deployment transaction is unavailable.");
       const binding = await api.confirmRobinhood(agent.id, {
         requestId: robinhoodBinding.requestId,
         transactionHash,
       });
-      window.localStorage.removeItem(key);
+      if (binding.status === "linked") window.localStorage.removeItem(key);
       return binding;
     },
     onSuccess: (binding) => {
       setRobinhoodBinding(binding);
-      setRobinhoodTransactionHash(null);
+      setRobinhoodTransactionHash(binding.status === "linked" ? null : binding.proofTransactionHash);
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       void queryClient.invalidateQueries({ queryKey: ["agent-readiness"] });
     },
@@ -276,7 +274,7 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
         <span className={`status-pill ${state?.canLaunch ? "running" : "halted"}`}>{state?.canLaunch ? "Ready" : "Blocked"}</span>
       </div>
       <small>Strategy: {agent.strategyVersion}</small>
-      <p className="readiness-copy">AAPL only, capped at $25 per leg. Each venue is funded separately. Alchemy sponsorship is optional; ETH is the fallback for every owner-paid transaction.</p>
+      <p className="readiness-copy">AAPL only, capped at $25 per leg. Each venue is funded separately. Owner-paid transactions use Robinhood Chain ETH.</p>
       <div className="readiness-grid">
         {requirements.map((requirement) => (
           <article key={requirement.label}>
@@ -300,16 +298,14 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
         <>
           {canProvision && <><div className="button-row">
             <label>Lighter owner<select value={lighterOwner} onChange={(event) => setLighterOwner(event.target.value)}>{auth.accounts.map((account) => <option key={account.address} value={account.address}>{account.label}</option>)}</select></label>
-            <label>Lighter subaccount index<input inputMode="numeric" value={lighterAccountIndex} onChange={(event) => setLighterAccountIndex(event.target.value)} /></label>
-            <label>Lighter change nonce<input inputMode="numeric" value={lighterNonce} onChange={(event) => setLighterNonce(event.target.value)} /></label>
           </div><div className="button-row">
-            <button className="button button-secondary" disabled={lighter.isPending} onClick={() => lighter.mutate()}>{lighter.isPending ? "Requesting…" : "Request Lighter provisioning"}</button>
+            <button className="button button-secondary" disabled={lighter.isPending} onClick={() => lighter.mutate()}>{lighter.isPending ? "Checking Lighter…" : "Find empty Lighter subaccount"}</button>
             {(lighterBinding?.status === "awaiting_signature" || lighterBinding?.status === "verifying") && lighterBinding.associationPayload && <button className="button button-primary" disabled={lighterConfirm.isPending} onClick={() => lighterConfirm.mutate()}>{lighterConfirm.isPending ? "Verifying…" : lighterBinding.status === "verifying" ? "Retry Lighter verification" : "Sign Lighter association"}</button>}
             <button className="button button-secondary" disabled={robinhood.isPending} onClick={() => robinhood.mutate()}>{robinhood.isPending ? "Preparing…" : "Prepare Robinhood deployment"}</button>
-            {robinhoodBinding?.status === "awaiting_signature" && robinhoodBinding.robinhoodDeploymentAction && <button className="button button-primary" disabled={robinhoodDeploy.isPending || smartWallet.pending} onClick={() => robinhoodDeploy.mutate()}>{robinhoodDeploy.isPending ? "Confirming…" : robinhoodTransactionHash ? "Retry finality check" : "Deploy with owner ETH"}</button>}
-          </div></>}
+            {robinhoodBinding?.status === "awaiting_signature" && robinhoodBinding.robinhoodDeploymentAction && <button className="button button-primary" disabled={robinhoodDeploy.isPending || smartWallet.pending} onClick={() => robinhoodDeploy.mutate()}>{robinhoodDeploy.isPending ? "Confirming…" : robinhoodBinding.robinhoodDeploymentAction.kind === "authorize_execution_agent" ? "Authorize execution agent" : robinhoodTransactionHash ? "Retry finality check" : "Deploy with owner ETH"}</button>}
+          </div><small>Robin finds a new empty non-master subaccount owned by this wallet. If none is available, <a href="https://app.lighter.xyz/" target="_blank" rel="noreferrer">create an empty subaccount in Lighter ↗</a>, then retry.</small></>}
           <div className="button-row">
-            {!matchesTerminal(agent.status) && <button className="button button-quiet danger" disabled={lifecycle.isPending} onClick={() => lifecycle.mutate("close")}>Request close</button>}
+            {!matchesTerminal(agent.status) && <button className="button button-quiet danger" disabled={lifecycle.isPending} onClick={() => lifecycle.mutate("close")}>Close agent</button>}
             {agent.status === "closed" && <button className="button button-secondary" disabled={lifecycle.isPending || !state?.reconciled} onClick={() => lifecycle.mutate("withdraw")}>Prepare owner withdrawal</button>}
           </div>
           {currentCommand?.status === "awaiting_signature" && currentCommand.ownerActions.length > 0 && <button className="button button-primary" disabled={ownerAction.isPending || smartWallet.pending || submittedOwnerActions.length === currentCommand.ownerActions.length} onClick={() => ownerAction.mutate()}>{ownerAction.isPending ? "Submitting…" : submittedOwnerActions.length === currentCommand.ownerActions.length ? "Awaiting reconciliation" : "Sign owner withdrawal"}</button>}

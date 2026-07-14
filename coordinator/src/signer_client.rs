@@ -81,6 +81,8 @@ pub struct RobinhoodSpotIntent {
     pub side: String,
     pub amount_in: String,
     pub min_amount_out: String,
+    pub expected_ui_multiplier: String,
+    pub min_oracle_round_id: String,
     pub deadline: u64,
     pub config_version: u64,
 }
@@ -700,6 +702,8 @@ mod tests {
                 side: "buy_spot".into(),
                 amount_in: "25000000".into(),
                 min_amount_out: "1990000".into(),
+                expected_ui_multiplier: "500000000000000000".into(),
+                min_oracle_round_id: "1".into(),
                 deadline: 1_800_000_001,
                 config_version: 1,
             },

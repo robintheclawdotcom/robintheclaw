@@ -102,7 +102,7 @@ func TestHMACNonceCannotBeReplayed(t *testing.T) {
 
 func TestPrepareReturnsOnlyPublicAssociationData(t *testing.T) {
 	server, _ := newTestServer()
-	body := `{"executionAccountId":"11111111-1111-4111-8111-111111111111","ownerAddress":"0x1111111111111111111111111111111111111111","accountIndex":42,"apiKeyIndex":4,"nonce":7}`
+	body := `{"executionAccountId":"11111111-1111-4111-8111-111111111111","ownerAddress":"0x1111111111111111111111111111111111111111","apiKeyIndex":4}`
 	response := httptest.NewRecorder()
 	server.handler().ServeHTTP(response, signedRequest(t, server, "/v1/links/prepare", body, strings.Repeat("a", 32)))
 	if response.Code != http.StatusCreated {
@@ -122,7 +122,7 @@ func TestPrepareReturnsOnlyPublicAssociationData(t *testing.T) {
 func TestSecretBearingPrepareFieldsAreRejected(t *testing.T) {
 	server, _ := newTestServer()
 	for index, field := range []string{"ethereumPrivateKey", "apiPrivateKey", "secretApiKey"} {
-		body := fmt.Sprintf(`{"executionAccountId":"11111111-1111-4111-8111-111111111111","ownerAddress":"0x1111111111111111111111111111111111111111","accountIndex":42,"apiKeyIndex":4,"nonce":7,%q:"forbidden"}`, field)
+		body := fmt.Sprintf(`{"executionAccountId":"11111111-1111-4111-8111-111111111111","ownerAddress":"0x1111111111111111111111111111111111111111","apiKeyIndex":4,%q:"forbidden"}`, field)
 		response := httptest.NewRecorder()
 		nonce := fmt.Sprintf("%032d", index+1)
 		server.handler().ServeHTTP(response, signedRequest(t, server, "/v1/links/prepare", body, nonce))
@@ -132,9 +132,22 @@ func TestSecretBearingPrepareFieldsAreRejected(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsUserSuppliedAccountCoordinates(t *testing.T) {
+	server, _ := newTestServer()
+	for index, field := range []string{`"accountIndex":42`, `"nonce":7`} {
+		body := fmt.Sprintf(`{"executionAccountId":"11111111-1111-4111-8111-111111111111","ownerAddress":"0x1111111111111111111111111111111111111111","apiKeyIndex":4,%s}`, field)
+		response := httptest.NewRecorder()
+		nonce := fmt.Sprintf("coordinate-%023d", index)
+		server.handler().ServeHTTP(response, signedRequest(t, server, "/v1/links/prepare", body, nonce))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("field %s status = %d body=%s", field, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestWithdrawalAndTransferRoutesDoNotExist(t *testing.T) {
 	server, _ := newTestServer()
-	for _, path := range []string{"/v1/withdraw", "/v1/transfer", "/api/v1/sendTx", "/v1/signer/auth-token"} {
+	for _, path := range []string{"/v1/withdraw", "/v1/transfer", "/api/v1/sendTx", "/v1/signer/modify-order", "/v1/signer/auth-token"} {
 		response := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, path, http.NoBody)
 		server.handler().ServeHTTP(response, request)
@@ -162,9 +175,7 @@ func TestSigningBridgeIsAuthenticatedAndReplayProtected(t *testing.T) {
 	link, err := server.service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
-		AccountIndex:       42,
 		APIKeyIndex:        4,
-		Nonce:              7,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -177,7 +188,7 @@ func TestSigningBridgeIsAuthenticatedAndReplayProtected(t *testing.T) {
 	}); err != nil || !linked {
 		t.Fatalf("activate credential: linked=%v err=%v", linked, err)
 	}
-	body := fmt.Sprintf(`{"executionAccountId":%q,"intentId":"intent-001","marketIndex":1,"clientOrderIndex":1,"baseAmount":1,"price":1,"isAsk":true,"orderType":0,"timeInForce":0,"reduceOnly":false,"triggerPrice":0,"orderExpiryMs":0,"transaction":{"nonce":9,"expiresAtMs":%d}}`, testExecutionID, server.now().Add(time.Minute).UnixMilli())
+	body := fmt.Sprintf(`{"executionAccountId":%q,"intentId":"intent-001","marketIndex":5,"clientOrderIndex":1,"baseAmount":10000,"price":2500,"isAsk":true,"orderType":0,"timeInForce":0,"reduceOnly":false,"triggerPrice":0,"orderExpiryMs":0,"transaction":{"nonce":8,"expiresAtMs":%d}}`, testExecutionID, server.now().Add(time.Minute).UnixMilli())
 	nonce := strings.Repeat("s", 32)
 	response := httptest.NewRecorder()
 	server.handler().ServeHTTP(response, signedSignerRequest(t, server, "/v1/signer/create-order", body, nonce))

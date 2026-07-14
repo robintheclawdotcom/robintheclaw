@@ -76,6 +76,10 @@ pub struct PairIntent {
     pub minimum_spot_amount_out: u128,
     #[serde(with = "u128_string")]
     pub minimum_unwind_settlement_out: u128,
+    #[serde(with = "u128_string")]
+    pub expected_ui_multiplier: u128,
+    #[serde(with = "u128_string")]
+    pub min_oracle_round_id: u128,
     pub spot_decimals: u8,
     pub spot_config_version: u64,
     pub perp_base_amount: u64,
@@ -202,14 +206,13 @@ impl PairIntent {
             || self.settlement_amount_in == 0
             || self.minimum_spot_amount_out == 0
             || self.minimum_unwind_settlement_out == 0
+            || self.expected_ui_multiplier == 0
+            || self.min_oracle_round_id == 0
             || self.perp_base_amount == 0
         {
             return Err(PairIntentError::EmptyLeg);
         }
         if self.derived_perp_notional_micros() != Some(self.perp_notional_micros) {
-            return Err(PairIntentError::InvalidExecution);
-        }
-        if self.spot_notional_micros != self.perp_notional_micros {
             return Err(PairIntentError::InvalidExecution);
         }
         if self.spot_notional_micros > CANARY_LEG_CAP_MICROS
@@ -240,6 +243,8 @@ impl PairIntent {
         if self.settlement_amount_in != u128::from(self.spot_notional_micros)
             || self.minimum_spot_amount_out > self.raw_spot_amount
             || self.minimum_unwind_settlement_out > self.settlement_amount_in
+            || self.expected_ui_multiplier != self.evidence.ui_multiplier_e18
+            || self.min_oracle_round_id >= (1u128 << 80)
             || self.spot_config_version == 0
             || self.lighter_market_index > i16::MAX as u32
             || self.perp_base_amount > i64::MAX as u64
@@ -274,29 +279,7 @@ impl PairIntent {
         {
             return Err(PairIntentError::ExposureMismatch);
         }
-        if !self
-            .raw_spot_amount
-            .is_multiple_of(u128::from(self.perp_base_amount))
-            || self.minimum_spot_amount_out < u128::from(self.perp_base_amount)
-        {
-            return Err(PairIntentError::ExposureMismatch);
-        }
-        let adjusted_numerator = self
-            .raw_spot_amount
-            .checked_mul(self.evidence.ui_multiplier_e18)
-            .ok_or(PairIntentError::ExposureMismatch)?;
-        let multiplier_scale = 1_000_000_000_000_000_000u128;
-        if !adjusted_numerator.is_multiple_of(multiplier_scale) {
-            return Err(PairIntentError::ExposureMismatch);
-        }
-        let adjusted_spot_units = adjusted_numerator / multiplier_scale;
-        let share_exposure = scale_units(
-            adjusted_spot_units,
-            self.spot_decimals,
-            self.perp_base_decimals,
-        )
-        .ok_or(PairIntentError::ExposureMismatch)?;
-        if share_exposure != u128::from(self.perp_base_amount) {
+        if !self.spot_matches_perp_base(self.raw_spot_amount, self.perp_base_amount) {
             return Err(PairIntentError::ExposureMismatch);
         }
         Ok(())
@@ -309,9 +292,6 @@ impl PairIntent {
         let denominator = u128::from(self.perp_base_amount);
         let filled = u128::from(filled_base);
         let target_numerator = self.raw_spot_amount.checked_mul(filled)?;
-        if !target_numerator.is_multiple_of(denominator) {
-            return None;
-        }
         let target_spot_amount = target_numerator / denominator;
         let settlement_numerator = self.settlement_amount_in.checked_mul(filled)?;
         let settlement_amount_in =
@@ -326,6 +306,20 @@ impl PairIntent {
             minimum_spot_amount_out,
             target_spot_amount,
         })
+    }
+
+    pub fn spot_matches_perp_base(&self, spot_amount: u128, perp_base: u64) -> bool {
+        if spot_amount == 0 || perp_base == 0 {
+            return false;
+        }
+        let Some(adjusted) = spot_amount
+            .checked_mul(self.evidence.ui_multiplier_e18)
+            .map(|value| value / 1_000_000_000_000_000_000u128)
+        else {
+            return false;
+        };
+        scale_units_floor(adjusted, self.spot_decimals, self.perp_base_decimals)
+            == Some(u128::from(perp_base))
     }
 
     pub fn minimum_unwind_output(&self, spot_amount: u128) -> Option<u128> {
@@ -421,7 +415,7 @@ pub(crate) mod u128_string {
     }
 }
 
-fn scale_units(value: u128, from_decimals: u8, to_decimals: u8) -> Option<u128> {
+fn scale_units_floor(value: u128, from_decimals: u8, to_decimals: u8) -> Option<u128> {
     if from_decimals == to_decimals {
         return Some(value);
     }
@@ -429,9 +423,6 @@ fn scale_units(value: u128, from_decimals: u8, to_decimals: u8) -> Option<u128> 
         return value.checked_mul(10u128.checked_pow(u32::from(to_decimals - from_decimals))?);
     }
     let divisor = 10u128.checked_pow(u32::from(from_decimals - to_decimals))?;
-    if !value.is_multiple_of(divisor) {
-        return None;
-    }
     Some(value / divisor)
 }
 
@@ -466,6 +457,8 @@ mod tests {
             settlement_amount_in: 25_000_000,
             minimum_spot_amount_out: 1_990_000,
             minimum_unwind_settlement_out: 24_000_000,
+            expected_ui_multiplier: 500_000_000_000_000_000,
+            min_oracle_round_id: 1,
             spot_decimals: 6,
             spot_config_version: 1,
             perp_base_amount: 1_000_000,
@@ -538,11 +531,11 @@ mod tests {
         let mut value = intent();
         value.evidence.ui_multiplier_e18 = 400_000_000_000_000_000;
         value.derive_identifiers().unwrap();
-        assert_eq!(value.validate(), Err(PairIntentError::ExposureMismatch));
+        assert_eq!(value.validate(), Err(PairIntentError::InvalidExecution));
     }
 
     #[test]
-    fn venue_decimal_scaling_is_exact() {
+    fn venue_decimal_scaling_allows_only_sub_lot_spot_dust() {
         let mut value = intent();
         value.perp_base_amount = 1_000;
         value.perp_base_decimals = 3;
@@ -550,6 +543,10 @@ mod tests {
         assert_eq!(value.validate(), Ok(()));
 
         value.raw_spot_amount = 2_000_001;
+        value.derive_identifiers().unwrap();
+        assert_eq!(value.validate(), Ok(()));
+
+        value.raw_spot_amount = 2_002_000;
         value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::ExposureMismatch));
     }
@@ -592,9 +589,24 @@ mod tests {
     fn uint128_values_use_decimal_strings() {
         let encoded = serde_json::to_value(intent()).unwrap();
         assert_eq!(encoded["raw_spot_amount"], "2000000");
+        assert_eq!(encoded["expected_ui_multiplier"], "500000000000000000");
+        assert_eq!(encoded["min_oracle_round_id"], "1");
         let mut invalid = encoded;
         invalid["raw_spot_amount"] = serde_json::json!(2_000_000);
         assert!(serde_json::from_value::<PairIntent>(invalid).is_err());
+    }
+
+    #[test]
+    fn spot_oracle_bounds_are_enforced() {
+        let mut value = intent();
+        value.expected_ui_multiplier -= 1;
+        value.derive_identifiers().unwrap();
+        assert_eq!(value.validate(), Err(PairIntentError::InvalidExecution));
+
+        let mut value = intent();
+        value.min_oracle_round_id = 1u128 << 80;
+        value.derive_identifiers().unwrap();
+        assert_eq!(value.validate(), Err(PairIntentError::InvalidExecution));
     }
 
     #[test]
@@ -622,10 +634,17 @@ mod tests {
 
         let value = intent();
         assert_eq!(value.derived_perp_notional_micros(), Some(25_000_000));
+
+        let mut value = intent();
+        value.perp_limit_price = 24_999;
+        value.evidence.perp_mark_price = 24_999;
+        value.perp_notional_micros = 24_999_000;
+        value.derive_identifiers().unwrap();
+        assert_eq!(value.validate(), Ok(()));
     }
 
     #[test]
-    fn spot_notional_and_fill_granularity_are_enforced() {
+    fn spot_notional_and_exposure_are_enforced() {
         let mut value = intent();
         value.spot_notional_micros = 1;
         value.settlement_amount_in = 1;
@@ -634,6 +653,10 @@ mod tests {
 
         let mut value = intent();
         value.raw_spot_amount += 1;
+        value.derive_identifiers().unwrap();
+        assert_eq!(value.validate(), Ok(()));
+
+        value.raw_spot_amount += 2_000_000;
         value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::ExposureMismatch));
     }

@@ -65,6 +65,7 @@ func TestExitQuoteRejectsSubstitutedPersistenceAuthority(t *testing.T) {
 	quote.Spot.MinimumAmountOut = "24000000"
 	quote.Perp.Side = "long"
 	quote.Perp.ReduceOnly = true
+	quote.Perp.Phase = "perp_and_spot"
 	quote.ExitAuthority = &ExitQuoteAuthority{
 		Source: "execution-authority", SourceSession: "authority-session-1", SourceEventID: "authority-event-1",
 		SourceSequence: 1, ExecutionAccountID: quote.ExecutionAccountID, IntentID: hashValue("intent"),
@@ -135,7 +136,7 @@ func testQuote() QuoteBundle {
 			AdapterID:   "reviewed-adapter-v1",
 			SpotSource:  "robinhood-rpc-quoter",
 			PerpSource:  "lighter-orderbook",
-			OracleRound: "round-101",
+			OracleRound: "101",
 		},
 		Spot: SpotQuote{
 			Venue:                SpotVenue,
@@ -147,6 +148,8 @@ func testQuote() QuoteBundle {
 			SettlementAmount:     "25000000",
 			StockAmount:          "2000000",
 			MinimumAmountOut:     "1990000",
+			ExpectedUIMultiplier: "500000000000000000",
+			MinOracleRoundID:     "101",
 			ReferencePriceMicros: 25_000_000,
 			BlockHash:            hashValue("block"),
 			ObservedAtMS:         99_000,

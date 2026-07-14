@@ -75,6 +75,7 @@ registration records its hypothesis, parameters, and dataset snapshot before eva
 requires frozen data, embargoed walk-forward tests, realistic net costs, bounded capacity, and
 reproducible results.
 
-Six months of capture and sixty continuous shadow days are the minimum evidence required to argue
-for a durable edge. That evidence supports the staged promotion of the deployed mainnet contract
-layer into controlled capital activation.
+Long capture and continuous shadow windows remain useful evidence for durability and cohort
+expansion. They are not elapsed-time gates for the fixed capped mainnet canary. Canary admission is
+based on the internally audited release and current technical account readiness; ongoing evidence
+governs whether the strategy expands, contracts, or retires.

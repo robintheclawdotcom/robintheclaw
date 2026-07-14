@@ -10,7 +10,7 @@ The Robinhood adapter requires two independent RPC provider hostnames. At the sa
 
 ## Policy activation boundary
 
-`policy_active` is derived only from coordinator state for the exact registered execution account. Global, strategy, and account controls must all be `ACTIVE`; the account and strategy manifest digests must equal the registered digest; exactly one current coordinator AAPL market configuration must match the publisher's pinned Lighter market ID; and venue approval, oracle, sequencer, reconciliation, exit authority, alerting, and safe rotation must all be ready. Missing rows, nulls, overlaps, mismatches, or one false gate publish `false`. This service cannot write any of those controls or gates.
+`policy_active` is derived only from coordinator state for the exact registered execution account. Global and strategy controls must be `ACTIVE`; the account control may be `REDUCE_ONLY` while an otherwise ready account waits for launch, or `ACTIVE` after launch. The account and strategy manifest digests must equal the registered digest; exactly one current coordinator AAPL market configuration must match the publisher's pinned Lighter market ID; and venue approval, oracle, sequencer, reconciliation, exit authority, alerting, and safe rotation must all be ready. Missing rows, nulls, overlaps, mismatches, `HALTED`, or one false gate publish `false`. This readiness evidence never authorizes an entry: the coordinator separately requires global, strategy, and account controls all to be `ACTIVE` when it admits and sends an entry.
 
 ## Configuration
 

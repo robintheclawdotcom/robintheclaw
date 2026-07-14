@@ -101,6 +101,24 @@ func TestRunnerNeverReportsUnpersistedIntent(t *testing.T) {
 	}
 }
 
+func TestRunnerAcceptsHedgedLegsBelowTheCanaryCeiling(t *testing.T) {
+	service, input := validInput(t, protocol.ActionEntry)
+	input.Quotes.Perp.LimitPrice = 24_999
+	input.Quotes.Perp.MarkPrice = 24_999
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+	if err := input.Quotes.Sign(privateKey); err != nil {
+		t.Fatal(err)
+	}
+	output, err := service.Run(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.PairIntent == nil || output.PairIntent.SpotNotionalMicros != 25_000_000 ||
+		output.PairIntent.PerpNotionalMicros != 24_999_000 {
+		t.Fatalf("sub-cap notional was not preserved: %+v", output.PairIntent)
+	}
+}
+
 func TestRunnerEmitsEpisodeBoundReduceOnlyUnwind(t *testing.T) {
 	service, input := validInput(t, protocol.ActionUnwind)
 	pairID := testHash("open-pair")
@@ -256,11 +274,12 @@ func validInput(t *testing.T, action protocol.Action) (*Service, RunRequest) {
 		OraclePolicySHA256:     protocol.OraclePolicySHA256,
 		RiskPolicySHA256:       protocol.RiskPolicySHA256,
 		Action:                 action,
-		Source:                 protocol.SourceIdentity{AdapterID: "reviewed-adapter-v1", SpotSource: "spot", PerpSource: "perp", OracleRound: "round-1"},
+		Source:                 protocol.SourceIdentity{AdapterID: "reviewed-adapter-v1", SpotSource: "spot", PerpSource: "perp", OracleRound: "101"},
 		Spot: protocol.SpotQuote{
 			Venue: protocol.SpotVenue, ChainID: protocol.ChainID, SettlementToken: protocol.SettlementToken,
 			StockToken: protocol.StockToken, Router: protocol.Router, SettlementAmount: "25000000",
 			StockAmount: "2000000", ReferencePriceMicros: 25_000_000, BlockHash: testHash("block"), ObservedAtMS: 99_000,
+			ExpectedUIMultiplier: "500000000000000000", MinOracleRoundID: "101",
 		},
 		Perp: protocol.PerpQuote{
 			Venue: protocol.PerpVenue, Symbol: protocol.Symbol, MarketIndex: 101,
@@ -271,8 +290,8 @@ func validInput(t *testing.T, action protocol.Action) (*Service, RunRequest) {
 	}
 	readiness := Readiness{
 		ExecutionAccountID: "account-canary-1", AgentID: "agent-canary-1", StrategyVersion: protocol.StrategyVersion,
-		StrategyManifestSHA256: protocol.StrategyManifestSHA256, Lifecycle: "ready", GlobalControl: "active",
-		StrategyControl: "active", AccountControl: "active", FullyVerified: true, VaultWired: true, VaultFunded: true,
+		StrategyManifestSHA256: protocol.StrategyManifestSHA256, Lifecycle: "ready", GlobalControl: "ACTIVE",
+		StrategyControl: "ACTIVE", AccountControl: "ACTIVE", FullyVerified: true, VaultWired: true, VaultFunded: true,
 		ExecutionSignerFunded: true, LighterLinked: true, LighterFunded: true, RouteHealthy: true, OracleHealthy: true,
 		SequencerHealthy: true, ObservedAtMS: 99_000,
 	}
@@ -293,10 +312,11 @@ func validInput(t *testing.T, action protocol.Action) (*Service, RunRequest) {
 		quote.Spot.MinimumAmountOut = "24000000"
 		quote.Perp.Side = "long"
 		quote.Perp.ReduceOnly = true
+		quote.Perp.Phase = "perp_and_spot"
 		readiness.Lifecycle = "reducing"
-		readiness.GlobalControl = "reduce_only"
-		readiness.StrategyControl = "reduce_only"
-		readiness.AccountControl = "reduce_only"
+		readiness.GlobalControl = "REDUCE_ONLY"
+		readiness.StrategyControl = "REDUCE_ONLY"
+		readiness.AccountControl = "REDUCE_ONLY"
 		state.Flat = false
 		state.ActiveEpisodes = 1
 		quote.ExitAuthority = &protocol.ExitQuoteAuthority{
@@ -315,6 +335,9 @@ func validInput(t *testing.T, action protocol.Action) (*Service, RunRequest) {
 			ID: quote.SourceEvaluationID, StrategyVersion: protocol.StrategyVersion, StrategyManifestSHA256: protocol.StrategyManifestSHA256,
 			SourceConfigSHA256: protocol.SourceConfigSHA256, DatasetManifest: testHash("dataset"), MarketManifest: testHash("market"),
 			Status: "approved", Action: action, ObservedAtMS: 99_000, EstimatedCostMicros: 10_000,
+			SourceEpisodeID:   "33333333-3333-4333-8333-333333333333",
+			PaperEvaluationID: "44444444-4444-4444-8444-444444444444",
+			PairIntentID:      map[bool]string{true: testHash("open-pair"), false: ""}[action == protocol.ActionUnwind],
 		},
 		Readiness: readiness, AccountState: state, Quotes: quote,
 	}

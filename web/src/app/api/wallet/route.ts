@@ -32,26 +32,19 @@ export async function GET(request: NextRequest) {
     if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
       throw new WalletProxyError(400, "invalid_address", "A valid strategy account address is required.");
     }
-    const apiKey = process.env.ALCHEMY_API_KEY;
-    if (!apiKey) throw new WalletProxyError(503, "wallet_unavailable", "Wallet operations are not configured.");
-    const sponsored = Boolean(process.env.ALCHEMY_POLICY_ID);
-    let balance: string | null = null;
-    if (!sponsored) {
-      const response = await fetch(walletRpcUrl(apiKey), {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "eth_getBalance", params: [address, "latest"] }),
-        cache: "no-store",
-        redirect: "manual",
-        signal: AbortSignal.timeout(15_000),
-      });
-      const payload = await response.json().catch(() => null) as { result?: unknown; error?: unknown } | null;
-      if (!response.ok || payload?.error || typeof payload?.result !== "string" || !/^0x[0-9a-fA-F]+$/.test(payload.result)) {
-        throw new WalletProxyError(502, "wallet_provider_error", "The wallet provider could not read the gas balance.");
-      }
-      balance = payload.result;
+    const response = await fetch(balanceRpcUrl(), {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "eth_getBalance", params: [address, "latest"] }),
+      cache: "no-store",
+      redirect: "manual",
+      signal: AbortSignal.timeout(15_000),
+    });
+    const payload = await response.json().catch(() => null) as { result?: unknown; error?: unknown } | null;
+    if (!response.ok || payload?.error || typeof payload?.result !== "string" || !/^0x[0-9a-fA-F]+$/.test(payload.result)) {
+      throw new WalletProxyError(502, "wallet_provider_error", "The wallet provider could not read the gas balance.");
     }
-    return NextResponse.json({ sponsored, balance }, {
+    return NextResponse.json({ sponsored: false, balance: payload.result }, {
       headers: { "Cache-Control": "no-store", "X-Request-Id": requestId },
     });
   } catch (error) {
@@ -138,6 +131,12 @@ function accessToken(request: NextRequest) {
 
 function walletRpcUrl(apiKey: string) {
   return process.env.ALCHEMY_WALLET_RPC_URL ?? `https://api.g.alchemy.com/v2/${apiKey}`;
+}
+
+function balanceRpcUrl() {
+  return process.env.RH_MAINNET_RPC
+    ?? process.env.APP_RPC_URL
+    ?? "https://rpc.mainnet.chain.robinhood.com";
 }
 
 function jsonError(status: number, code: string, message: string, requestId: string, retryAfter?: number) {

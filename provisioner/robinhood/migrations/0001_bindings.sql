@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS robinhood_execution_bindings (
     spot_adapter_address TEXT NOT NULL UNIQUE CHECK (spot_adapter_address ~ '^0x[0-9a-f]{40}$'),
     deployment_tx_hash TEXT CHECK (deployment_tx_hash IS NULL OR deployment_tx_hash ~ '^0x[0-9a-f]{64}$'),
     deployment_block BIGINT CHECK (deployment_block IS NULL OR deployment_block >= 0),
+    authorization_tx_hash TEXT CHECK (authorization_tx_hash IS NULL OR authorization_tx_hash ~ '^0x[0-9a-f]{64}$'),
+    authorization_block BIGINT CHECK (authorization_block IS NULL OR authorization_block >= 0),
     status TEXT NOT NULL CHECK (status IN (
         'awaiting_deployment', 'confirming', 'active', 'rotation_pending', 'blocked'
     )),
@@ -24,6 +26,14 @@ CREATE TABLE IF NOT EXISTS robinhood_execution_bindings (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE robinhood_execution_bindings
+    ADD COLUMN IF NOT EXISTS authorization_tx_hash TEXT CHECK (
+        authorization_tx_hash IS NULL OR authorization_tx_hash ~ '^0x[0-9a-f]{64}$'
+    ),
+    ADD COLUMN IF NOT EXISTS authorization_block BIGINT CHECK (
+        authorization_block IS NULL OR authorization_block >= 0
+    );
 
 CREATE TABLE IF NOT EXISTS robinhood_provisioner_auth_nonces (
     caller_id TEXT NOT NULL,

@@ -59,21 +59,28 @@ function init(options) {
   });
 }
 
-test("rejects skipped promotion stages", () => {
+test("permits a signed internal canary promotion directly from paper", () => {
   const options = fixture();
   init(options);
+  const promoted = promoteLedger({
+    ...options,
+    toStage: "canary",
+    evidenceSha256: digest("internal canary review"),
+    now: at(1),
+  });
+  assert.equal(promoted.state.stage, "canary");
+  const verified = verifyLedger(options);
+  assert.equal(verified.entries.length, 2);
+  assert.equal(verified.state.stage, "canary");
   assert.throws(
     () => promoteLedger({
       ...options,
-      toStage: "canary",
+      toStage: "public",
       evidenceSha256: digest("invalid skip"),
-      now: at(1),
+      now: at(2),
     }),
-    /invalid promotion transition paper -> canary/,
+    /invalid promotion transition canary -> public/,
   );
-  const verified = verifyLedger(options);
-  assert.equal(verified.entries.length, 1);
-  assert.equal(verified.state.stage, "paper");
 });
 
 test("rejects release digest changes", () => {
@@ -213,7 +220,7 @@ test("trusted checkpoint rejects valid-prefix rollback", () => {
   );
 });
 
-test("operator CLI pins the canonical release and remains non-activating", () => {
+test("operator CLI reports canonical canary activation", () => {
   const options = fixture();
   const privateKeyPath = join(options.directory, "release-key.pem");
   const publicKeyPath = join(options.directory, "release-key.pub.pem");
@@ -240,7 +247,22 @@ test("operator CLI pins the canonical release and remains non-activating", () =>
   assert.equal(status.stage, "paper");
   assert.equal(status.executionEnabled, false);
 
+  const promoted = spawnSync(process.execPath, [
+    cli,
+    "promote",
+    ...common,
+    "--private-key", privateKeyPath,
+    "--evidence-sha256", digest("internal canary audit"),
+    "--to", "canary",
+  ], { encoding: "utf8" });
+  assert.equal(promoted.status, 0, promoted.stderr);
+  const canary = JSON.parse(promoted.stdout);
+  assert.equal(canary.stage, "canary");
+  assert.equal(canary.executionEnabled, true);
+
   const verified = spawnSync(process.execPath, [cli, "verify", ...common], { encoding: "utf8" });
   assert.equal(verified.status, 0, verified.stderr);
-  assert.equal(JSON.parse(verified.stdout).verifiedEntries, 1);
+  const verification = JSON.parse(verified.stdout);
+  assert.equal(verification.verifiedEntries, 2);
+  assert.equal(verification.executionEnabled, true);
 });

@@ -1,5 +1,5 @@
 use alloy_primitives::{keccak256, Address, Bytes, U256};
-use alloy_sol_types::{sol, SolCall};
+use alloy_sol_types::{sol, SolCall, SolValue};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use reqwest::Client;
@@ -68,6 +68,7 @@ pub struct PaperMarket {
     pub fee: u32,
     pub tick_spacing: i32,
     pub hooks: String,
+    pub pool_id: String,
     pub amount_in_raw: String,
     pub perp_taker_fee_ppm: u64,
     pub gas_cost_settlement_raw: String,
@@ -157,6 +158,23 @@ impl PaperConfig {
             anyhow::ensure!(
                 market.tick_spacing != 0,
                 "{} tick spacing is zero",
+                market.symbol
+            );
+            code_hash(&market.pool_id, &format!("{} pool ID", market.symbol))?;
+            let pool_key = PoolKey {
+                currency0,
+                currency1,
+                fee: market.fee.try_into().context("pool fee exceeds uint24")?,
+                tickSpacing: market
+                    .tick_spacing
+                    .try_into()
+                    .context("tick spacing exceeds int24")?,
+                hooks,
+            };
+            let expected_pool_id = format!("{:#x}", keccak256(pool_key.abi_encode()));
+            anyhow::ensure!(
+                market.pool_id.eq_ignore_ascii_case(&expected_pool_id),
+                "{} pool ID does not match its pool key",
                 market.symbol
             );
             anyhow::ensure!(
@@ -997,5 +1015,12 @@ mod tests {
     #[test]
     fn reviewed_config_is_valid() {
         PaperConfig::load("config/mainnet-paper.json").unwrap();
+    }
+
+    #[test]
+    fn reviewed_config_rejects_pool_id_drift() {
+        let mut config = PaperConfig::load("config/mainnet-paper.json").unwrap();
+        config.markets[0].pool_id = format!("0x{}", "00".repeat(32));
+        assert!(config.validate().is_err());
     }
 }

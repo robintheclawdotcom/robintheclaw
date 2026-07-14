@@ -45,7 +45,8 @@ func (f *fakeAdapter) Quote(_ context.Context, request AdapterRequest) (AdapterR
 func TestServicePinsEntryPolicyAndSignsExecutableQuotes(t *testing.T) {
 	publicKey, privateKey, _ := ed25519.GenerateKey(nil)
 	adapter := &fakeAdapter{result: adapterResult(protocol.ActionEntry)}
-	service, err := NewService(adapter, &fakePublisher{}, privateKey, 101)
+	publisher := &fakePublisher{}
+	service, err := NewService(adapter, publisher, privateKey, 101)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,11 +63,29 @@ func TestServicePinsEntryPolicyAndSignsExecutableQuotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if adapter.seen.EntryNotional != protocol.EntryNotionalMicros || adapter.seen.ExecutionAccountID != request.ExecutionAccountID {
+	if adapter.seen.EntryNotional != protocol.EntryNotionalMicros || adapter.seen.ExecutionAccountID != request.ExecutionAccountID ||
+		adapter.seen.RequestID != request.RequestID || adapter.seen.MarketManifest != request.MarketManifest {
 		t.Fatal("adapter did not receive fixed account-scoped request")
 	}
 	if quote.StrategyManifestSHA256 != protocol.StrategyManifestSHA256 || quote.Spot.StockToken != protocol.StockToken {
 		t.Fatal("quote did not pin canonical strategy and route")
+	}
+	if len(publisher.quotes) != 1 || publisher.quotes[0].Source != "lighter-auth" ||
+		publisher.quotes[0].ExpectedUIMultiplier != quote.Spot.ExpectedUIMultiplier || publisher.quotes[0].MinOracleRoundID != quote.Spot.MinOracleRoundID {
+		t.Fatal("entry quote was signed without durable market evidence")
+	}
+	encoded, err := json.Marshal(publisher.quotes[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"unwind_phase", "perp_unwind_base_amount", "perp_unwind_limit_price"} {
+		if _, exists := fields[field]; exists {
+			t.Fatalf("entry publication included exit-only field %q", field)
+		}
 	}
 	if err := quote.Verify(publicKey, 101, 100_000); err != nil {
 		t.Fatalf("authority produced unverifiable quote: %v", err)
@@ -100,6 +119,10 @@ func TestServicePersistsExitAuthorityBeforeSigning(t *testing.T) {
 	if persisted.ExecutionAccountID != request.ExecutionAccountID || persisted.IntentID != request.IntentID ||
 		persisted.RouteSHA256 != protocol.RouteSHA256 || persisted.MarketManifest != request.MarketManifest || persisted.LighterMarketIndex != 101 ||
 		persisted.SpotUnwindAmountIn != result.Spot.StockAmount || persisted.SpotUnwindExpectedAmountOut != result.Spot.SettlementAmount ||
+		persisted.UnwindPhase != result.Perp.Phase || persisted.PerpUnwindBaseAmount != result.Perp.BaseAmount ||
+		persisted.PerpUnwindLimitPrice != result.Perp.LimitPrice ||
+		persisted.ExpectedUIMultiplier != result.Spot.ExpectedUIMultiplier ||
+		persisted.MinOracleRoundID != result.Spot.MinOracleRoundID ||
 		persisted.SubmissionDeadlineMS != int64(result.ExpiresAtMS) || quote.ExitAuthority == nil ||
 		quote.ExitAuthority.PayloadSHA256 == "" || quote.Perp.BaseAmount != 250_000 {
 		t.Fatal("persisted exit authority omitted a bound field")
@@ -128,7 +151,7 @@ func TestServiceRejectsAdapterPolicyViolations(t *testing.T) {
 	_, privateKey, _ := ed25519.GenerateKey(nil)
 	cases := map[string]func(*AdapterResult){
 		"wrong token":       func(result *AdapterResult) { result.Spot.StockToken = "0x0000000000000000000000000000000000000001" },
-		"wrong notional":    func(result *AdapterResult) { result.Spot.SettlementAmount = "24999999" },
+		"over cap":          func(result *AdapterResult) { result.Spot.SettlementAmount = "25000001" },
 		"wrong direction":   func(result *AdapterResult) { result.Perp.Side = "long" },
 		"stale":             func(result *AdapterResult) { result.ExpiresAtMS = 100_000 },
 		"missing source":    func(result *AdapterResult) { result.Source.AdapterID = "" },
@@ -169,30 +192,26 @@ func TestServiceDoesNotMaskAdapterFailure(t *testing.T) {
 }
 
 func adapterResult(action protocol.Action) AdapterResult {
-	spotSide, perpSide, reduceOnly := "buy", "short", false
+	spotSide, perpSide, phase, reduceOnly := "buy", "short", "", false
 	if action == protocol.ActionUnwind {
-		spotSide, perpSide, reduceOnly = "sell", "long", true
+		spotSide, perpSide, phase, reduceOnly = "sell", "long", "perp_and_spot", true
 	}
 	return AdapterResult{
-		Source: protocol.SourceIdentity{AdapterID: "reviewed-adapter-v1", SpotSource: "spot-source", PerpSource: "perp-source", OracleRound: "round-1"},
+		Source: protocol.SourceIdentity{AdapterID: "reviewed-adapter-v1", SpotSource: "spot-source", PerpSource: "perp-source", OracleRound: "101"},
 		Spot: protocol.SpotQuote{
 			Venue: protocol.SpotVenue, ChainID: protocol.ChainID, SettlementToken: protocol.SettlementToken,
 			StockToken: protocol.StockToken, Router: protocol.Router, Side: spotSide,
 			SettlementAmount: "25000000", StockAmount: "2000000", MinimumAmountOut: "1990000",
 			ReferencePriceMicros: 25_000_000, BlockHash: testHash("block"), ObservedAtMS: 99_000,
+			ExpectedUIMultiplier: "500000000000000000", MinOracleRoundID: "101",
 		},
 		Perp: protocol.PerpQuote{
-			Venue: protocol.PerpVenue, Symbol: protocol.Symbol, MarketIndex: 101, Side: perpSide, ReduceOnly: reduceOnly,
+			Venue: protocol.PerpVenue, Symbol: protocol.Symbol, MarketIndex: 101, Side: perpSide, ReduceOnly: reduceOnly, Phase: phase,
 			BaseAmount: 1_000_000, BaseDecimals: 6, PriceDecimals: 3, LimitPrice: 25_000, MarkPrice: 25_000, ObservedAtMS: 99_000,
 		},
-		DurableSource: func() DurableSource {
-			if action != protocol.ActionUnwind {
-				return DurableSource{}
-			}
-			return DurableSource{Session: "authority-session-1", EventID: "authority-event-1", Sequence: 1, ReceivedAtMS: 99_500}
-		}(),
-		ObservedAtMS: 99_000,
-		ExpiresAtMS:  102_000,
+		DurableSource: DurableSource{Session: "authority-session-1", EventID: "authority-event-1", Sequence: 1, ReceivedAtMS: 99_500},
+		ObservedAtMS:  99_000,
+		ExpiresAtMS:   102_000,
 	}
 }
 

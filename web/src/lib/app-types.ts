@@ -154,6 +154,8 @@ export type ExecutionBindingRecord = {
   robinhoodSpotAdapterAddress: string | null;
   robinhoodDeploymentBlock: number | null;
   robinhoodDeploymentAction: RobinhoodDeploymentAction | null;
+  robinhoodAuthorizationTransactionHash: string | null;
+  robinhoodAuthorizationBlock: number | null;
   publicIdentifier: string | null;
   publicKey: string | null;
   associationPayload: string | null;
@@ -161,6 +163,10 @@ export type ExecutionBindingRecord = {
   status: "provisioning" | "awaiting_signature" | "verifying" | "linked" | "rejected";
   createdAt: string;
   updatedAt: string;
+};
+
+export type LighterLinkRequest = {
+  ownerAddress: string;
 };
 
 export type AgentReadiness = {
@@ -203,7 +209,7 @@ export type AgentCommandRecord = {
 };
 
 export type RobinhoodDeploymentAction = {
-  kind: "deploy_user_graph";
+  kind: "deploy_user_graph" | "authorize_execution_agent";
   chainId: "4663";
   to: `0x${string}`;
   data: `0x${string}`;

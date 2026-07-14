@@ -22,12 +22,14 @@ func newTestService() (*service, *memoryStore, *fakeLighter) {
 	lighter := &fakeLighter{recoveredOwner: testOwner}
 	fixedNow := time.Unix(2_000_000_000, 0)
 	return &service{
-		store:             store,
-		envelope:          vault,
-		lighter:           lighter,
-		ttl:               10 * time.Minute,
-		now:               func() time.Time { return fixedNow },
-		publisherMarketID: 5,
+		store:               store,
+		envelope:            vault,
+		lighter:             lighter,
+		ttl:                 10 * time.Minute,
+		now:                 func() time.Time { return fixedNow },
+		publisherMarketID:   5,
+		marketBaseDecimals:  4,
+		marketPriceDecimals: 2,
 	}, store, lighter
 }
 
@@ -37,13 +39,73 @@ func TestPrepareRejectsReservedAPIKeyIndexes(t *testing.T) {
 		_, err := service.prepare(context.Background(), prepareRequest{
 			ExecutionAccountID: testExecutionID,
 			OwnerAddress:       testOwner,
-			AccountIndex:       42,
 			APIKeyIndex:        index,
-			Nonce:              7,
 		})
 		if err == nil || !strings.Contains(err.Error(), "between 4 and 254") {
 			t.Fatalf("reserved API key index %d returned %v", index, err)
 		}
+	}
+}
+
+func TestPrepareDiscoversAccountAndNonceBeforeReservation(t *testing.T) {
+	service, store, lighter := newTestService()
+	lighter.discoveredAccount = 73
+	lighter.nextNonce = 11
+	link, err := service.prepare(context.Background(), prepareRequest{
+		ExecutionAccountID: testExecutionID,
+		OwnerAddress:       testOwner,
+		APIKeyIndex:        4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link.AccountIndex != 73 || link.APIKeyIndex != 4 || lighter.discoveryCalls != 1 || lighter.nonceCalls != 1 {
+		t.Fatalf("link=%+v discoveryCalls=%d nonceCalls=%d", link, lighter.discoveryCalls, lighter.nonceCalls)
+	}
+	record, err := store.Get(context.Background(), testExecutionID, link.LinkID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.AccountIndex != 73 || record.ChangeNonce != 11 {
+		t.Fatalf("reserved account=%d nonce=%d", record.AccountIndex, record.ChangeNonce)
+	}
+}
+
+func TestPrepareDoesNotReserveWhenDiscoveryFails(t *testing.T) {
+	service, store, lighter := newTestService()
+	lighter.discoveryErr = errNoEmptySubaccount
+	_, err := service.prepare(context.Background(), prepareRequest{
+		ExecutionAccountID: testExecutionID,
+		OwnerAddress:       testOwner,
+		APIKeyIndex:        4,
+	})
+	if !errors.Is(err, errNoEmptySubaccount) {
+		t.Fatalf("discovery error = %v", err)
+	}
+	if lighter.nonceCalls != 0 || lighter.generated != 0 {
+		t.Fatalf("nonceCalls=%d generated=%d", lighter.nonceCalls, lighter.generated)
+	}
+	if _, err := store.Latest(context.Background(), testExecutionID); !errors.Is(err, errNotFound) {
+		t.Fatalf("failed discovery reserved a credential: %v", err)
+	}
+}
+
+func TestPrepareCannotReuseSubaccountAcrossExecutionAccounts(t *testing.T) {
+	service, _, _ := newTestService()
+	if _, err := service.prepare(context.Background(), prepareRequest{
+		ExecutionAccountID: testExecutionID,
+		OwnerAddress:       testOwner,
+		APIKeyIndex:        4,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := service.prepare(context.Background(), prepareRequest{
+		ExecutionAccountID: "22222222-2222-4222-8222-222222222222",
+		OwnerAddress:       testOwner,
+		APIKeyIndex:        4,
+	})
+	if !errors.Is(err, errAccountBound) {
+		t.Fatalf("account reuse error = %v", err)
 	}
 }
 
@@ -52,9 +114,7 @@ func TestConfirmBlocksRegisteredKeyMismatch(t *testing.T) {
 	link, err := service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
-		AccountIndex:       42,
 		APIKeyIndex:        4,
-		Nonce:              7,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -84,9 +144,7 @@ func TestRotationBlocksCredentialUseUntilNewCredentialVerifies(t *testing.T) {
 	first, err := service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
-		AccountIndex:       42,
 		APIKeyIndex:        4,
-		Nonce:              7,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -103,12 +161,11 @@ func TestRotationBlocksCredentialUseUntilNewCredentialVerifies(t *testing.T) {
 		t.Fatalf("active credential rejected: %v", err)
 	}
 
+	lighter.nextNonce = 8
 	second, err := service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
-		AccountIndex:       42,
 		APIKeyIndex:        4,
-		Nonce:              8,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -138,9 +195,7 @@ func TestAmbiguousSubmissionIsNeverRebroadcast(t *testing.T) {
 	link, err := service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
-		AccountIndex:       42,
 		APIKeyIndex:        4,
-		Nonce:              7,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -171,9 +226,7 @@ func TestSubmissionResponseMismatchBlocksCredential(t *testing.T) {
 	link, err := service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
-		AccountIndex:       42,
 		APIKeyIndex:        4,
-		Nonce:              7,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -200,9 +253,7 @@ func TestPrepareRetryReturnsExistingAssociation(t *testing.T) {
 	request := prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
-		AccountIndex:       42,
 		APIKeyIndex:        4,
-		Nonce:              7,
 	}
 	first, err := service.prepare(context.Background(), request)
 	if err != nil {
@@ -218,11 +269,16 @@ func TestPrepareRetryReturnsExistingAssociation(t *testing.T) {
 	if lighter.generated != 1 {
 		t.Fatalf("generated credentials = %d", lighter.generated)
 	}
-	request.Nonce++
-	if _, err := service.prepare(context.Background(), request); !errors.Is(err, errRotationOpen) {
-		t.Fatalf("changed retry returned %v", err)
+	lighter.discoveryErr = errNoEmptySubaccount
+	if retry, err := service.prepare(context.Background(), request); err != nil || retry.LinkID != first.LinkID {
+		t.Fatalf("state change broke idempotent retry: link=%+v err=%v", retry, err)
 	}
-	request.Nonce--
+	lighter.discoveryErr = nil
+	lighter.nextNonce = 8
+	if retry, err := service.prepare(context.Background(), request); err != nil || retry.LinkID != first.LinkID {
+		t.Fatalf("nonce change broke idempotent retry: link=%+v err=%v", retry, err)
+	}
+	lighter.nextNonce = 7
 	request.OwnerAddress = "0x2222222222222222222222222222222222222222"
 	if _, err := service.prepare(context.Background(), request); !errors.Is(err, errBindingMismatch) {
 		t.Fatalf("owner substitution returned %v", err)
@@ -234,9 +290,7 @@ func TestSigningStopsDuringRotationAndUsesNewCredentialAfterActivation(t *testin
 	first, err := service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
-		AccountIndex:       42,
 		APIKeyIndex:        4,
-		Nonce:              7,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -252,19 +306,42 @@ func TestSigningStopsDuringRotationAndUsesNewCredentialAfterActivation(t *testin
 	request := createOrderRequest{
 		ExecutionAccountID: testExecutionID,
 		IntentID:           "intent-001",
-		TransactOptions:    transactOptions{Nonce: 9, ExpiresAtMS: service.now().Add(time.Minute).UnixMilli()},
+		MarketIndex:        5,
+		ClientOrderID:      1,
+		BaseAmount:         10_000,
+		Price:              2_500,
+		IsAsk:              true,
+		TransactOptions:    transactOptions{Nonce: 8, ExpiresAtMS: service.now().Add(time.Minute).UnixMilli()},
 	}
 	signed, err := service.signCreateOrder(context.Background(), request)
 	if err != nil || signed.CredentialVersion != 1 {
 		t.Fatalf("sign with first credential: version=%d err=%v", signed.CredentialVersion, err)
 	}
+	retry, err := service.signCreateOrder(context.Background(), request)
+	if err != nil || retry.TxHash != signed.TxHash || retry.CredentialVersion != signed.CredentialVersion {
+		t.Fatalf("exact signing retry was not idempotent: retry=%+v err=%v", retry, err)
+	}
+	substituted := request
+	substituted.Price--
+	if _, err := service.signCreateOrder(context.Background(), substituted); err == nil || !strings.Contains(err.Error(), "another request") {
+		t.Fatalf("same nonce with substituted payload returned %v", err)
+	}
+	substituted = request
+	substituted.IntentID = "intent-999"
+	if _, err := service.signCreateOrder(context.Background(), substituted); err == nil || !strings.Contains(err.Error(), "another request") {
+		t.Fatalf("same nonce with substituted intent returned %v", err)
+	}
+	request.TransactOptions.Nonce = 10
+	if _, err := service.signCreateOrder(context.Background(), request); err == nil || !strings.Contains(err.Error(), "must equal 9") {
+		t.Fatalf("skipped nonce returned %v", err)
+	}
+	request.TransactOptions.Nonce = 8
 
+	lighter.nextNonce = 8
 	second, err := service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
-		AccountIndex:       42,
 		APIKeyIndex:        4,
-		Nonce:              8,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -292,9 +369,7 @@ func TestSigningRejectsCrossAccountSubstitution(t *testing.T) {
 	link, err := service.prepare(context.Background(), prepareRequest{
 		ExecutionAccountID: testExecutionID,
 		OwnerAddress:       testOwner,
-		AccountIndex:       42,
 		APIKeyIndex:        4,
-		Nonce:              7,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -310,6 +385,11 @@ func TestSigningRejectsCrossAccountSubstitution(t *testing.T) {
 	_, err = service.signCreateOrder(context.Background(), createOrderRequest{
 		ExecutionAccountID: "22222222-2222-4222-8222-222222222222",
 		IntentID:           "intent-002",
+		MarketIndex:        5,
+		ClientOrderID:      1,
+		BaseAmount:         10_000,
+		Price:              2_500,
+		IsAsk:              true,
 		TransactOptions:    transactOptions{Nonce: 1, ExpiresAtMS: service.now().Add(time.Minute).UnixMilli()},
 	})
 	if err == nil || !strings.Contains(err.Error(), "no active") {

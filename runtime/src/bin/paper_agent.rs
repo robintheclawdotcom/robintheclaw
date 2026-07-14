@@ -68,10 +68,10 @@ async fn main() -> anyhow::Result<()> {
 
     let config_path = env::var("PAPER_AGENT_CONFIG").unwrap_or_else(|_| CONFIG_PATH.to_string());
     let mut config = PaperConfig::load(&config_path)?;
-    let minimum_net_edge_ppm = env::var("PAPER_MINIMUM_NET_EDGE_PPM")
-        .context("PAPER_MINIMUM_NET_EDGE_PPM is required")?
+    let minimum_net_edge_ppm = env::var("AAPL_MINIMUM_NET_EDGE_PPM")
+        .context("AAPL_MINIMUM_NET_EDGE_PPM is required")?
         .parse()
-        .context("PAPER_MINIMUM_NET_EDGE_PPM must be an integer")?;
+        .context("AAPL_MINIMUM_NET_EDGE_PPM must be an integer")?;
     config.set_minimum_net_edge_ppm(minimum_net_edge_ppm)?;
     let rpc_url = env::var("ROBINHOOD_RPC_URL").context("ROBINHOOD_RPC_URL is required")?;
     let reader = RobinhoodReader::new(rpc_url)?;

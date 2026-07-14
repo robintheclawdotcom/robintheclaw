@@ -13,6 +13,9 @@ type SourceEvaluation struct {
 	Action                 protocol.Action `json:"action"`
 	ObservedAtMS           uint64          `json:"observed_at_ms"`
 	EstimatedCostMicros    uint64          `json:"estimated_cost_micros"`
+	SourceEpisodeID        string          `json:"source_episode_id"`
+	PaperEvaluationID      string          `json:"paper_evaluation_id"`
+	PairIntentID           string          `json:"pair_intent_id"`
 }
 
 type Readiness struct {
@@ -117,6 +120,8 @@ type PairIntent struct {
 	SettlementAmountIn         string         `json:"settlement_amount_in"`
 	MinimumSpotAmountOut       string         `json:"minimum_spot_amount_out"`
 	MinimumUnwindSettlementOut string         `json:"minimum_unwind_settlement_out"`
+	ExpectedUIMultiplier       string         `json:"expected_ui_multiplier"`
+	MinOracleRoundID           string         `json:"min_oracle_round_id"`
 	SpotDecimals               uint8          `json:"spot_decimals"`
 	SpotConfigVersion          uint64         `json:"spot_config_version"`
 	PerpBaseAmount             uint64         `json:"perp_base_amount"`
@@ -150,6 +155,8 @@ type UnwindDirective struct {
 	SpotSide                   string `json:"spot_side"`
 	SpotAmountIn               string `json:"spot_amount_in"`
 	MinimumSettlementAmountOut string `json:"minimum_settlement_amount_out"`
+	ExpectedUIMultiplier       string `json:"expected_ui_multiplier"`
+	MinOracleRoundID           string `json:"min_oracle_round_id"`
 	PerpSide                   string `json:"perp_side"`
 	PerpBaseAmount             uint64 `json:"perp_base_amount"`
 	PerpLimitPrice             uint32 `json:"perp_limit_price"`

@@ -21,10 +21,10 @@ CREATE TABLE execution_promotion_events (
     approved_by TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (
-        (from_state = 'registered' AND to_state IN ('research', 'rejected', 'retired')) OR
-        (from_state = 'research' AND to_state IN ('shadow_eligible', 'rejected', 'retired')) OR
-        (from_state = 'shadow_eligible' AND to_state IN ('shadow', 'rejected', 'retired')) OR
-        (from_state = 'shadow' AND to_state IN ('audit_ready', 'rejected', 'retired')) OR
+        (from_state = 'registered' AND to_state IN ('research', 'canary_eligible', 'rejected', 'retired')) OR
+        (from_state = 'research' AND to_state IN ('shadow_eligible', 'canary_eligible', 'rejected', 'retired')) OR
+        (from_state = 'shadow_eligible' AND to_state IN ('shadow', 'canary_eligible', 'rejected', 'retired')) OR
+        (from_state = 'shadow' AND to_state IN ('audit_ready', 'canary_eligible', 'rejected', 'retired')) OR
         (from_state = 'audit_ready' AND to_state IN ('canary_eligible', 'rejected', 'retired')) OR
         (from_state = 'canary_eligible' AND to_state = 'retired')
     ),

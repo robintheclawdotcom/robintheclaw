@@ -31,8 +31,10 @@ const registryABIJSON = `[
 ]`
 
 const graphABIJSON = `[
+  {"type":"function","name":"authorizeInitialAgent","stateMutability":"nonpayable","inputs":[{"type":"address"}],"outputs":[]},
   {"type":"function","name":"owner","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"agent","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+  {"type":"function","name":"agentEnabled","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"}]},
   {"type":"function","name":"riskManager","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"spotAdapter","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"registry","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
@@ -105,19 +107,77 @@ func (value *chainVerifier) deploymentAction(owner common.Address) (unsignedActi
 	}, nil
 }
 
-func (value *chainVerifier) verifyActive(ctx context.Context, record binding) error {
+func (value *chainVerifier) activationAction(ctx context.Context, record binding) (*unsignedAction, error) {
+	var expected *unsignedAction
 	for index, client := range []chainClient{value.primary, value.secondary} {
 		if err := value.verifyRelease(ctx, client, nil); err != nil {
-			return fmt.Errorf("release verification %d: %w", index+1, err)
+			return nil, fmt.Errorf("release verification %d: %w", index+1, err)
 		}
 		if err := value.verifyGraph(ctx, client, record, nil); err != nil {
-			return fmt.Errorf("graph verification %d: %w", index+1, err)
+			return nil, fmt.Errorf("graph verification %d: %w", index+1, err)
 		}
+		action, err := value.activationActionForRPC(ctx, client, record)
+		if err != nil {
+			return nil, fmt.Errorf("agent verification %d: %w", index+1, err)
+		}
+		if index == 0 {
+			expected = action
+		} else if !sameAction(expected, action) {
+			return nil, errors.New("RPCs disagree on agent authorization")
+		}
+	}
+	return expected, nil
+}
+
+func (value *chainVerifier) activationActionForRPC(ctx context.Context, client chainClient, record binding) (*unsignedAction, error) {
+	return value.activationActionForRPCAtBlock(ctx, client, record, nil)
+}
+
+func (value *chainVerifier) activationActionForRPCAtBlock(ctx context.Context, client chainClient, record binding, block *big.Int) (*unsignedAction, error) {
+	vault := common.HexToAddress(record.Graph.Vault)
+	signer := common.HexToAddress(record.SignerAddress)
+	agent, err := value.readAddressAllowZero(ctx, client, graphABI, vault, "agent", block)
+	if err != nil {
+		return nil, errors.New("read vault agent")
+	}
+	enabled, err := value.readBool(ctx, client, graphABI, vault, "agentEnabled", block)
+	if err != nil {
+		return nil, errors.New("read vault agent authorization")
+	}
+	if agent != (common.Address{}) && agent != signer {
+		return nil, errors.New("vault agent does not match execution signer")
+	}
+	if enabled {
+		if agent != signer {
+			return nil, errors.New("vault enabled an invalid execution agent")
+		}
+		return nil, nil
+	}
+	data, err := graphABI.Pack("authorizeInitialAgent", signer)
+	if err != nil {
+		return nil, errors.New("encode owner agent authorization")
+	}
+	return &unsignedAction{
+		Kind:    "authorize_execution_agent",
+		ChainID: value.config.ChainID.String(),
+		To:      strings.ToLower(vault.Hex()),
+		Value:   "0",
+		Data:    "0x" + strings.ToLower(common.Bytes2Hex(data)),
+	}, nil
+}
+
+func (value *chainVerifier) verifyActive(ctx context.Context, record binding) error {
+	action, err := value.activationAction(ctx, record)
+	if err != nil {
+		return err
+	}
+	if action != nil {
+		return errors.New("owner has not authorized the execution agent")
 	}
 	return nil
 }
 
-func (value *chainVerifier) confirm(ctx context.Context, record binding, txHash common.Hash) (uint64, error) {
+func (value *chainVerifier) confirmDeployment(ctx context.Context, record binding, txHash common.Hash) (uint64, error) {
 	owner := common.HexToAddress(record.OwnerAddress)
 	expectedData, err := factoryABI.Pack("deploy", owner)
 	if err != nil {
@@ -127,13 +187,13 @@ func (value *chainVerifier) confirm(ctx context.Context, record binding, txHash 
 	var confirmedHash common.Hash
 	for index, client := range []chainClient{value.primary, value.secondary} {
 		receipt, err := client.TransactionReceipt(ctx, txHash)
-		if err != nil || receipt == nil || receipt.Status != types.ReceiptStatusSuccessful || receipt.BlockNumber == nil {
+		if err != nil || receipt == nil || receipt.TxHash != txHash || receipt.Status != types.ReceiptStatusSuccessful || receipt.BlockNumber == nil {
 			return 0, errors.New("deployment receipt is not successful on both RPCs")
 		}
 		transaction, pending, err := client.TransactionByHash(ctx, txHash)
 		if err != nil || pending || transaction == nil || transaction.To() == nil ||
 			*transaction.To() != value.config.FactoryAddress || transaction.Value().Sign() != 0 ||
-			transaction.ChainId().Cmp(value.config.ChainID) != 0 || !equalBytes(transaction.Data(), expectedData) {
+			transaction.Hash() != txHash || transaction.ChainId().Cmp(value.config.ChainID) != 0 || !equalBytes(transaction.Data(), expectedData) {
 			return 0, errors.New("deployment transaction does not match prepared factory call")
 		}
 		head, err := client.HeaderByNumber(ctx, nil)
@@ -152,6 +212,53 @@ func (value *chainVerifier) confirm(ctx context.Context, record binding, txHash 
 		}
 		if err := value.verifyGraph(ctx, client, record, block); err != nil {
 			return 0, err
+		}
+	}
+	return confirmedBlock, nil
+}
+
+func (value *chainVerifier) confirmAuthorization(ctx context.Context, record binding, txHash common.Hash) (uint64, error) {
+	expectedData, err := graphABI.Pack("authorizeInitialAgent", common.HexToAddress(record.SignerAddress))
+	if err != nil {
+		return 0, errors.New("encode expected agent authorization")
+	}
+	var confirmedBlock uint64
+	var confirmedHash common.Hash
+	for index, client := range []chainClient{value.primary, value.secondary} {
+		receipt, err := client.TransactionReceipt(ctx, txHash)
+		if err != nil || receipt == nil || receipt.TxHash != txHash || receipt.Status != types.ReceiptStatusSuccessful || receipt.BlockNumber == nil {
+			return 0, errors.New("authorization receipt is not successful on both RPCs")
+		}
+		transaction, pending, err := client.TransactionByHash(ctx, txHash)
+		if err != nil || pending || transaction == nil || transaction.Hash() != txHash || transaction.To() == nil ||
+			*transaction.To() != common.HexToAddress(record.Graph.Vault) || transaction.Value().Sign() != 0 ||
+			transaction.ChainId().Cmp(value.config.ChainID) != 0 || !equalBytes(transaction.Data(), expectedData) {
+			return 0, errors.New("authorization transaction does not match prepared vault call")
+		}
+		sender, err := types.Sender(types.LatestSignerForChainID(value.config.ChainID), transaction)
+		if err != nil || sender != common.HexToAddress(record.OwnerAddress) {
+			return 0, errors.New("authorization transaction was not signed by the vault owner")
+		}
+		head, err := client.HeaderByNumber(ctx, nil)
+		if err != nil || head.Number == nil || head.Number.Uint64() < receipt.BlockNumber.Uint64()+value.config.FinalityBlocks {
+			return 0, errors.New("authorization transaction is not final")
+		}
+		if index == 0 {
+			confirmedBlock = receipt.BlockNumber.Uint64()
+			confirmedHash = receipt.BlockHash
+		} else if receipt.BlockNumber.Uint64() != confirmedBlock || receipt.BlockHash != confirmedHash {
+			return 0, errors.New("RPCs disagree on authorization receipt")
+		}
+		block := receipt.BlockNumber
+		if err := value.verifyRelease(ctx, client, block); err != nil {
+			return 0, err
+		}
+		if err := value.verifyGraph(ctx, client, record, block); err != nil {
+			return 0, err
+		}
+		action, err := value.activationActionForRPCAtBlock(ctx, client, record, block)
+		if err != nil || action != nil {
+			return 0, errors.New("authorization state does not match the bound execution signer")
 		}
 	}
 	return confirmedBlock, nil
@@ -195,7 +302,6 @@ func (value *chainVerifier) verifyGraph(ctx context.Context, client chainClient,
 	vault := common.HexToAddress(record.Graph.Vault)
 	risk := common.HexToAddress(record.Graph.RiskManager)
 	adapter := common.HexToAddress(record.Graph.SpotAdapter)
-	signer := common.HexToAddress(record.SignerAddress)
 	deployed, err := value.readGraph(ctx, client, "graphForOwner", owner, block)
 	if err != nil || deployed != record.Graph {
 		return errors.New("factory graph binding mismatch")
@@ -225,7 +331,6 @@ func (value *chainVerifier) verifyGraph(ctx context.Context, client chainClient,
 		{value.config.RegistryAddress, registryABI, "riskManagerOfVault", risk},
 		{value.config.RegistryAddress, registryABI, "spotAdapterOfVault", adapter},
 		{vault, graphABI, "owner", owner},
-		{vault, graphABI, "agent", signer},
 		{vault, graphABI, "riskManager", risk},
 		{vault, graphABI, "spotAdapter", adapter},
 		{vault, graphABI, "registry", value.config.RegistryAddress},
@@ -246,6 +351,29 @@ func (value *chainVerifier) verifyGraph(ctx context.Context, client chainClient,
 		}
 	}
 	return nil
+}
+
+func (value *chainVerifier) readAddressAllowZero(ctx context.Context, client chainClient, contractABI abi.ABI, contract common.Address, method string, block *big.Int, args ...any) (common.Address, error) {
+	output, err := call(ctx, client, contractABI, contract, method, block, args...)
+	if err != nil {
+		return common.Address{}, err
+	}
+	values, err := contractABI.Unpack(method, output)
+	if err != nil || len(values) != 1 {
+		return common.Address{}, errors.New("invalid address response")
+	}
+	address, ok := values[0].(common.Address)
+	if !ok {
+		return common.Address{}, errors.New("invalid address response")
+	}
+	return address, nil
+}
+
+func sameAction(left, right *unsignedAction) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func (value *chainVerifier) readGraph(ctx context.Context, client chainClient, method string, owner common.Address, block *big.Int) (graph, error) {

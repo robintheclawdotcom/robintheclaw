@@ -17,7 +17,9 @@ var (
 type graphVerifier interface {
 	predict(context.Context, common.Address) (graph, error)
 	deploymentAction(common.Address) (unsignedAction, error)
-	confirm(context.Context, binding, common.Hash) (uint64, error)
+	activationAction(context.Context, binding) (*unsignedAction, error)
+	confirmDeployment(context.Context, binding, common.Hash) (uint64, error)
+	confirmAuthorization(context.Context, binding, common.Hash) (uint64, error)
 	verifyActive(context.Context, binding) error
 }
 
@@ -77,12 +79,21 @@ func (value *service) prepare(ctx context.Context, request prepareRequest) (publ
 		return publicBinding{}, errNotReady
 	}
 	actions := []unsignedAction(nil)
-	if stored.Status != statusActive {
+	switch stored.Status {
+	case statusAwaitingDeployment:
 		action, err := value.chain.deploymentAction(ownerAddress)
 		if err != nil {
 			return publicBinding{}, err
 		}
 		actions = []unsignedAction{action}
+	case statusConfirming:
+		action, err := value.chain.activationAction(ctx, stored)
+		if err != nil {
+			return publicBinding{}, errNotReady
+		}
+		if action != nil {
+			actions = []unsignedAction{*action}
+		}
 	}
 	return stored.public(actions), nil
 }
@@ -99,7 +110,17 @@ func (value *service) status(ctx context.Context, request statusRequest) (public
 	if err != nil {
 		return publicBinding{}, err
 	}
-	return record.public(nil), nil
+	if record.Status != statusConfirming || record.DeploymentBlock == 0 {
+		return record.public(nil), nil
+	}
+	action, err := value.chain.activationAction(ctx, record)
+	if err != nil {
+		return publicBinding{}, errNotReady
+	}
+	if action == nil {
+		return record.public(nil), nil
+	}
+	return record.public([]unsignedAction{*action}), nil
 }
 
 func (value *service) confirm(ctx context.Context, request confirmRequest) (publicBinding, error) {
@@ -107,10 +128,10 @@ func (value *service) confirm(ctx context.Context, request confirmRequest) (publ
 	if err != nil {
 		return publicBinding{}, errInvalidRequest
 	}
-	if len(request.DeploymentTxHash) != 66 || !strings.HasPrefix(request.DeploymentTxHash, "0x") || common.HexToHash(request.DeploymentTxHash) == (common.Hash{}) {
+	if len(request.TransactionHash) != 66 || !strings.HasPrefix(request.TransactionHash, "0x") || common.HexToHash(request.TransactionHash) == (common.Hash{}) {
 		return publicBinding{}, errInvalidRequest
 	}
-	txHash := strings.ToLower(common.HexToHash(request.DeploymentTxHash).Hex())
+	txHash := strings.ToLower(common.HexToHash(request.TransactionHash).Hex())
 	record, err := value.store.Get(ctx, executionID)
 	if errors.Is(err, errNotFound) {
 		return publicBinding{}, errInvalidRequest
@@ -119,10 +140,10 @@ func (value *service) confirm(ctx context.Context, request confirmRequest) (publ
 		return publicBinding{}, err
 	}
 	if record.Status == statusActive {
-		if record.DeploymentTxHash != txHash {
+		if record.AuthorizationTxHash != txHash {
 			return publicBinding{}, errConflict
 		}
-		if err := value.chain.verifyActive(ctx, record); err != nil {
+		if _, err := value.chain.confirmAuthorization(ctx, record, common.HexToHash(txHash)); err != nil {
 			return publicBinding{}, errNotReady
 		}
 		return record.public(nil), nil
@@ -130,15 +151,42 @@ func (value *service) confirm(ctx context.Context, request confirmRequest) (publ
 	if record.Status == statusBlocked || record.Status == statusRotationPending {
 		return publicBinding{}, errNotReady
 	}
-	record, err = value.store.MarkConfirming(ctx, record, txHash)
-	if err != nil {
-		return publicBinding{}, errConflict
+	if record.Status == statusAwaitingDeployment {
+		record, err = value.store.MarkConfirming(ctx, record, txHash)
+		if err != nil {
+			return publicBinding{}, errConflict
+		}
 	}
-	block, err := value.chain.confirm(ctx, record, common.HexToHash(txHash))
+	if record.DeploymentBlock == 0 {
+		if txHash != record.DeploymentTxHash {
+			return publicBinding{}, errConflict
+		}
+		block, err := value.chain.confirmDeployment(ctx, record, common.HexToHash(txHash))
+		if err != nil {
+			return publicBinding{}, errNotReady
+		}
+		record, err = value.store.MarkDeployed(ctx, record, block)
+		if err != nil {
+			return publicBinding{}, err
+		}
+		action, err := value.chain.activationAction(ctx, record)
+		if err != nil || action == nil {
+			return publicBinding{}, errNotReady
+		}
+		return record.public([]unsignedAction{*action}), nil
+	}
+	if txHash == record.DeploymentTxHash {
+		action, actionErr := value.chain.activationAction(ctx, record)
+		if actionErr != nil || action == nil {
+			return publicBinding{}, errNotReady
+		}
+		return record.public([]unsignedAction{*action}), nil
+	}
+	block, err := value.chain.confirmAuthorization(ctx, record, common.HexToHash(txHash))
 	if err != nil {
 		return publicBinding{}, errNotReady
 	}
-	record, err = value.store.Activate(ctx, record, block)
+	record, err = value.store.MarkAuthorized(ctx, record, txHash, block)
 	if err != nil {
 		return publicBinding{}, err
 	}

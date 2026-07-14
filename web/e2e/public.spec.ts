@@ -34,8 +34,9 @@ test("roadmap leads with live venue execution", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "From deployed infrastructure to bounded autonomy." })).toBeVisible();
   await expect(page.getByRole("link", { name: "roadmap", exact: true }).first()).toHaveClass(/nav-active/);
   await expect(page.getByText("live venue execution", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("live agent trading: in development", { exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Production evidence" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Bounded activation" })).toBeVisible();
+  await expect(page.getByText("mainnet canary: enabled", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Canary evidence" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Cohort expansion" })).toBeVisible();
+  await expect(page.getByText("Internal audit governs release.", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "read the readiness specification", exact: false })).toHaveAttribute("href", "/docs");
 });

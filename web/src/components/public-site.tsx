@@ -145,7 +145,7 @@ const docs: Record<DocId, { file: string; title: string; body: React.ReactNode }
   },
   readiness: {
     file: "docs/production-audit-full-system.md",
-    title: "Activation readiness",
+    title: "Live execution readiness",
     body: <PublishedDoc file="production-audit-full-system.md" />,
   },
   venue: {

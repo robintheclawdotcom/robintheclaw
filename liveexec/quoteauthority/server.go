@@ -12,13 +12,19 @@ import (
 const maximumBodyBytes = 64 << 10
 
 type Server struct {
-	service *Service
-	auth    *protocol.Authenticator
-	enabled bool
+	service    *Service
+	entryAuth  *protocol.Authenticator
+	exitAuth   *protocol.Authenticator
+	enabled    bool
+	sharedAuth bool
 }
 
 func NewServer(service *Service, auth *protocol.Authenticator, enabled bool) *Server {
-	return &Server{service: service, auth: auth, enabled: enabled}
+	return &Server{service: service, entryAuth: auth, exitAuth: auth, enabled: enabled, sharedAuth: true}
+}
+
+func NewDualAuthServer(service *Service, entryAuth, exitAuth *protocol.Authenticator, enabled bool) *Server {
+	return &Server{service: service, entryAuth: entryAuth, exitAuth: exitAuth, enabled: enabled}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -31,7 +37,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	status := http.StatusOK
 	state := "disabled"
-	if s.enabled && s.service != nil && s.auth != nil {
+	if s.enabled && s.service != nil && s.entryAuth != nil && s.exitAuth != nil {
 		state = "ready"
 	} else if s.enabled {
 		status = http.StatusServiceUnavailable
@@ -41,7 +47,7 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) executableQuotes(w http.ResponseWriter, request *http.Request) {
-	if !s.enabled || s.service == nil || s.auth == nil {
+	if !s.enabled || s.service == nil || s.entryAuth == nil || s.exitAuth == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "quote authority is disabled"})
 		return
 	}
@@ -50,9 +56,17 @@ func (s *Server) executableQuotes(w http.ResponseWriter, request *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
-	if err := s.auth.Verify(request.Method, request.URL.Path, request.Header.Get("X-Robin-Caller"),
-		request.Header.Get("X-Robin-Timestamp"), request.Header.Get("X-Robin-Nonce"),
-		request.Header.Get("X-Robin-Signature"), body); err != nil {
+	verify := func(auth *protocol.Authenticator) bool {
+		return auth.Verify(request.Method, request.URL.Path, request.Header.Get("X-Robin-Caller"),
+			request.Header.Get("X-Robin-Timestamp"), request.Header.Get("X-Robin-Nonce"),
+			request.Header.Get("X-Robin-Signature"), body) == nil
+	}
+	entryAuthorized := verify(s.entryAuth)
+	exitAuthorized := entryAuthorized
+	if !s.sharedAuth {
+		exitAuthorized = verify(s.exitAuth)
+	}
+	if !entryAuthorized && !exitAuthorized {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "request authentication failed"})
 		return
 	}
@@ -61,6 +75,11 @@ func (s *Server) executableQuotes(w http.ResponseWriter, request *http.Request) 
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&input); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid quote request"})
+		return
+	}
+	if (!s.sharedAuth && input.Action == protocol.ActionEntry && !entryAuthorized) ||
+		(!s.sharedAuth && input.Action == protocol.ActionUnwind && !exitAuthorized) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "request authentication failed"})
 		return
 	}
 	quote, err := s.service.Quote(request.Context(), input)

@@ -47,15 +47,20 @@ type RobinhoodBinding struct {
 	MinimumOwnerGasRaw   string   `json:"minimumOwnerGasRaw"`
 	MinimumSignerGasRaw  string   `json:"minimumSignerGasRaw"`
 	ReceiptHashes        []string `json:"receiptHashes"`
+	ExpectedSignerNonce  uint64   `json:"expectedSignerNonce"`
+	SignerJournalReady   bool     `json:"signerJournalReady"`
 }
 
 type LighterObservation struct {
 	AccountIndex                 uint64
 	APIKeyIndex                  uint8
+	MarketID                     uint16
 	Nonce                        uint64
 	ExpectedNonce                uint64
 	CollateralRaw                string
 	MaintenanceRequirementRaw    string
+	CollateralMicros             uint64
+	MaintenanceMarginMicros      uint64
 	MaintenanceMarginRatioMicros uint64
 	NoUnknownOrders              bool
 	NoUnknownPositions           bool
@@ -89,7 +94,15 @@ type RobinhoodObservation struct {
 	FundingReady         bool
 	OwnerGasReady        bool
 	SignerGasReady       bool
+	OracleHealthy        bool
+	SequencerHealthy     bool
 	RiskMode             string
+	SignerNonceAligned   bool
+	SpotConfigVersion    uint64
+	StockDecimals        uint8
+	UIMultiplierE18      string
+	NewUIMultiplierE18   string
+	OraclePaused         bool
 	FinalizedNumber      uint64
 	FinalizedHash        string
 	ObservedAt           time.Time
@@ -97,7 +110,10 @@ type RobinhoodObservation struct {
 
 func (o RobinhoodObservation) Healthy() bool {
 	return o.WiringVerified && o.FinalityHealthy && o.FundingReady &&
-		o.OwnerGasReady && o.SignerGasReady && fresh(o.ObservedAt, time.Now())
+		o.OwnerGasReady && o.SignerGasReady && o.SignerNonceAligned && o.SpotConfigVersion > 0 &&
+		o.StockDecimals <= 18 && o.UIMultiplierE18 != "" &&
+		o.UIMultiplierE18 == o.NewUIMultiplierE18 && !o.OraclePaused && o.OracleHealthy &&
+		o.SequencerHealthy && fresh(o.ObservedAt, time.Now())
 }
 
 type CoordinatorSnapshot struct {
@@ -114,11 +130,14 @@ type CoordinatorSnapshot struct {
 type LighterPayload struct {
 	AccountIndex                 uint64 `json:"account_index"`
 	APIKeyIndex                  uint8  `json:"api_key_index"`
+	MarketIndex                  uint16 `json:"market_index"`
 	NonceAligned                 bool   `json:"nonce_aligned"`
 	NoUnknownOrders              bool   `json:"no_unknown_orders"`
 	NoUnknownPositions           bool   `json:"no_unknown_positions"`
 	CollateralReady              bool   `json:"collateral_ready"`
 	MaintenanceMarginRatioMicros uint64 `json:"maintenance_margin_ratio_micros"`
+	CollateralMicros             uint64 `json:"collateral_micros"`
+	MaintenanceMarginMicros      uint64 `json:"maintenance_margin_micros"`
 	Flat                         bool   `json:"flat"`
 }
 
@@ -133,6 +152,15 @@ type RobinhoodPayload struct {
 	AgentEnabled         bool   `json:"agent_enabled"`
 	RiskMode             string `json:"risk_mode"`
 	SettlementBalanceRaw string `json:"settlement_balance_raw"`
+	NonceAligned         bool   `json:"nonce_aligned"`
+	SpotConfigVersion    uint64 `json:"spot_config_version"`
+	StockDecimals        uint8  `json:"stock_decimals"`
+	UIMultiplierE18      string `json:"ui_multiplier_e18"`
+	NewUIMultiplierE18   string `json:"new_ui_multiplier_e18"`
+	OraclePaused         bool   `json:"oracle_paused"`
+	OracleHealthy        bool   `json:"oracle_healthy"`
+	SequencerHealthy     bool   `json:"sequencer_healthy"`
+	SignerGasReady       bool   `json:"signer_gas_ready"`
 }
 
 type ReadinessSnapshot struct {
@@ -216,4 +244,16 @@ func marginRatioMicros(collateral, maintenance string) (uint64, error) {
 		return 0, fmt.Errorf("maintenance margin ratio out of range")
 	}
 	return ratio.Num().Uint64(), nil
+}
+
+func decimalMicros(value string) (uint64, error) {
+	ratio, err := parseUnsignedDecimal(value)
+	if err != nil {
+		return 0, err
+	}
+	scaled := new(big.Rat).Mul(ratio, big.NewRat(1_000_000, 1))
+	if !scaled.IsInt() || !scaled.Num().IsUint64() {
+		return 0, errors.New("decimal cannot be represented as micros")
+	}
+	return scaled.Num().Uint64(), nil
 }

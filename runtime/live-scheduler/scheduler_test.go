@@ -117,16 +117,28 @@ func (q *quoteStub) Quote(_ context.Context, body []byte) ([]byte, error) {
 	if err := decodeStrict(body, &request); err != nil {
 		return nil, err
 	}
+	spotSide, perpSide, phase, reduceOnly := "buy", "short", "", false
+	var exitAuthority json.RawMessage
+	if request.Action == ActionUnwind {
+		spotSide, perpSide, phase, reduceOnly = "sell", "long", "perp_and_spot", true
+		exitAuthority = mustJSON(map[string]any{
+			"execution_account_id": request.ExecutionAccountID,
+			"intent_id":            request.IntentID,
+		})
+	}
 	quote := QuoteBundle{
 		SchemaVersion: quoteSchemaVersion, RequestID: request.RequestID, ExecutionAccountID: request.ExecutionAccountID,
 		SourceEvaluationID: request.SourceEvaluationID, MarketManifest: request.MarketManifest, StrategyVersion: StrategyVersion,
 		StrategyManifestSHA256: StrategyManifestSHA256, SourceConfigSHA256: SourceConfigSHA256, RouteSHA256: routeSHA256,
-		OraclePolicySHA256: oraclePolicySHA256, RiskPolicySHA256: riskPolicySHA256, Action: ActionEntry,
+		OraclePolicySHA256: oraclePolicySHA256, RiskPolicySHA256: riskPolicySHA256, Action: request.Action,
 		Source: json.RawMessage(`{"adapter_id":"reviewed","spot_source":"rpc","perp_source":"auth","oracle_round":"round"}`),
-		Spot:   json.RawMessage(`{"venue":"robinhood-chain-mainnet"}`),
-		Perp: mustJSON(perpQuote{Venue: "lighter-mainnet", Symbol: "AAPL", MarketIndex: testMarket, Side: "short", BaseAmount: 1,
-			BaseDecimals: 6, PriceDecimals: 2, LimitPrice: 100, MarkPrice: 100, ObservedAtMS: uint64(q.now.UnixMilli())}),
-		ObservedAtMS: uint64(q.now.UnixMilli()), ExpiresAtMS: uint64(q.now.Add(4 * time.Second).UnixMilli()),
+		Spot: mustJSON(spotQuote{Venue: "robinhood-chain-mainnet", Side: spotSide, StockAmount: "1", MinimumAmountOut: "1",
+			ExpectedUIMultiplier: "1000000000000000000", MinOracleRoundID: "1"}),
+		Perp: mustJSON(perpQuote{Venue: "lighter-mainnet", Symbol: "AAPL", MarketIndex: testMarket, Side: perpSide,
+			ReduceOnly: reduceOnly, Phase: phase, BaseAmount: 1, BaseDecimals: 6, PriceDecimals: 2,
+			LimitPrice: 100, MarkPrice: 100, ObservedAtMS: uint64(q.now.UnixMilli())}),
+		ExitAuthority: exitAuthority,
+		ObservedAtMS:  uint64(q.now.UnixMilli()), ExpiresAtMS: uint64(q.now.Add(4 * time.Second).UnixMilli()),
 		PublicKey: base64.StdEncoding.EncodeToString(q.private.Public().(ed25519.PublicKey)),
 	}
 	if q.mutate != nil {
@@ -169,6 +181,24 @@ func (r *runnerStub) Run(_ context.Context, body []byte) ([]byte, error) {
 		evaluationID = testHash("wrong-evaluation")
 	}
 	intentID := testHash(request.AccountState.ExecutionAccountID + "-intent")
+	if request.Evaluation.Action == ActionUnwind {
+		unwindID := testHash(request.AccountState.ExecutionAccountID + "-unwind")
+		return json.Marshal(map[string]any{
+			"kind": ActionUnwind,
+			"unwind": map[string]any{
+				"id": unwindID, "pair_intent_id": request.Evaluation.PairIntentID,
+				"execution_account_id":     request.AccountState.ExecutionAccountID,
+				"agent_id":                 request.AccountState.AgentID,
+				"source_evaluation_id":     evaluationID,
+				"strategy_manifest_sha256": StrategyManifestSHA256,
+			},
+			"exit_persistence": map[string]any{
+				"status": "persisted", "request_id": unwindID,
+				"intent_id":         request.Evaluation.PairIntentID,
+				"coordinator_state": "EXITING", "coordinator_version": 5,
+			},
+		})
+	}
 	return json.Marshal(map[string]any{
 		"kind": ActionEntry,
 		"pair_intent": map[string]any{
@@ -200,6 +230,40 @@ func TestSchedulerDispatchesTwoTenants(t *testing.T) {
 	}
 	if len(quotes.requests) != 2 || len(runner.bodies) != 2 || reflect.DeepEqual(runner.bodies[0], runner.bodies[1]) {
 		t.Fatal("tenant dispatches were not independent")
+	}
+}
+
+func TestSchedulerDispatchesNaturalStrategyExit(t *testing.T) {
+	now, private, public := testClockAndKey(t)
+	dispatch := validDispatch(t, now, "account-exit", "agent-exit")
+	dispatch.Evaluation.Action = ActionUnwind
+	dispatch.Evaluation.PairIntentID = testHash("account-exit-pair")
+	dispatch.AccountState.Flat = false
+	dispatch.AccountState.ActiveEpisodes = 1
+	dispatch.OpenEpisode = &OpenEpisode{
+		PairIntentID: dispatch.Evaluation.PairIntentID, SpotUnwindIntentID: testHash("spot-unwind"),
+		SpotAmount: "1", MinimumSettlementAmountOut: "1", PerpBaseAmount: 1,
+	}
+	sealApproval(t, dispatch)
+	store := newMemoryStore(dispatch)
+	quotes := &quoteStub{private: private, now: now}
+	runner := &runnerStub{}
+	service := mustScheduler(t, store, quotes, runner, public, now)
+	if err := service.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.states[store.key(*dispatch)] != "succeeded" || len(quotes.requests) != 1 || len(runner.bodies) != 1 {
+		t.Fatal("natural exit was not dispatched exactly once")
+	}
+	var request QuoteRequest
+	if err := decodeStrict(quotes.requests[0], &request); err != nil || request.Action != ActionUnwind ||
+		request.IntentID != dispatch.Evaluation.PairIntentID {
+		t.Fatal("natural exit quote was not bound to the pair intent")
+	}
+	var run RunRequest
+	if err := decodeStrict(runner.bodies[0], &run); err != nil || run.OpenEpisode == nil ||
+		run.OpenEpisode.PairIntentID != dispatch.Evaluation.PairIntentID {
+		t.Fatal("strategy runner did not receive the immutable open episode")
 	}
 }
 
@@ -364,6 +428,8 @@ func validDispatch(t *testing.T, now time.Time, account, agent string) *Dispatch
 			ID: testHash(account + "-evaluation"), StrategyVersion: StrategyVersion, StrategyManifestSHA256: StrategyManifestSHA256,
 			SourceConfigSHA256: SourceConfigSHA256, DatasetManifest: testHash("dataset"), MarketManifest: testHash("market"),
 			Status: "approved", Action: ActionEntry, ObservedAtMS: uint64(now.UnixMilli()), EstimatedCostMicros: 1,
+			SourceEpisodeID:   "33333333-3333-4333-8333-333333333333",
+			PaperEvaluationID: "44444444-4444-4444-8444-444444444444",
 		},
 		Readiness: Readiness{
 			ExecutionAccountID: account, AgentID: agent, StrategyVersion: StrategyVersion, StrategyManifestSHA256: StrategyManifestSHA256,

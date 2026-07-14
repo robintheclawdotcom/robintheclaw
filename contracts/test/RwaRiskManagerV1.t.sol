@@ -174,6 +174,24 @@ contract RiskFeed is IChainlinkFeed {
             executor.authorize(risk, badSell);
         }
 
+        function test_twoPercentCanaryFloorUsesCeilingRounding() public {
+            _setMarket(stockA, feedA, 2, 200, true, true);
+            ISpotExecution.SpotIntent memory belowFloor = _intent(
+                stockA,
+                ISpotExecution.Side.BuySpot,
+                100e6,
+                97_999_999_999_999_999_999,
+                bytes32("two-percent-below")
+            );
+            vm.expectPartialRevert(MandateRiskManagerV1.SlippageLimitExceeded.selector);
+            executor.authorize(risk, belowFloor);
+
+            ISpotExecution.SpotIntent memory exactFloor = _intent(
+                stockA, ISpotExecution.Side.BuySpot, 100e6, 98e18, bytes32("two-percent-exact")
+            );
+            executor.authorize(risk, exactFloor);
+        }
+
         function test_intentBindsMultiplierAndMinimumOracleRound() public {
             ISpotExecution.SpotIntent memory wrongMultiplier =
                 _intent(stockA, ISpotExecution.Side.BuySpot, 10e6, 99e17, bytes32("multiplier"));
@@ -207,6 +225,26 @@ contract RiskFeed is IChainlinkFeed {
             assertEq(risk.windowTurnover(), 50e6);
 
             executor.settle(risk, exit.id, 25e18, 25e6);
+            assertEq(risk.inventory(address(stockA)), 0);
+        }
+
+        function test_appreciatedPositionCanAlwaysExitAtAcquisitionCostCap() public {
+            vm.prank(address(configAdmin));
+            risk.setLimits(25e6, 50e6, 1 days, 5 minutes, 1 hours, 3);
+            _setMarketWithMaxOrder(stockA, feedA, 2, 200, 25e6, true, true);
+            _buy(stockA, 25e6, 245e17, 25e18, bytes32("appreciated-buy"));
+
+            feedA.setRound(2, 2e8, block.timestamp);
+            vm.prank(address(configAdmin));
+            risk.setMode(MandateRiskManagerV1.Mode.ReduceOnly);
+            ISpotExecution.SpotIntent memory exit = _intent(
+                stockA, ISpotExecution.Side.SellSpot, 25e18, 49e6, bytes32("appreciated-sell")
+            );
+            (uint256 capNotional,,) = executor.authorize(risk, exit);
+
+            assertEq(capNotional, 25e6);
+            assertEq(risk.windowTurnover(), 50e6);
+            executor.settle(risk, exit.id, 25e18, 50e6);
             assertEq(risk.inventory(address(stockA)), 0);
         }
 
@@ -303,11 +341,121 @@ contract RiskFeed is IChainlinkFeed {
             assertEq(risk.grossExposure(), 100e6);
         }
 
-        function test_feedPriceIsAlreadyMultiplierAdjusted() public {
+        function test_grossExposureAppliesMultiplierToRawBalance() public {
             stockA.setMultiplier(2e18, 2e18, 0);
-            feedA.setRound(2, 2e8, block.timestamp);
+            feedA.setRound(2, 1e8, block.timestamp);
             _buy(stockA, 20e6, 99e17, 10e18, bytes32("adjusted"));
             assertEq(risk.grossExposure(), 20e6);
+        }
+
+        function test_halfMultiplierEntryCapsTurnoverAndExitUseUnderlyingShares() public {
+            stockA.setMultiplier(0.5e18, 0.5e18, 0);
+            vm.prank(address(configAdmin));
+            risk.setLimits(19_999_999, 50e6, 1 days, 5 minutes, 1 hours, 3);
+
+            ISpotExecution.SpotIntent memory belowMinimum = _intent(
+                stockA,
+                ISpotExecution.Side.BuySpot,
+                10e6,
+                19_799_999_999_000_000_000,
+                bytes32("half-minimum")
+            );
+            vm.expectPartialRevert(MandateRiskManagerV1.SlippageLimitExceeded.selector);
+            executor.authorize(risk, belowMinimum);
+
+            ISpotExecution.SpotIntent memory entry = _intent(
+                stockA,
+                ISpotExecution.Side.BuySpot,
+                10e6,
+                19_800_000_000_000_000_000,
+                bytes32("half-entry")
+            );
+            executor.authorize(risk, entry);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    MandateRiskManagerV1.GrossLimitExceeded.selector, 20e6, 19_999_999
+                )
+            );
+            executor.settle(risk, entry.id, 10e6, 40e18);
+
+            vm.prank(address(configAdmin));
+            risk.setLimits(25e6, 50e6, 1 days, 5 minutes, 1 hours, 3);
+            executor.settle(risk, entry.id, 10e6, 40e18);
+            assertEq(risk.grossExposure(), 20e6);
+            assertEq(risk.windowTurnover(), 10e6);
+
+            _setMarketWithMaxOrder(stockA, feedA, 2, 100, 10e6, true, true);
+            ISpotExecution.SpotIntent memory oversized = _intent(
+                stockA, ISpotExecution.Side.SellSpot, 20e18 + 1, 9_900_000, bytes32("half-order")
+            );
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    MandateRiskManagerV1.OrderLimitExceeded.selector, 10_000_001, 10e6
+                )
+            );
+            executor.authorize(risk, oversized);
+
+            _sell(stockA, 20e18, 9_900_000, 10e6, bytes32("half-exit-1"));
+            assertEq(risk.grossExposure(), 10e6);
+            assertEq(risk.windowTurnover(), 20e6);
+            _sell(stockA, 20e18, 9_900_000, 10e6, bytes32("half-exit-2"));
+            assertEq(risk.grossExposure(), 0);
+            assertEq(risk.windowTurnover(), 25e6);
+        }
+
+        function test_doubleMultiplierEntryCapsTurnoverAndExitUseUnderlyingShares() public {
+            stockA.setMultiplier(2e18, 2e18, 0);
+            vm.prank(address(configAdmin));
+            risk.setLimits(19_999_999, 50e6, 1 days, 5 minutes, 1 hours, 3);
+
+            ISpotExecution.SpotIntent memory belowMinimum = _intent(
+                stockA,
+                ISpotExecution.Side.BuySpot,
+                10e6,
+                4_949_999_000_000_000_000,
+                bytes32("double-minimum")
+            );
+            vm.expectPartialRevert(MandateRiskManagerV1.SlippageLimitExceeded.selector);
+            executor.authorize(risk, belowMinimum);
+
+            ISpotExecution.SpotIntent memory entry = _intent(
+                stockA,
+                ISpotExecution.Side.BuySpot,
+                10e6,
+                4_950_000_000_000_000_000,
+                bytes32("double-entry")
+            );
+            executor.authorize(risk, entry);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    MandateRiskManagerV1.GrossLimitExceeded.selector, 20e6, 19_999_999
+                )
+            );
+            executor.settle(risk, entry.id, 10e6, 10e18);
+
+            vm.prank(address(configAdmin));
+            risk.setLimits(25e6, 50e6, 1 days, 5 minutes, 1 hours, 3);
+            executor.settle(risk, entry.id, 10e6, 10e18);
+            assertEq(risk.grossExposure(), 20e6);
+            assertEq(risk.windowTurnover(), 10e6);
+
+            _setMarketWithMaxOrder(stockA, feedA, 2, 100, 10e6, true, true);
+            ISpotExecution.SpotIntent memory oversized = _intent(
+                stockA, ISpotExecution.Side.SellSpot, 5e18 + 1, 9_900_000, bytes32("double-order")
+            );
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    MandateRiskManagerV1.OrderLimitExceeded.selector, 10_000_001, 10e6
+                )
+            );
+            executor.authorize(risk, oversized);
+
+            _sell(stockA, 5e18, 9_900_000, 10e6, bytes32("double-exit-1"));
+            assertEq(risk.grossExposure(), 10e6);
+            assertEq(risk.windowTurnover(), 20e6);
+            _sell(stockA, 5e18, 9_900_000, 10e6, bytes32("double-exit-2"));
+            assertEq(risk.grossExposure(), 0);
+            assertEq(risk.windowTurnover(), 25e6);
         }
 
         function test_marketConfigurationEnforcesSlippageCeiling() public {
@@ -404,13 +552,27 @@ contract RiskFeed is IChainlinkFeed {
             bool entryEnabled,
             bool exitEnabled
         ) private {
+            _setMarketWithMaxOrder(
+                stock, feed, version, maxSlippageBps, 1_000e6, entryEnabled, exitEnabled
+            );
+        }
+
+        function _setMarketWithMaxOrder(
+            RiskStockToken stock,
+            RiskFeed feed,
+            uint64 version,
+            uint16 maxSlippageBps,
+            uint128 maxOrderNotional,
+            bool entryEnabled,
+            bool exitEnabled
+        ) private {
             feeds[address(stock)] = feed;
             versions[address(stock)] = version;
             vm.prank(address(configAdmin));
             risk.setMarket(
                 address(stock),
                 feed,
-                1_000e6,
+                maxOrderNotional,
                 1_000e18,
                 1 hours,
                 version,

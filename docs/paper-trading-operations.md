@@ -64,7 +64,7 @@ agent evaluation.
 | `ROBINHOOD_RPC_URL` | both | Authenticated Robinhood Chain mainnet provider. |
 | `RUNTIME_UNIVERSE` | collector | Validated subset of the canonical capture universe. |
 | `PAPER_AGENT_CONFIG` | paper agent | Versioned strategy registration path. |
-| `PAPER_MINIMUM_NET_EDGE_PPM` | paper agent | Private production entry threshold. |
+| `AAPL_MINIMUM_NET_EDGE_PPM` | paper agent and live evaluation authority | Shared reviewed production entry threshold. |
 | `AGENT_DATABASE_URL` | paper agent | Direct private product-database connection for durable user-agent assignments. |
 | `R2_BUCKET` | collector | Private raw-event archive. |
 | `AWS_ENDPOINT_URL` | collector | Cloudflare R2 S3 endpoint. |

@@ -11,7 +11,7 @@ export const wallet = (address: string, type: "embedded" | "external", primary: 
 });
 
 export const vault = {
-  id: "vault-id", chainId: 46630, factoryVersion: 1,
+  id: "vault-id", chainId: 4663, factoryVersion: 1,
   assetAddress: "0x5555555555555555555555555555555555555555",
   vaultAddress, guardAddress: "0x6666666666666666666666666666666666666666",
   anchorAddress: "0x7777777777777777777777777777777777777777",
@@ -58,32 +58,48 @@ export function me(withVault = true) {
   return {
     user: { id: "user-id", privyDid: "did:privy:test-user", onboardingState: withVault ? "complete" : "vault", hasRecovery: true, createdAt: "2026-07-13T10:00:00Z", updatedAt: "2026-07-13T10:00:00Z" },
     wallets: [wallet(embedded, "embedded", true), wallet(external, "external", false)],
-    smartAccount: { chainId: 46630, address: embedded, provider: "alchemy-eip7702", createdAt: "2026-07-13T10:00:00Z" },
+    smartAccount: { chainId: 4663, address: embedded, provider: "privy", createdAt: "2026-07-13T10:00:00Z" },
     preferences: { displayCurrency: "USD", activeFundingWallet: external, notificationsEnabled: true, updatedAt: "2026-07-13T10:00:00Z" },
     vault: withVault ? vault : null,
   };
 }
 
 export const dashboard = {
-  environment: "robinhood-testnet", asOf: "2026-07-13T10:05:00Z", infrastructureReady: true,
+  environment: "robinhood-mainnet", asOf: "2026-07-13T10:05:00Z", infrastructureReady: true,
   agent,
-  totalValue: { raw: "1000000000", decimals: 6, symbol: "tUSDG" },
-  availableBalance: { raw: "0", decimals: 6, symbol: "tUSDG" },
-  deployedCapital: { raw: "1000000000", decimals: 6, symbol: "tUSDG" }, pnl: null,
+  totalValue: { raw: "1000000000", decimals: 6, symbol: "USDG" },
+  availableBalance: { raw: "0", decimals: 6, symbol: "USDG" },
+  deployedCapital: { raw: "1000000000", decimals: 6, symbol: "USDG" }, pnl: null,
   smartAccount: me().smartAccount,
-  vault: { record: vault, balance: { raw: "1000000000", decimals: 6, symbol: "tUSDG" }, halted: true, remainingCapacity: { raw: "5000000000", decimals: 6, symbol: "tUSDG" } },
+  vault: { record: vault, balance: { raw: "1000000000", decimals: 6, symbol: "USDG" }, halted: true, remainingCapacity: { raw: "5000000000", decimals: 6, symbol: "USDG" } },
   positions: [],
-  opportunities: [{ symbol: "NVDA", basisBps: "42.5000", liquidity: "250000", observedAt: 1783936800 }],
-  activity: [], wallets: me().wallets.map((item) => ({ wallet: item, balance: { raw: item.isPrimary ? "0" : "250000000", decimals: 6, symbol: "tUSDG" } })),
+  opportunities: [{ symbol: "AAPL", basisBps: "42.5000", liquidity: "250000", observedAt: 1783936800 }],
+  activity: [], wallets: me().wallets.map((item) => ({ wallet: item, balance: { raw: item.isPrimary ? "0" : "250000000", decimals: 6, symbol: "USDG" } })),
 };
 
-export async function mockApplication(page: Page, options: { withVault?: boolean; withAgent?: boolean } = {}) {
+export async function mockApplication(page: Page, options: { withVault?: boolean; withAgent?: boolean; liveJourney?: boolean } = {}) {
   const withVault = options.withVault ?? true;
-  const state: { agent: object | null } = { agent: (options.withAgent ?? withVault) ? agent : null };
+  const state: MockState = {
+    agent: (options.withAgent ?? withVault) ? agent : null,
+    robinhoodConfirmations: 0,
+    lighterLinked: false,
+    robinhoodLinked: false,
+    liveJourney: options.liveJourney ?? false,
+    command: null,
+  };
   await page.route("**/api/app/**", async (route) => respond(route, withVault, state));
 }
 
-async function respond(route: Route, withVault: boolean, state: { agent: object | null }) {
+type MockState = {
+  agent: object | null;
+  robinhoodConfirmations: number;
+  lighterLinked: boolean;
+  robinhoodLinked: boolean;
+  liveJourney: boolean;
+  command: Record<string, unknown> | null;
+};
+
+async function respond(route: Route, withVault: boolean, state: MockState) {
   const request = route.request();
   const path = new URL(request.url()).pathname;
   if (path.endsWith("/metrics")) return route.fulfill({ status: 204 });
@@ -96,8 +112,60 @@ async function respond(route: Route, withVault: boolean, state: { agent: object 
     state.agent = { ...liveAgent, status: "provisioning" };
     return json(route, { id: "execution-account-id", agentId: liveAgent.id, strategyVersion: "basis-aapl-v1", chainId: 4663, status: "provisioning", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt }, 202);
   }
-  if (path.endsWith("/readiness")) return json(route, readiness);
-  if (path.endsWith("/lighter/link-request")) return json(route, { bindingRef: "lighter-binding", requestId: "lighter-request", venue: "lighter", ownerAddress: embedded, publicIdentifier: null, publicKey: null, associationPayload: null, proofTransactionHash: null, status: "provisioning", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt }, 202);
+  if (path.endsWith("/readiness")) {
+    const ready = state.liveJourney && state.lighterLinked && state.robinhoodLinked;
+    return json(route, ready ? {
+      ...readiness,
+      lighterAccountIndex: 42,
+      coordinatorRegistered: true,
+      lighterLinked: true,
+      lighterFunded: true,
+      robinhoodDeployed: true,
+      robinhoodFunded: true,
+      userGasReady: true,
+      executionGasReady: true,
+      policyActive: true,
+      reconciled: true,
+      canLaunch: true,
+      validUntil: "2026-07-13T10:10:00Z",
+      blockers: [],
+    } : readiness);
+  }
+  if (path.endsWith("/lighter/link-request")) {
+    const body = request.postDataJSON() as Record<string, unknown>;
+    if (JSON.stringify(body) !== JSON.stringify({ ownerAddress: embedded })) {
+      return json(route, { error: "invalid_request", message: "Only ownerAddress is accepted." }, 400);
+    }
+    return json(route, {
+      bindingRef: "lighter-binding", requestId: "lighter-request",
+      providerRequestId: "11111111-1111-4111-8111-111111111111", venue: "lighter",
+      ownerAddress: embedded, lighterAccountIndex: 42, lighterApiKeyIndex: 254,
+      robinhoodVaultAddress: null, robinhoodSignerAddress: null, robinhoodKeyVersion: null,
+      robinhoodFactoryAddress: null, robinhoodRegistryAddress: null, robinhoodPolicyDigest: null,
+      robinhoodRiskManagerAddress: null, robinhoodSpotAdapterAddress: null,
+      robinhoodDeploymentBlock: null, robinhoodDeploymentAction: null,
+      robinhoodAuthorizationTransactionHash: null, robinhoodAuthorizationBlock: null,
+      publicIdentifier: "account:42:key:254", publicKey: `0x${"12".repeat(40)}`,
+      associationPayload: "Register Lighter Account\nfixture", proofTransactionHash: null,
+      status: "awaiting_signature", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt,
+    }, 201);
+  }
+  if (path.endsWith("/lighter/confirm")) {
+    state.lighterLinked = true;
+    return json(route, {
+    bindingRef: "lighter-binding", requestId: "lighter-request",
+    providerRequestId: "11111111-1111-4111-8111-111111111111", venue: "lighter",
+    ownerAddress: embedded, lighterAccountIndex: 42, lighterApiKeyIndex: 254,
+    robinhoodVaultAddress: null, robinhoodSignerAddress: null, robinhoodKeyVersion: null,
+    robinhoodFactoryAddress: null, robinhoodRegistryAddress: null, robinhoodPolicyDigest: null,
+    robinhoodRiskManagerAddress: null, robinhoodSpotAdapterAddress: null,
+    robinhoodDeploymentBlock: null, robinhoodDeploymentAction: null,
+    robinhoodAuthorizationTransactionHash: null, robinhoodAuthorizationBlock: null,
+    publicIdentifier: "account:42:key:254", publicKey: `0x${"12".repeat(40)}`,
+    associationPayload: "Register Lighter Account\nfixture", proofTransactionHash: `0x${"34".repeat(32)}`,
+    status: "linked", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt,
+    });
+  }
   if (path.endsWith("/robinhood/prepare")) return json(route, {
     bindingRef: "robinhood-binding", requestId: "robinhood-request", providerRequestId: "execution-account-id",
     venue: "robinhood", ownerAddress: embedded, lighterAccountIndex: null, lighterApiKeyIndex: null,
@@ -109,6 +177,7 @@ async function respond(route: Route, withVault: boolean, state: { agent: object 
     robinhoodRiskManagerAddress: "0xcccccccccccccccccccccccccccccccccccccccc",
     robinhoodSpotAdapterAddress: "0xdddddddddddddddddddddddddddddddddddddddd",
     robinhoodDeploymentBlock: null,
+    robinhoodAuthorizationTransactionHash: null, robinhoodAuthorizationBlock: null,
     robinhoodDeploymentAction: {
       kind: "deploy_user_graph", chainId: "4663", to: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       data: `0x4c96a389${"0".repeat(24)}${embedded.slice(2)}`, value: "0",
@@ -116,7 +185,21 @@ async function respond(route: Route, withVault: boolean, state: { agent: object 
     publicIdentifier: null, publicKey: null, associationPayload: null, proofTransactionHash: null,
     status: "awaiting_signature", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt,
   }, 202);
-  if (path.endsWith("/robinhood/confirm")) return json(route, {
+  if (path.endsWith("/robinhood/confirm")) {
+    const input = request.postDataJSON() as { transactionHash?: string };
+    state.robinhoodConfirmations += 1;
+    const authorized = state.robinhoodConfirmations > 1;
+    if (!authorized && input.transactionHash !== `0x${"cd".repeat(32)}`) {
+      return json(route, { error: "invalid_proof", message: "Deployment confirmation requires the deployment transaction." }, 409);
+    }
+    if (authorized && input.transactionHash !== `0x${"ef".repeat(32)}`) {
+      return json(route, { error: "invalid_proof", message: "Authorization confirmation requires the authorization transaction." }, 409);
+    }
+    if (authorized) {
+      state.robinhoodLinked = true;
+      if (state.liveJourney && state.lighterLinked) state.agent = { ...liveAgent, status: "ready" };
+    }
+    return json(route, {
     bindingRef: "robinhood-binding", requestId: "robinhood-request", providerRequestId: "execution-account-id",
     venue: "robinhood", ownerAddress: embedded, lighterAccountIndex: null, lighterApiKeyIndex: null,
     robinhoodVaultAddress: "0x8888888888888888888888888888888888888888",
@@ -126,11 +209,41 @@ async function respond(route: Route, withVault: boolean, state: { agent: object 
     robinhoodPolicyDigest: `0x${"12".repeat(32)}`,
     robinhoodRiskManagerAddress: "0xcccccccccccccccccccccccccccccccccccccccc",
     robinhoodSpotAdapterAddress: "0xdddddddddddddddddddddddddddddddddddddddd",
-    robinhoodDeploymentBlock: 123, robinhoodDeploymentAction: null,
+    robinhoodDeploymentBlock: 123,
+    robinhoodDeploymentAction: authorized ? null : {
+      kind: "authorize_execution_agent", chainId: "4663",
+      to: "0x8888888888888888888888888888888888888888",
+      data: `0xa7d1c2a0${"0".repeat(24)}${"9999999999999999999999999999999999999999"}`, value: "0",
+    },
+    robinhoodAuthorizationTransactionHash: authorized ? `0x${"ef".repeat(32)}` : null,
+    robinhoodAuthorizationBlock: authorized ? 124 : null,
     publicIdentifier: null, publicKey: null, associationPayload: null,
-    proofTransactionHash: `0x${"cd".repeat(32)}`, status: "linked",
+    proofTransactionHash: `0x${"cd".repeat(32)}`, status: authorized ? "linked" : "awaiting_signature",
     createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt,
   });
+  }
+  if (path.endsWith("/commands") && request.method() === "POST") {
+    const { command } = request.postDataJSON() as { command: "launch" | "pause" | "resume" | "close" | "withdraw" };
+    const nextStatus = command === "launch" || command === "resume" ? "running"
+      : command === "pause" ? "paused"
+        : command === "close" || command === "withdraw" ? "closed" : "blocked";
+    if (command !== "withdraw") state.agent = { ...liveAgent, status: nextStatus };
+    state.command = {
+      id: `command-${command}`, agentId: liveAgent.id, executionAccountId: "execution-account-id",
+      idempotencyKey: request.headers()["idempotency-key"] ?? "fixture-key", command,
+      status: command === "withdraw" ? "awaiting_signature" : "completed",
+      agentStatus: nextStatus, targetAgentStatus: nextStatus, errorReason: null,
+      resultEvidenceDigest: command === "withdraw" ? null : `0x${"45".repeat(32)}`,
+      ownerActions: command === "withdraw" ? [{
+        chain_id: 4663, from: embedded, to: readiness.robinhoodVaultAddress,
+        data: `0x142834dd${"0".repeat(63)}1`, value: "0",
+      }] : [],
+      completedAt: command === "withdraw" ? null : liveAgent.updatedAt,
+      createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt,
+    };
+    return json(route, state.command, command === "withdraw" ? 202 : 200);
+  }
+  if (path.includes("/commands/") && request.method() === "GET" && state.command) return json(route, state.command);
   if (path.includes("/agents/") && request.method() === "PUT") return json(route, agent);
   if (path.endsWith("/activity")) return json(route, { items: [], nextCursor: null });
   if (path.endsWith("/preferences")) return json(route, me(withVault).preferences);

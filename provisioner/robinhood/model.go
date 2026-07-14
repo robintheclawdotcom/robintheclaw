@@ -29,25 +29,27 @@ type graph struct {
 }
 
 type binding struct {
-	ExecutionAccountID string
-	OwnerAddress       string
-	KMSKeyID           string
-	SignerAddress      string
-	KeyVersion         int64
-	FactoryAddress     string
-	RegistryAddress    string
-	PolicyDigest       string
-	FactoryCodeHash    string
-	RegistryCodeHash   string
-	VaultCodeHash      string
-	RiskCodeHash       string
-	AdapterCodeHash    string
-	Graph              graph
-	DeploymentTxHash   string
-	DeploymentBlock    uint64
-	Status             string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	ExecutionAccountID  string
+	OwnerAddress        string
+	KMSKeyID            string
+	SignerAddress       string
+	KeyVersion          int64
+	FactoryAddress      string
+	RegistryAddress     string
+	PolicyDigest        string
+	FactoryCodeHash     string
+	RegistryCodeHash    string
+	VaultCodeHash       string
+	RiskCodeHash        string
+	AdapterCodeHash     string
+	Graph               graph
+	DeploymentTxHash    string
+	DeploymentBlock     uint64
+	AuthorizationTxHash string
+	AuthorizationBlock  uint64
+	Status              string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 type prepareRequest struct {
@@ -57,7 +59,7 @@ type prepareRequest struct {
 
 type confirmRequest struct {
 	ExecutionAccountID string `json:"executionAccountId"`
-	DeploymentTxHash   string `json:"deploymentTransactionHash"`
+	TransactionHash    string `json:"transactionHash"`
 }
 
 type statusRequest struct {
@@ -77,19 +79,21 @@ type unsignedAction struct {
 }
 
 type publicBinding struct {
-	ExecutionAccountID string           `json:"executionAccountId"`
-	OwnerAddress       string           `json:"ownerAddress"`
-	SignerAddress      string           `json:"signerAddress"`
-	KeyVersion         int64            `json:"keyVersion"`
-	FactoryAddress     string           `json:"factoryAddress"`
-	RegistryAddress    string           `json:"registryAddress"`
-	PolicyDigest       string           `json:"policyDigest"`
-	Graph              graph            `json:"graph"`
-	Status             string           `json:"status"`
-	DeploymentTxHash   string           `json:"deploymentTransactionHash,omitempty"`
-	DeploymentBlock    uint64           `json:"deploymentBlock,omitempty"`
-	Actions            []unsignedAction `json:"actions,omitempty"`
-	UpdatedAt          string           `json:"updatedAt"`
+	ExecutionAccountID  string           `json:"executionAccountId"`
+	OwnerAddress        string           `json:"ownerAddress"`
+	SignerAddress       string           `json:"signerAddress"`
+	KeyVersion          int64            `json:"keyVersion"`
+	FactoryAddress      string           `json:"factoryAddress"`
+	RegistryAddress     string           `json:"registryAddress"`
+	PolicyDigest        string           `json:"policyDigest"`
+	Graph               graph            `json:"graph"`
+	Status              string           `json:"status"`
+	DeploymentTxHash    string           `json:"deploymentTransactionHash,omitempty"`
+	DeploymentBlock     uint64           `json:"deploymentBlock,omitempty"`
+	AuthorizationTxHash string           `json:"authorizationTransactionHash,omitempty"`
+	AuthorizationBlock  uint64           `json:"authorizationBlock,omitempty"`
+	Actions             []unsignedAction `json:"actions,omitempty"`
+	UpdatedAt           string           `json:"updatedAt"`
 }
 
 type resolvedBinding struct {
@@ -114,19 +118,21 @@ type resolvedBinding struct {
 
 func (value binding) public(actions []unsignedAction) publicBinding {
 	return publicBinding{
-		ExecutionAccountID: value.ExecutionAccountID,
-		OwnerAddress:       value.OwnerAddress,
-		SignerAddress:      value.SignerAddress,
-		KeyVersion:         value.KeyVersion,
-		FactoryAddress:     value.FactoryAddress,
-		RegistryAddress:    value.RegistryAddress,
-		PolicyDigest:       value.PolicyDigest,
-		Graph:              value.Graph,
-		Status:             value.Status,
-		DeploymentTxHash:   value.DeploymentTxHash,
-		DeploymentBlock:    value.DeploymentBlock,
-		Actions:            actions,
-		UpdatedAt:          value.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		ExecutionAccountID:  value.ExecutionAccountID,
+		OwnerAddress:        value.OwnerAddress,
+		SignerAddress:       value.SignerAddress,
+		KeyVersion:          value.KeyVersion,
+		FactoryAddress:      value.FactoryAddress,
+		RegistryAddress:     value.RegistryAddress,
+		PolicyDigest:        value.PolicyDigest,
+		Graph:               value.Graph,
+		Status:              value.Status,
+		DeploymentTxHash:    value.DeploymentTxHash,
+		DeploymentBlock:     value.DeploymentBlock,
+		AuthorizationTxHash: value.AuthorizationTxHash,
+		AuthorizationBlock:  value.AuthorizationBlock,
+		Actions:             actions,
+		UpdatedAt:           value.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 

@@ -73,10 +73,23 @@ func (value *LighterClient) Collect(ctx context.Context, executionID string, bin
 	if _, err := parseUnsignedDecimal(response.MaintenanceRequirementRaw); err != nil {
 		return LighterObservation{}, errors.New("Lighter publisher bridge returned invalid maintenance margin")
 	}
+	collateralMicros, err := decimalMicros(response.CollateralRaw)
+	if err != nil {
+		return LighterObservation{}, errors.New("Lighter collateral is not representable in micros")
+	}
+	maintenanceMicros, err := decimalMicros(response.MaintenanceRequirementRaw)
+	if err != nil {
+		return LighterObservation{}, errors.New("Lighter maintenance margin is not representable in micros")
+	}
+	ratio, err := marginRatioMicros(response.CollateralRaw, response.MaintenanceRequirementRaw)
+	if err != nil || ratio != response.MaintenanceMarginRatioMicros {
+		return LighterObservation{}, errors.New("Lighter maintenance margin ratio mismatch")
+	}
 	return LighterObservation{
-		AccountIndex: response.AccountIndex, APIKeyIndex: response.APIKeyIndex,
+		AccountIndex: response.AccountIndex, APIKeyIndex: response.APIKeyIndex, MarketID: response.MarketID,
 		Nonce: response.Nonce, ExpectedNonce: response.ExpectedNonce,
 		CollateralRaw: response.CollateralRaw, MaintenanceRequirementRaw: response.MaintenanceRequirementRaw,
+		CollateralMicros: collateralMicros, MaintenanceMarginMicros: maintenanceMicros,
 		MaintenanceMarginRatioMicros: response.MaintenanceMarginRatioMicros,
 		NoUnknownOrders:              response.NoUnknownOrders, NoUnknownPositions: response.NoUnknownPositions,
 		CollateralReady: decimalAtLeast(response.CollateralRaw, binding.MinimumCollateralRaw),

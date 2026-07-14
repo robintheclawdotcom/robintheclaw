@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	minimumUnwindSettlementMicros = uint64(24_000_000)
-	maximumDailyTurnoverMicros    = uint64(50_000_000)
-	maximumClientOrderIndex       = uint64(1<<48 - 1)
-	maximumEvidenceAgeMS          = uint64(5_000)
-	maximumUnwindAttempts         = uint8(3)
+	minimumUnwindSettlementPpm = uint64(960_000)
+	maximumDailyTurnoverMicros = uint64(50_000_000)
+	maximumClientOrderIndex    = uint64(1<<48 - 1)
+	maximumEvidenceAgeMS       = uint64(5_000)
+	maximumUnwindAttempts      = uint8(3)
 )
 
 var (
@@ -114,7 +114,11 @@ func validateEvidence(input RunRequest, lighterMarketIndex uint32, nowMS uint64)
 	quotes := input.Quotes
 	if evaluation.StrategyVersion != protocol.StrategyVersion || evaluation.StrategyManifestSHA256 != protocol.StrategyManifestSHA256 ||
 		evaluation.SourceConfigSHA256 != protocol.SourceConfigSHA256 || evaluation.Status != "approved" ||
-		!validHash(evaluation.ID) || !validHash(evaluation.DatasetManifest) || !validHash(evaluation.MarketManifest) {
+		!validHash(evaluation.ID) || !validHash(evaluation.DatasetManifest) || !validHash(evaluation.MarketManifest) ||
+		!validUUID(evaluation.SourceEpisodeID) || !validUUID(evaluation.PaperEvaluationID) ||
+		(evaluation.Action == protocol.ActionEntry && evaluation.PairIntentID != "") ||
+		(evaluation.Action == protocol.ActionUnwind && (!validHash(evaluation.PairIntentID) || input.OpenEpisode == nil ||
+			input.OpenEpisode.PairIntentID != evaluation.PairIntentID)) {
 		return errors.New("source evaluation is not an approved canonical evaluation")
 	}
 	if !fresh(evaluation.ObservedAtMS, nowMS) || !fresh(readiness.ObservedAtMS, nowMS) || !fresh(state.ObservedAtMS, nowMS) {
@@ -146,13 +150,13 @@ func validateEvidence(input RunRequest, lighterMarketIndex uint32, nowMS uint64)
 		if readiness.Lifecycle != "ready" && readiness.Lifecycle != "running" {
 			return errors.New("entry lifecycle is not ready")
 		}
-		if readiness.GlobalControl != "active" || readiness.StrategyControl != "active" || readiness.AccountControl != "active" {
+		if readiness.GlobalControl != "ACTIVE" || readiness.StrategyControl != "ACTIVE" || readiness.AccountControl != "ACTIVE" {
 			return errors.New("entry controls are not active")
 		}
 		if !state.Flat || state.ActiveEpisodes != 0 || state.NAVMicros == 0 || state.DailyTurnoverMicros > maximumDailyTurnoverMicros-2*protocol.EntryNotionalMicros {
 			return errors.New("entry account limits are not available")
 		}
-		if state.MaintenanceMarginMicros == 0 || state.MaintenanceMarginMicros > state.CollateralMicros/2 {
+		if state.CollateralMicros == 0 || (state.MaintenanceMarginMicros > 0 && state.MaintenanceMarginMicros > state.CollateralMicros/2) {
 			return errors.New("maintenance margin coverage is below 2x")
 		}
 	} else {
@@ -173,12 +177,15 @@ func buildEntry(input RunRequest, nowMS uint64) (PairIntent, error) {
 	quotes := input.Quotes
 	state := input.AccountState
 	settlement, ok := positiveDecimalUint64(quotes.Spot.SettlementAmount)
-	if !ok || settlement != protocol.EntryNotionalMicros || quotes.Spot.Side != "buy" || quotes.Perp.Side != "short" || quotes.Perp.ReduceOnly {
-		return PairIntent{}, errors.New("entry quote is not the fixed entry")
+	if !ok || settlement > protocol.EntryNotionalMicros || quotes.Spot.Side != "buy" || quotes.Perp.Side != "short" || quotes.Perp.ReduceOnly {
+		return PairIntent{}, errors.New("entry spot quote exceeds the canary cap")
 	}
 	perpNotional, ok := derivedPerpNotional(quotes.Perp)
-	if !ok || perpNotional != protocol.EntryNotionalMicros {
-		return PairIntent{}, errors.New("entry perp notional mismatch")
+	if !ok || perpNotional > protocol.EntryNotionalMicros || settlement > 2*protocol.EntryNotionalMicros-perpNotional {
+		return PairIntent{}, errors.New("entry perp quote exceeds the canary caps")
+	}
+	if quotes.Spot.ExpectedUIMultiplier != state.UIMultiplierE18 {
+		return PairIntent{}, errors.New("quote UI multiplier does not match account state")
 	}
 	if err := validateExposure(quotes.Spot.StockAmount, state.UIMultiplierE18, state.SpotDecimals, quotes.Perp.BaseAmount, quotes.Perp.BaseDecimals); err != nil {
 		return PairIntent{}, err
@@ -213,7 +220,9 @@ func buildEntry(input RunRequest, nowMS uint64) (PairIntent, error) {
 		RawSpotAmount:              quotes.Spot.StockAmount,
 		SettlementAmountIn:         quotes.Spot.SettlementAmount,
 		MinimumSpotAmountOut:       quotes.Spot.MinimumAmountOut,
-		MinimumUnwindSettlementOut: uintString(minimumUnwindSettlementMicros),
+		MinimumUnwindSettlementOut: uintString(settlement * minimumUnwindSettlementPpm / 1_000_000),
+		ExpectedUIMultiplier:       quotes.Spot.ExpectedUIMultiplier,
+		MinOracleRoundID:           quotes.Spot.MinOracleRoundID,
 		SpotDecimals:               state.SpotDecimals,
 		SpotConfigVersion:          state.SpotConfigVersion,
 		PerpBaseAmount:             quotes.Perp.BaseAmount,
@@ -237,7 +246,7 @@ func buildEntry(input RunRequest, nowMS uint64) (PairIntent, error) {
 			QuoteBlockHash:           quotes.Spot.BlockHash,
 			QuoteReceivedAtMS:        quotes.ObservedAtMS,
 			QuoteExpiresAtMS:         quotes.ExpiresAtMS,
-			UIMultiplierE18:          state.UIMultiplierE18,
+			UIMultiplierE18:          quotes.Spot.ExpectedUIMultiplier,
 			PerpMarkPrice:            quotes.Perp.MarkPrice,
 			EstimatedTotalCostMicros: input.Evaluation.EstimatedCostMicros,
 		},
@@ -264,7 +273,8 @@ func buildUnwind(input RunRequest) (UnwindDirective, error) {
 		!validHash(episode.PairIntentID) || domainHash(spotUnwindDomain, []byte(episode.PairIntentID)) != episode.SpotUnwindIntentID ||
 		episode.SpotAmount != quotes.Spot.StockAmount || episode.PerpBaseAmount != quotes.Perp.BaseAmount ||
 		!quoteMinimumOK || !episodeMinimumOK || quoteMinimum.Cmp(episodeMinimum) < 0 ||
-		quotes.Spot.Side != "sell" || quotes.Perp.Side != "long" || !quotes.Perp.ReduceOnly {
+		quotes.Spot.Side != "sell" || quotes.Perp.Side != "long" || !quotes.Perp.ReduceOnly ||
+		quotes.Spot.ExpectedUIMultiplier != input.AccountState.UIMultiplierE18 {
 		return UnwindDirective{}, errors.New("unwind quote does not match the open episode")
 	}
 	directive := UnwindDirective{
@@ -281,6 +291,8 @@ func buildUnwind(input RunRequest) (UnwindDirective, error) {
 		SpotAmountIn:               quotes.Spot.StockAmount,
 		MinimumSettlementAmountOut: quotes.Spot.MinimumAmountOut,
 		PerpSide:                   "long",
+		ExpectedUIMultiplier:       quotes.Spot.ExpectedUIMultiplier,
+		MinOracleRoundID:           quotes.Spot.MinOracleRoundID,
 		PerpBaseAmount:             quotes.Perp.BaseAmount,
 		PerpLimitPrice:             quotes.Perp.LimitPrice,
 		ReduceOnly:                 true,
@@ -334,17 +346,11 @@ func validateExposure(stockAmount, multiplier string, spotDecimals uint8, perpBa
 	}
 	adjusted := new(big.Int).Mul(stock, multiplierValue)
 	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
-	if new(big.Int).Mod(adjusted, scale).Sign() != 0 {
-		return errors.New("stock multiplier is not exact")
-	}
 	adjusted.Div(adjusted, scale)
 	if spotDecimals < perpDecimals {
 		adjusted.Mul(adjusted, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(perpDecimals-spotDecimals)), nil))
 	} else if spotDecimals > perpDecimals {
 		divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(spotDecimals-perpDecimals)), nil)
-		if new(big.Int).Mod(adjusted, divisor).Sign() != 0 {
-			return errors.New("stock exposure cannot be scaled exactly")
-		}
 		adjusted.Div(adjusted, divisor)
 	}
 	if adjusted.Cmp(new(big.Int).SetUint64(perpBase)) != 0 {
@@ -392,7 +398,7 @@ func fresh(observedAtMS, nowMS uint64) bool {
 }
 
 func restrictiveOrActive(value string) bool {
-	return value == "active" || value == "reduce_only"
+	return value == "ACTIVE" || value == "REDUCE_ONLY"
 }
 
 func validHash(value string) bool {
@@ -421,6 +427,21 @@ func validExecutionID(value string) bool {
 		}
 	}
 	return true
+}
+
+func validUUID(value string) bool {
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return false
+	}
+	for index, char := range value {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			continue
+		}
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return value[14] >= '1' && value[14] <= '5' && strings.ContainsRune("89ab", rune(value[19]))
 }
 
 func domainHash(domain, payload []byte) string {

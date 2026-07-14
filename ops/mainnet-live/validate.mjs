@@ -88,9 +88,9 @@ export function validateRepository(root) {
   const base = resolve(root, "ops/mainnet-live");
   const contract = JSON.parse(readFileSync(resolve(base, "metrics/contract.v1.json"), "utf8"));
   assert(contract.schemaVersion === "robin.mainnet.metrics.v1", "unexpected metric contract version");
-  assert(contract.status === "instrumentation-required", "metric contract must not claim live instrumentation");
-  assert(contract.assumptions?.capitalEnabled === false, "metric contract must keep capital disabled");
-  assert(contract.assumptions?.servicesEnabled === false, "metric contract must keep services disabled");
+  assert(contract.status === "canary-active", "metric contract must declare the active canary");
+  assert(contract.assumptions?.capitalEnabled === true, "metric contract must declare canary capital enabled");
+  assert(contract.assumptions?.servicesEnabled === true, "metric contract must declare canary services enabled");
 
   const metricNames = new Set();
   for (const metric of contract.metrics ?? []) {
@@ -110,7 +110,7 @@ export function validateRepository(root) {
   assert(dashboard.uid === "robin-mainnet-live-v1", "unexpected dashboard UID");
   assert(dashboard.editable === false, "dashboard must be provisioned read-only");
   assert(dashboard.schemaVersion >= 39, "dashboard schema is too old");
-  assert(dashboard.tags?.includes("disabled-by-default"), "dashboard must declare its disabled state");
+  assert(dashboard.tags?.includes("active-canary"), "dashboard must declare the active canary state");
   assert(dashboard.description?.includes("not that the system is healthy"), "dashboard must fail closed on empty telemetry");
 
   const variables = new Set((dashboard.templating?.list ?? []).map(variable => variable.name));
@@ -131,8 +131,8 @@ export function validateRepository(root) {
   assert(provider.includes("allowUiUpdates: false"), "dashboard UI updates must be disabled");
 
   const runbook = readFileSync(resolve(root, "docs/mainnet-operations-runbook.md"), "utf8");
-  assert(runbook.includes("They are not authorization to enable a service or place capital."), "runbook must state the no-capital boundary");
-  assert(runbook.includes("An empty dashboard is missing evidence, not a healthy system."), "runbook must fail closed on missing telemetry");
+  assert(runbook.includes("The repository policy authorizes one capped account"), "runbook must state the canary authorization boundary");
+  assert(/An empty dashboard is\s+missing evidence, not a healthy system\./.test(runbook), "runbook must fail closed on missing telemetry");
   for (const path of REQUIRED_KILL_PATHS) {
     assert(runbook.includes(`### ${path} kill path`), `runbook is missing the ${path.toLowerCase()} kill path`);
   }

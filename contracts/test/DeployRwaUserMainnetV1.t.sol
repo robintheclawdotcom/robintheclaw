@@ -6,7 +6,6 @@ import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { DeployRwaUserMainnetV1 } from "../script/DeployRwaUserMainnetV1.s.sol";
 import { MainnetExecutionRegistry } from "../src/MainnetExecutionRegistry.sol";
 import { IMainnetExecutionRegistry } from "../src/interfaces/IMainnetExecutionRegistry.sol";
-import { IChainlinkFeed } from "../src/interfaces/IChainlinkFeed.sol";
 import { IPermit2AllowanceTransfer, IUniversalRouter } from "../src/interfaces/IUniswapV4.sol";
 import { IRwaUserVaultFactoryV1 } from "../src/interfaces/IRwaUserVaultFactoryV1.sol";
 
@@ -30,35 +29,37 @@ contract ReleasePermit2Mock is IPermit2AllowanceTransfer {
     function approve(address, address, uint160, uint48) external { }
 }
 
-contract ReleaseMarketFeedMock is IChainlinkFeed {
-    function decimals() external pure returns (uint8) {
-        return 8;
-    }
-
-    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
-        return (1, 100e8, block.timestamp, block.timestamp, 1);
-    }
-}
-
-contract ReleaseInvalidFeedMock is IChainlinkFeed {
-    function decimals() external pure returns (uint8) {
-        return 18;
-    }
-
-    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
-        return (1, 100e18, block.timestamp, block.timestamp, 1);
-    }
-}
+contract ReleaseGovernanceSafeMock { }
 
 contract ReleaseTimelockMock {
-    uint256 private immutable delay;
+    bytes32 public constant PROPOSER_ROLE = keccak256("PROPOSER_ROLE");
+    bytes32 public constant CANCELLER_ROLE = keccak256("CANCELLER_ROLE");
+    bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
+    bytes32 public constant DEFAULT_ADMIN_ROLE = bytes32(0);
 
-    constructor(uint256 delay_) {
+    uint256 private immutable delay;
+    address private immutable safe;
+    bool private openExecutor;
+
+    constructor(uint256 delay_, address safe_) {
         delay = delay_;
+        safe = safe_;
     }
 
     function getMinDelay() external view returns (uint256) {
         return delay;
+    }
+
+    function hasRole(bytes32 role, address account) external view returns (bool) {
+        if (role == DEFAULT_ADMIN_ROLE) return account == address(this);
+        if (account == safe) {
+            return role == PROPOSER_ROLE || role == CANCELLER_ROLE || role == EXECUTOR_ROLE;
+        }
+        return openExecutor && role == EXECUTOR_ROLE && account == address(0);
+    }
+
+    function setOpenExecutor(bool open) external {
+        openExecutor = open;
     }
 }
 
@@ -81,22 +82,24 @@ contract DeployRwaUserMainnetV1Test is Test {
 
     DeployRwaUserMainnetV1Harness private script;
     ReleaseTimelockMock private timelock;
-    ReleaseMarketFeedMock private marketFeed;
-
+    ReleaseGovernanceSafeMock private governanceSafe;
     address private guardian = makeAddr("guardian");
     address private publisher1 = makeAddr("publisher-1");
     address private publisher2 = makeAddr("publisher-2");
     address private publisher3 = makeAddr("publisher-3");
+    address private aaplPublisher1 = makeAddr("aapl-publisher-1");
+    address private aaplPublisher2 = makeAddr("aapl-publisher-2");
+    address private aaplPublisher3 = makeAddr("aapl-publisher-3");
 
     function setUp() public {
         vm.chainId(4663);
         _installCanonicalContracts();
         script = new DeployRwaUserMainnetV1Harness();
-        timelock = new ReleaseTimelockMock(2 days);
-        marketFeed = new ReleaseMarketFeedMock();
+        governanceSafe = new ReleaseGovernanceSafeMock();
+        timelock = new ReleaseTimelockMock(2 days, address(governanceSafe));
     }
 
-    function testDeploysReproducibleDisabledRelease() public {
+    function testDeploysReproducibleRelease() public {
         DeployRwaUserMainnetV1.ReleaseConfig memory config = _config();
         uint256 snapshot = vm.snapshotState();
         DeployRwaUserMainnetV1.Deployment memory first = script.deploy(config);
@@ -109,26 +112,40 @@ contract DeployRwaUserMainnetV1Test is Test {
         assertEq(first.sequencerFeed.publisher1(), publisher1);
         assertEq(first.sequencerFeed.publisher2(), publisher2);
         assertEq(first.sequencerFeed.publisher3(), publisher3);
+        assertEq(first.marketFeed.publisherCount(), 3);
+        assertEq(first.marketFeed.quorum(), 2);
+        assertEq(first.marketFeed.maxReportAge(), 60 seconds);
+        assertEq(first.marketFeed.maxSourceAge(), 25 hours);
+        assertEq(first.marketFeed.publisher1(), aaplPublisher1);
+        assertEq(first.marketFeed.publisher2(), aaplPublisher2);
+        assertEq(first.marketFeed.publisher3(), aaplPublisher3);
 
         IRwaUserVaultFactoryV1.Policy memory policy = first.factory.policy();
         assertEq(policy.settlementAsset, USDG);
         assertEq(policy.stockToken, AAPL);
+        assertEq(policy.marketFeed, address(first.marketFeed));
         assertEq(policy.router, ROUTER);
         assertEq(policy.permit2, PERMIT2);
         assertEq(policy.poolKey.currency0, USDG);
         assertEq(policy.poolKey.currency1, AAPL);
-        assertEq(policy.poolKey.fee, 3000);
-        assertEq(policy.poolKey.tickSpacing, 60);
+        assertEq(policy.poolKey.fee, 10_000);
+        assertEq(policy.poolKey.tickSpacing, 200);
         assertEq(policy.poolKey.hooks, address(0));
+        assertEq(
+            keccak256(abi.encode(policy.poolKey)),
+            0xda4116b5894ee7479e64eae9276e1a2944ef0e5ce863a299d296a15618deee01
+        );
         assertEq(policy.maxSpotNotional, 25e6);
         assertEq(policy.maxPairGross, 50e6);
         assertEq(policy.turnoverLimit, 50e6);
         assertEq(policy.turnoverWindow, 1 days);
-        assertEq(policy.heartbeat, 60 seconds);
+        assertEq(policy.heartbeat, 25 hours);
+        assertEq(policy.maxSlippageBps, 200);
         assertEq(policy.policyVersion, 1);
         assertEq(first.factory.policyDigest(), keccak256(abi.encode(policy)));
 
         address firstFeed = address(first.sequencerFeed);
+        address firstMarketFeed = address(first.marketFeed);
         address firstRegistry = address(first.registry);
         address firstFactory = address(first.factory);
         bytes32 firstDigest = first.factory.policyDigest();
@@ -136,20 +153,45 @@ contract DeployRwaUserMainnetV1Test is Test {
         assertTrue(vm.revertToState(snapshot));
         DeployRwaUserMainnetV1.Deployment memory second = script.deploy(config);
         assertEq(address(second.sequencerFeed), firstFeed);
+        assertEq(address(second.marketFeed), firstMarketFeed);
         assertEq(address(second.registry), firstRegistry);
         assertEq(address(second.factory), firstFactory);
         assertEq(second.factory.policyDigest(), firstDigest);
     }
 
-    function testReturnsApprovalCalldataWithoutApprovingFactory() public {
+    function testReturnsOneActivationBatch() public {
+        DeployRwaUserMainnetV1.ReleaseConfig memory config = _config();
         DeployRwaUserMainnetV1.Deployment memory deployment = script.deploy(_config());
-        bytes memory approval = script.approvalCalldata(deployment);
-        bytes memory expected = abi.encodeCall(
+        DeployRwaUserMainnetV1.ActivationBatch memory batch =
+            script.activationBatch(config, deployment);
+        bytes memory expectedApproval = abi.encodeCall(
             MainnetExecutionRegistry.approveFactory,
             (address(deployment.factory), address(deployment.factory).codehash)
         );
+        bytes memory expectedActive = abi.encodeCall(
+            MainnetExecutionRegistry.setGlobalMode, (IMainnetExecutionRegistry.Mode.Active)
+        );
 
-        assertEq(approval, expected);
+        assertEq(batch.targets.length, 2);
+        assertEq(batch.values.length, 2);
+        assertEq(batch.payloads.length, 2);
+        assertEq(batch.targets[0], address(deployment.registry));
+        assertEq(batch.targets[1], address(deployment.registry));
+        assertEq(batch.values[0], 0);
+        assertEq(batch.values[1], 0);
+        assertEq(batch.payloads[0], expectedApproval);
+        assertEq(batch.payloads[1], expectedActive);
+        assertEq(batch.delay, 2 days);
+        assertTrue(script.scheduleActivationCalldata(config, deployment).length > 4);
+        assertTrue(script.executeActivationCalldata(config, deployment).length > 4);
+        assertEq(
+            script.activationOperationId(config, deployment),
+            keccak256(
+                abi.encode(
+                    batch.targets, batch.values, batch.payloads, batch.predecessor, batch.salt
+                )
+            )
+        );
         assertEq(deployment.registry.configAdmin(), address(timelock));
         assertFalse(deployment.registry.isFactoryApproved(address(deployment.factory)));
         assertEq(
@@ -159,14 +201,14 @@ contract DeployRwaUserMainnetV1Test is Test {
 
     function testRejectsPublisherOverlap() public {
         DeployRwaUserMainnetV1.ReleaseConfig memory config = _config();
-        config.publisher3 = config.publisher1;
+        config.sequencerPublisher3 = config.sequencerPublisher1;
         vm.expectRevert(DeployRwaUserMainnetV1.InvalidConfiguration.selector);
         script.deploy(config);
     }
 
     function testRejectsControlRoleOverlap() public {
         DeployRwaUserMainnetV1.ReleaseConfig memory config = _config();
-        config.guardian = config.publisher1;
+        config.guardian = config.sequencerPublisher1;
         vm.expectRevert(DeployRwaUserMainnetV1.InvalidConfiguration.selector);
         script.deploy(config);
     }
@@ -178,25 +220,9 @@ contract DeployRwaUserMainnetV1Test is Test {
         script.deploy(config);
     }
 
-    function testRejectsMarketFeedCodeHashMismatch() public {
+    function testRejectsRelayAndSequencerRoleOverlap() public {
         DeployRwaUserMainnetV1.ReleaseConfig memory config = _config();
-        config.marketFeedCodeHash = keccak256("wrong-market-feed");
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                DeployRwaUserMainnetV1.CodeHashMismatch.selector,
-                address(marketFeed),
-                config.marketFeedCodeHash,
-                address(marketFeed).codehash
-            )
-        );
-        script.deploy(config);
-    }
-
-    function testRejectsUnexpectedMarketFeedDecimals() public {
-        ReleaseInvalidFeedMock invalidFeed = new ReleaseInvalidFeedMock();
-        DeployRwaUserMainnetV1.ReleaseConfig memory config = _config();
-        config.marketFeed = address(invalidFeed);
-        config.marketFeedCodeHash = address(invalidFeed).codehash;
+        config.aaplPublisher1 = config.sequencerPublisher1;
         vm.expectRevert(DeployRwaUserMainnetV1.InvalidConfiguration.selector);
         script.deploy(config);
     }
@@ -206,6 +232,12 @@ contract DeployRwaUserMainnetV1Test is Test {
         config.timelockMinDelay = 1 days;
         vm.expectRevert(DeployRwaUserMainnetV1.InvalidConfiguration.selector);
         script.deploy(config);
+    }
+
+    function testRejectsOpenTimelockExecutor() public {
+        timelock.setOpenExecutor(true);
+        vm.expectRevert(DeployRwaUserMainnetV1.InvalidConfiguration.selector);
+        script.deploy(_config());
     }
 
     function testRejectsZeroDeploymentSalt() public {
@@ -226,12 +258,14 @@ contract DeployRwaUserMainnetV1Test is Test {
             timelock: address(timelock),
             timelockCodeHash: address(timelock).codehash,
             timelockMinDelay: 2 days,
+            governanceSafe: address(governanceSafe),
             guardian: guardian,
-            publisher1: publisher1,
-            publisher2: publisher2,
-            publisher3: publisher3,
-            marketFeed: address(marketFeed),
-            marketFeedCodeHash: address(marketFeed).codehash,
+            sequencerPublisher1: publisher1,
+            sequencerPublisher2: publisher2,
+            sequencerPublisher3: publisher3,
+            aaplPublisher1: aaplPublisher1,
+            aaplPublisher2: aaplPublisher2,
+            aaplPublisher3: aaplPublisher3,
             deploymentSalt: keccak256("release-1")
         });
     }

@@ -12,9 +12,10 @@
     "pool": {
       "currency0": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
       "currency1": "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9",
-      "fee": 3000,
-      "tickSpacing": 60,
-      "hooks": "0x0000000000000000000000000000000000000000"
+      "fee": 10000,
+      "tickSpacing": 200,
+      "hooks": "0x0000000000000000000000000000000000000000",
+      "poolId": "0xda4116b5894ee7479e64eae9276e1a2944ef0e5ce863a299d296a15618deee01"
     }
   },
   "perp": {

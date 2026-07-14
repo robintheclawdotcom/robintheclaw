@@ -3,32 +3,28 @@
   "strategyVersion": "basis-aapl-v1",
   "strategyManifestSha256": "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a",
   "chainId": 4663,
-  "rolloutStage": "build",
-  "executionEnabled": false,
-  "capitalActivationAllowed": false,
+  "rolloutStage": "canary",
+  "executionEnabled": true,
+  "capitalActivationAllowed": true,
   "limits": {
-    "maxAccounts": 0,
+    "maxAccounts": 1,
     "maxLegNotionalMicros": 25000000,
     "maxGrossNotionalMicros": 50000000,
     "maxDailyTurnoverMicros": 50000000,
     "maxLeveragePpm": 1000000,
     "maxActiveEpisodesPerAccount": 1,
-    "maxAggregatePerVenueMicros": 0
+    "maxAggregatePerVenueMicros": 25000000
   },
   "requiredGates": {
-    "captureWindow": false,
-    "shadowWindow": false,
-    "contractAudit": false,
-    "executorReview": false,
-    "keyReview": false,
-    "legalApproval": false,
-    "venueApproval": false,
-    "oracleReview": false,
-    "sequencerHealth": false,
-    "reconciliation": false,
-    "exitAuthority": false,
-    "alerting": false,
-    "restoreDrill": false,
-    "safeOwnerRotation": false
+    "internalAudit": true,
+    "executorReview": true,
+    "keyReview": true,
+    "oracleReview": true,
+    "sequencerHealth": true,
+    "reconciliation": true,
+    "exitAuthority": true,
+    "alerting": true,
+    "restoreDrill": true,
+    "safeOwnerRotation": true
   }
 }

@@ -17,6 +17,24 @@ type PGStore struct {
 	workerID string
 }
 
+type storedIntent struct {
+	ID                         string `json:"id"`
+	SpotUnwindIntentID         string `json:"spot_unwind_intent_id"`
+	ExecutionAccountID         string `json:"execution_account_id"`
+	AgentID                    string `json:"agent_id"`
+	SourceEvaluationID         string `json:"source_evaluation_id"`
+	MinimumUnwindSettlementOut string `json:"minimum_unwind_settlement_out"`
+}
+
+type storedSaga struct {
+	IntentID        string `json:"intent_id"`
+	State           string `json:"state"`
+	Version         uint64 `json:"version"`
+	PerpFilledBase  uint64 `json:"perp_filled_base"`
+	PerpUnwoundBase uint64 `json:"perp_unwound_base"`
+	SpotReceivedRaw string `json:"spot_received_raw"`
+}
+
 func NewPGStore(pool *pgxpool.Pool, workerID string) (*PGStore, error) {
 	if pool == nil || !accountPattern.MatchString(workerID) {
 		return nil, errors.New("pool and valid worker ID are required")
@@ -34,7 +52,7 @@ func (s *PGStore) Claim(ctx context.Context, now time.Time, lease time.Duration)
 SELECT a.evaluation_id, a.execution_account_id, a.agent_id, a.approval_sha256,
        a.expires_at, a.evaluation, a.readiness, a.account_state,
        w.request_id, w.requested_at_ms, w.quote_body, w.quote_sha256,
-       w.runner_body, w.runner_sha256
+	       w.runner_body, w.runner_sha256, intent.payload, intent.saga, intent.saga_version
 FROM live_scheduler_work w
 JOIN live_scheduler_approvals a USING (evaluation_id, execution_account_id)
 JOIN execution_accounts account
@@ -55,18 +73,35 @@ JOIN execution_account_registrations registration
  AND registration.robinhood_vault = account.robinhood_vault
  AND registration.robinhood_signer = account.robinhood_signer
  AND registration.binding_sha256 = account.binding_sha256
+LEFT JOIN live_strategy_exit_bindings exit_binding
+  ON exit_binding.exit_evaluation_id = a.evaluation_id
+ AND exit_binding.execution_account_id = a.execution_account_id
+LEFT JOIN execution_intents intent
+  ON intent.id = a.evaluation->>'pair_intent_id'
+ AND intent.execution_account_id = a.execution_account_id
+ AND intent.agent_id = a.agent_id
 WHERE w.state IN ('pending', 'quoted', 'running', 'ambiguous')
+	AND a.approval_version = 2
   AND (w.lease_until IS NULL OR w.lease_until <= $3)
+  AND (
+    a.evaluation->>'action' = 'entry'
+    OR (a.evaluation->>'action' = 'unwind'
+        AND exit_binding.intent_id = intent.id
+        AND intent.active)
+  )
 ORDER BY a.approved_at, a.execution_account_id
 FOR UPDATE OF w SKIP LOCKED
 LIMIT 1`, StrategyVersion, StrategyManifestSHA256, now)
 	var dispatch Dispatch
 	var evaluation, readiness, accountState []byte
+	var intentBody, sagaBody []byte
+	var sagaVersion *int64
 	var requestID, quoteSHA, runnerSHA *string
 	var requestedAt *int64
 	if err := row.Scan(&dispatch.EvaluationID, &dispatch.ExecutionAccountID, &dispatch.AgentID,
 		&dispatch.ApprovalSHA256, &dispatch.ExpiresAt, &evaluation, &readiness, &accountState,
-		&requestID, &requestedAt, &dispatch.QuoteBody, &quoteSHA, &dispatch.RunnerBody, &runnerSHA); err != nil {
+		&requestID, &requestedAt, &dispatch.QuoteBody, &quoteSHA, &dispatch.RunnerBody, &runnerSHA,
+		&intentBody, &sagaBody, &sagaVersion); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, tx.Commit(ctx)
 		}
@@ -80,6 +115,22 @@ LIMIT 1`, StrategyVersion, StrategyManifestSHA256, now)
 	}
 	if err := decodeStrict(accountState, &dispatch.AccountState); err != nil {
 		return nil, fmt.Errorf("decode stored account state: %w", err)
+	}
+	if dispatch.Evaluation.Action == ActionUnwind {
+		var intent storedIntent
+		var saga storedSaga
+		if len(intentBody) == 0 || len(sagaBody) == 0 || json.Unmarshal(intentBody, &intent) != nil || json.Unmarshal(sagaBody, &saga) != nil ||
+			intent.ID != dispatch.Evaluation.PairIntentID || intent.ExecutionAccountID != dispatch.ExecutionAccountID ||
+			intent.AgentID != dispatch.AgentID || saga.IntentID != intent.ID || saga.State != "hedged" || sagaVersion == nil ||
+			*sagaVersion < 0 || uint64(*sagaVersion) != saga.Version ||
+			saga.PerpFilledBase == 0 || saga.PerpUnwoundBase != 0 || !positiveDecimal(saga.SpotReceivedRaw) {
+			return nil, errors.New("stored unwind episode is not canonical")
+		}
+		dispatch.OpenEpisode = &OpenEpisode{
+			PairIntentID: intent.ID, SpotUnwindIntentID: intent.SpotUnwindIntentID,
+			SpotAmount: saga.SpotReceivedRaw, MinimumSettlementAmountOut: intent.MinimumUnwindSettlementOut,
+			PerpBaseAmount: saga.PerpFilledBase,
+		}
 	}
 	if requestID != nil {
 		dispatch.RequestID = *requestID
@@ -132,6 +183,7 @@ SELECT EXISTS (
     ON strategy_control.strategy_version = account.strategy_version
    AND strategy_control.strategy_manifest_sha256 = account.strategy_manifest_sha256
   CROSS JOIN execution_control global_control
+	CROSS JOIN execution_rollout_readiness rollout_readiness
   CROSS JOIN LATERAL (
     SELECT to_state
     FROM execution_promotion_events
@@ -144,18 +196,27 @@ SELECT EXISTS (
     AND account.strategy_version = $3
     AND account.strategy_manifest_sha256 = $4
     AND account.status = 'active'
-    AND account_control.mode = 'ACTIVE'
-    AND strategy_control.mode = 'ACTIVE'
-    AND global_control.mode = 'ACTIVE'
+	AND (
+	  ($5 = 'entry' AND account_control.mode = 'ACTIVE'
+	                  AND strategy_control.mode = 'ACTIVE'
+	                  AND global_control.mode = 'ACTIVE')
+	  OR ($5 = 'unwind' AND account_control.mode IN ('ACTIVE', 'REDUCE_ONLY')
+	                   AND strategy_control.mode IN ('ACTIVE', 'REDUCE_ONLY')
+	                   AND global_control.mode IN ('ACTIVE', 'REDUCE_ONLY'))
+	)
+	AND global_control.singleton
+	AND rollout_readiness.singleton
     AND promotion.to_state = 'canary_eligible'
     AND coordinator_readiness.venue_approved
     AND coordinator_readiness.oracle_healthy
     AND coordinator_readiness.sequencer_healthy
     AND coordinator_readiness.reconciliation_ready
     AND coordinator_readiness.exit_authority_ready
-    AND coordinator_readiness.alerting_ready
-    AND coordinator_readiness.safe_rotation_ready
-)`, dispatch.ExecutionAccountID, dispatch.AgentID, StrategyVersion, StrategyManifestSHA256).Scan(&eligible)
+	AND coordinator_readiness.updated_at > now() - interval '5 seconds'
+	AND rollout_readiness.alerting_ready
+	AND rollout_readiness.safe_rotation_ready
+)`, dispatch.ExecutionAccountID, dispatch.AgentID, StrategyVersion, StrategyManifestSHA256,
+		dispatch.Evaluation.Action).Scan(&eligible)
 	return eligible, err
 }
 
@@ -184,19 +245,65 @@ WHERE evaluation_id = $1 AND execution_account_id = $2 AND lease_owner = $5
 }
 
 func (s *PGStore) Complete(ctx context.Context, dispatch Dispatch, body []byte, sha string) error {
-	return s.finish(ctx, dispatch, "succeeded", "completed", body, sha, "")
+	return s.finishWith(ctx, dispatch, "succeeded", "completed", body, sha, "", func(tx pgx.Tx) error {
+		if dispatch.Evaluation.Action != ActionEntry {
+			return nil
+		}
+		var output runOutput
+		var intent pairIdentity
+		if decodeStrict(body, &output) != nil || json.Unmarshal(output.PairIntent, &intent) != nil ||
+			intent.ID == "" || intent.ExecutionAccountID != dispatch.ExecutionAccountID ||
+			intent.AgentID != dispatch.AgentID || intent.SourceEvaluationID != dispatch.EvaluationID {
+			return errors.New("completed entry output cannot be bound")
+		}
+		command, err := tx.Exec(ctx, `
+INSERT INTO live_execution_episode_bindings (
+    execution_account_id, source_episode_id, source_entry_evaluation_id,
+    entry_evaluation_id, intent_id, agent_id, market_manifest
+)
+SELECT $1, $2::uuid, $3::uuid, $4, $5, $6, $7
+FROM execution_intents intent
+WHERE intent.id = $5
+  AND intent.execution_account_id = $1
+  AND intent.agent_id = $6
+  AND intent.source_evaluation_id = $4
+  AND intent.active
+ON CONFLICT DO NOTHING`, dispatch.ExecutionAccountID, dispatch.Evaluation.SourceEpisodeID,
+			dispatch.Evaluation.PaperEvaluationID, dispatch.EvaluationID, intent.ID,
+			dispatch.AgentID, dispatch.Evaluation.MarketManifest)
+		if err != nil {
+			return fmt.Errorf("bind live execution episode: %w", err)
+		}
+		if command.RowsAffected() == 1 {
+			return nil
+		}
+		var identical bool
+		err = tx.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM live_execution_episode_bindings
+  WHERE execution_account_id = $1 AND source_episode_id = $2::uuid
+    AND source_entry_evaluation_id = $3::uuid AND entry_evaluation_id = $4
+    AND intent_id = $5 AND agent_id = $6 AND market_manifest = $7
+)`, dispatch.ExecutionAccountID, dispatch.Evaluation.SourceEpisodeID,
+			dispatch.Evaluation.PaperEvaluationID, dispatch.EvaluationID, intent.ID,
+			dispatch.AgentID, dispatch.Evaluation.MarketManifest).Scan(&identical)
+		if err != nil || !identical {
+			return errors.New("live execution episode binding conflicts")
+		}
+		return nil
+	})
 }
 
 func (s *PGStore) Ambiguous(ctx context.Context, dispatch Dispatch, body []byte, sha string) error {
-	return s.finish(ctx, dispatch, "ambiguous", "runner_ambiguous", body, sha, "")
+	return s.finishWith(ctx, dispatch, "ambiguous", "runner_ambiguous", body, sha, "", nil)
 }
 
 func (s *PGStore) Retry(ctx context.Context, dispatch Dispatch, reason string) error {
-	return s.finish(ctx, dispatch, "pending", "retry_scheduled", nil, "", reason)
+	return s.finishWith(ctx, dispatch, "pending", "retry_scheduled", nil, "", reason, nil)
 }
 
 func (s *PGStore) Block(ctx context.Context, dispatch Dispatch, reason string) error {
-	return s.finish(ctx, dispatch, "blocked", "blocked", nil, "", reason)
+	return s.finishWith(ctx, dispatch, "blocked", "blocked", nil, "", reason, nil)
 }
 
 func (s *PGStore) update(ctx context.Context, dispatch Dispatch, event string, details map[string]any, query string, args ...any) error {
@@ -219,7 +326,14 @@ func (s *PGStore) update(ctx context.Context, dispatch Dispatch, event string, d
 	return tx.Commit(ctx)
 }
 
-func (s *PGStore) finish(ctx context.Context, dispatch Dispatch, state, event string, body []byte, sha, reason string) error {
+func (s *PGStore) finishWith(
+	ctx context.Context,
+	dispatch Dispatch,
+	state, event string,
+	body []byte,
+	sha, reason string,
+	after func(pgx.Tx) error,
+) error {
 	if len(reason) > 240 {
 		reason = reason[:240]
 	}
@@ -231,11 +345,32 @@ func (s *PGStore) finish(ctx context.Context, dispatch Dispatch, state, event st
 	if reason != "" {
 		details["reason"] = reason
 	}
-	return s.update(ctx, dispatch, event, details, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	command, err := tx.Exec(ctx, `
 UPDATE live_scheduler_work
 SET state = $3, outcome_body = NULLIF($4, ''::bytea), outcome_sha256 = NULLIF($5, ''),
     last_error = NULLIF($6, ''), lease_owner = NULL, lease_until = NULL, updated_at = now()
-WHERE evaluation_id = $1 AND execution_account_id = $2 AND lease_owner = $7`, state, body, sha, reason, s.workerID)
+WHERE evaluation_id = $1 AND execution_account_id = $2 AND lease_owner = $7`,
+		dispatch.EvaluationID, dispatch.ExecutionAccountID, state, body, sha, reason, s.workerID)
+	if err != nil {
+		return fmt.Errorf("finish scheduler dispatch: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return errors.New("scheduler dispatch lease changed concurrently")
+	}
+	if after != nil {
+		if err := after(tx); err != nil {
+			return err
+		}
+	}
+	if err := insertEvent(ctx, tx, dispatch, event, details); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func insertEvent(ctx context.Context, tx pgx.Tx, dispatch Dispatch, kind string, details map[string]any) error {

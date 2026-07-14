@@ -2,10 +2,10 @@
 
 ## Status
 
-The typed production contract layer is deployed, source-verified, halted, and unfunded on Robinhood
-Chain mainnet. Execution services remain capital-disabled by default. Their presence does not
-authorize signing, funding, market activation, or order submission; those transitions follow the
-promotion, audit, legal, key-review, and operating controls defined by the activation program.
+The repository authorizes the capped `basis-aapl-v1` canary on Robinhood Chain mainnet. Production
+services are enabled in the deployment blueprint. Order admission still requires a registered
+execution account, current authenticated venue state, executable quotes, active account controls,
+and the fixed capital policy.
 
 ## Authority boundaries
 
@@ -97,9 +97,9 @@ exact request body, and PostgreSQL claims each request nonce before processing, 
 blocked across coordinator restarts. Lifecycle events cannot be posted through the intent or quote
 interfaces. Only the authenticated venue-event path can advance reconciliation.
 
-The coordinator database starts in `HALTED`. Admission requires an operator-reviewed transition to
-`ACTIVE`, a latest promotion state of `canary_eligible`, current promotion evidence, and no unresolved
-episode anywhere in the deployment. A later `retired` or `rejected` transition revokes admission.
+The coordinator database migration promotes the canonical canary controls to `ACTIVE`. Admission
+requires current `canary_eligible` promotion evidence and no unresolved episode for that execution
+account. A later `retired` or `rejected` transition revokes admission.
 `REDUCE_ONLY` and `HALTED` block new short orders but continue reconciliation, spot hedges, and
 emergency unwinds. An ambiguous or failed-safe action atomically returns the coordinator to
 `HALTED`.
@@ -290,9 +290,9 @@ The current mapping is:
 
 Robinhood Chain is an Arbitrum Nitro L2 that posts data to Ethereum and requires L1 execution and
 beacon endpoints for a full node: [Robinhood full-node requirements](https://docs.robinhood.com/chain/run-a-full-node/).
-Provider and Nitro-version semantics for `safe` and `finalized` must be revalidated during every
-release and independent executor review. The service must remain disabled if either provider does
-not expose the required semantics.
+Provider and Nitro-version semantics for `safe` and `finalized` are revalidated during every
+release and internal executor review. The service rejects sends if either provider does not expose
+the required semantics.
 
 ## Required configuration
 
@@ -338,7 +338,7 @@ status edits are not a recovery procedure.
 
 ## Release verification
 
-The signer release is blocked unless all of the following pass:
+The signer release is accepted only when all of the following pass:
 
 - Go formatting, unit tests, race detector, vet, and dependency audit;
 - PostgreSQL integration tests on a fresh database;
@@ -349,6 +349,7 @@ The signer release is blocked unless all of the following pass:
 - KMS high-S, recovery-bit, malformed-DER, wrong-key, and timeout tests;
 - repository identity, secret, and privacy checks;
 - private-service Blueprint validation;
-- independent signer, key-policy, and incident-response review.
+- internal signer, key-policy, and incident-response review.
 
-The service remains unfunded and disabled until the wider capital-activation gates pass.
+The service is enabled and remains unable to send unless its account binding, KMS identity, gas
+balance, fee policy, nonce journal, and dual-RPC verification all pass.

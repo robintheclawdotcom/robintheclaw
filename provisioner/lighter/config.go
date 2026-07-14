@@ -30,6 +30,8 @@ type config struct {
 	PublisherMaxRequestsPerMinute uint16
 	PublisherMaxConcurrent        uint8
 	PublisherMarketID             uint16
+	MarketBaseDecimals            uint8
+	MarketPriceDecimals           uint8
 	AssociationTTL                time.Duration
 }
 
@@ -100,6 +102,16 @@ func loadConfig() (config, error) {
 		return config{}, errors.New("LIGHTER_PUBLISHER_MARKET_ID must be between 1 and 254")
 	}
 	value.PublisherMarketID = uint16(marketID)
+	baseDecimals, err := strconv.ParseUint(os.Getenv("LIGHTER_AAPL_BASE_DECIMALS"), 10, 8)
+	if err != nil || baseDecimals > 18 {
+		return config{}, errors.New("LIGHTER_AAPL_BASE_DECIMALS must be between 0 and 18")
+	}
+	value.MarketBaseDecimals = uint8(baseDecimals)
+	priceDecimals, err := strconv.ParseUint(os.Getenv("LIGHTER_AAPL_PRICE_DECIMALS"), 10, 8)
+	if err != nil || priceDecimals > 18 {
+		return config{}, errors.New("LIGHTER_AAPL_PRICE_DECIMALS must be between 0 and 18")
+	}
+	value.MarketPriceDecimals = uint8(priceDecimals)
 	if raw := os.Getenv("LIGHTER_ASSOCIATION_TTL"); raw != "" {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil || parsed < time.Minute || parsed > 30*time.Minute {

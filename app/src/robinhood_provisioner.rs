@@ -29,7 +29,7 @@ pub struct PrepareGraph<'a> {
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmGraph<'a> {
     pub execution_account_id: Uuid,
-    pub deployment_transaction_hash: &'a str,
+    pub transaction_hash: &'a str,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -64,6 +64,8 @@ pub struct PublicGraphBinding {
     pub status: String,
     pub deployment_transaction_hash: Option<String>,
     pub deployment_block: Option<u64>,
+    pub authorization_transaction_hash: Option<String>,
+    pub authorization_block: Option<u64>,
     #[serde(default)]
     pub actions: Vec<UnsignedAction>,
     pub updated_at: String,

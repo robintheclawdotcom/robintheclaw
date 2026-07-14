@@ -2,6 +2,8 @@
 
 The provisioner owns envelope-encrypted Lighter credentials. Product callers can prepare and confirm owner-authorized key associations. The transaction signer can request account-bound signatures. The account publisher can request read-only state using only an `executionAccountId`. No route accepts or returns an Ethereum private key, Lighter private key, withdrawal, or transfer request.
 
+Link preparation accepts only the execution-account ID, owner address, and server-pinned API-key index. The provisioner discovers every account for the owner through Lighter's mainnet API, excludes the minimum-index master account, and accepts exactly one account-type-1 subaccount only after both summary and detailed account responses show no orders, positions, collateral, or asset balance. It fetches the association nonce from `nextNonce`; callers cannot supply either account index or nonce. No eligible account and multiple eligible accounts both fail closed with a create-or-resolve instruction.
+
 The publisher bridge requires a caller and 32-byte hex HMAC key distinct from the product and signer credentials:
 
 - `LIGHTER_PUBLISHER_BRIDGE_CALLER_ID=account-publisher`

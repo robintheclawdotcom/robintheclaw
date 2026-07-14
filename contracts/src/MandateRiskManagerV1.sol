@@ -370,7 +370,7 @@ contract MandateRiskManagerV1 {
             if (inventory[intent.stockToken] == 0 && activeMarketCount >= maxActiveMarkets) {
                 revert ActiveMarketLimitExceeded(activeMarketCount + 1, maxActiveMarkets);
             }
-            uint256 currentGross = _currentGrossNotional(address(0), 0, 0);
+            uint256 currentGross = _currentGrossNotional(address(0), 0, 0, 0);
             uint256 projectedGross = currentGross + notional;
             if (projectedGross > grossNotionalLimit) {
                 revert GrossLimitExceeded(projectedGross, grossNotionalLimit);
@@ -381,13 +381,15 @@ contract MandateRiskManagerV1 {
             if (intent.amountIn > available) {
                 revert InsufficientInventory(intent.amountIn, available);
             }
-            notional = _tokenNotional(intent.amountIn, price, market);
+            notional = intent.amountIn == available
+                ? inventoryCost[intent.stockToken]
+                : _tokenNotional(intent.amountIn, price, multiplier, market, Math.Rounding.Ceil);
             _consumeTurnover(notional);
         }
         if (notional > market.maxOrderNotional) {
             revert OrderLimitExceeded(notional, market.maxOrderNotional);
         }
-        _checkMinimumOutput(intent, price, market);
+        _checkMinimumOutput(intent, price, multiplier, market);
 
         usedIntent[intent.id] = true;
         pending = PendingExecution({
@@ -429,7 +431,8 @@ contract MandateRiskManagerV1 {
             if (multiplier != execution.expectedUIMultiplier) {
                 revert MultiplierMismatch(execution.expectedUIMultiplier, multiplier);
             }
-            uint256 nextGross = _currentGrossNotional(execution.stockToken, nextInventory, price);
+            uint256 nextGross =
+                _currentGrossNotional(execution.stockToken, nextInventory, price, multiplier);
             if (nextGross > grossNotionalLimit) {
                 revert GrossLimitExceeded(nextGross, grossNotionalLimit);
             }
@@ -477,7 +480,7 @@ contract MandateRiskManagerV1 {
     function grossExposure() public view returns (uint256) {
         if (activeMarketCount == 0) return 0;
         _checkSequencer();
-        return _currentGrossNotional(address(0), 0, 0);
+        return _currentGrossNotional(address(0), 0, 0, 0);
     }
 
     function currentGrossNotional() external view returns (uint256) {
@@ -630,6 +633,7 @@ contract MandateRiskManagerV1 {
     function _checkMinimumOutput(
         ISpotExecution.SpotIntent calldata intent,
         uint256 price,
+        uint256 multiplier,
         MarketConfig memory market
     ) private view {
         uint256 retainedBps = BPS - market.maxSlippageBps;
@@ -637,9 +641,12 @@ contract MandateRiskManagerV1 {
         uint256 supplied;
         if (intent.side == ISpotExecution.Side.BuySpot) {
             minimum = Math.mulDiv(intent.amountIn, retainedBps, BPS, Math.Rounding.Ceil);
-            supplied = _tokenNotional(intent.minAmountOut, price, market);
+            supplied = _tokenNotional(
+                intent.minAmountOut, price, multiplier, market, Math.Rounding.Floor
+            );
         } else {
-            uint256 inputNotional = _tokenNotional(intent.amountIn, price, market);
+            uint256 inputNotional =
+                _tokenNotional(intent.amountIn, price, multiplier, market, Math.Rounding.Ceil);
             minimum = Math.mulDiv(inputNotional, retainedBps, BPS, Math.Rounding.Ceil);
             supplied = intent.minAmountOut;
         }
@@ -649,7 +656,8 @@ contract MandateRiskManagerV1 {
     function _currentGrossNotional(
         address overrideMarket,
         uint256 overrideInventory,
-        uint256 overridePrice
+        uint256 overridePrice,
+        uint256 overrideMultiplier
     ) private view returns (uint256 gross) {
         uint256 length = activeMarkets.length;
         bool foundOverride;
@@ -658,27 +666,41 @@ contract MandateRiskManagerV1 {
             MarketConfig memory market = markets[stockToken];
             uint256 balance = inventory[stockToken];
             uint256 price;
+            uint256 multiplier;
             if (stockToken == overrideMarket) {
                 foundOverride = true;
                 balance = overrideInventory;
                 price = overridePrice;
+                multiplier = overrideMultiplier;
             } else {
-                (price,,) = _readMarket(stockToken, market);
+                (price, multiplier,) = _readMarket(stockToken, market);
             }
-            gross += _tokenNotional(balance, price, market);
+            gross += _tokenNotional(balance, price, multiplier, market, Math.Rounding.Ceil);
         }
         if (overrideMarket != address(0) && !foundOverride) {
-            gross += _tokenNotional(overrideInventory, overridePrice, markets[overrideMarket]);
+            gross += _tokenNotional(
+                overrideInventory,
+                overridePrice,
+                overrideMultiplier,
+                markets[overrideMarket],
+                Math.Rounding.Ceil
+            );
         }
     }
 
-    function _tokenNotional(uint256 amount, uint256 price, MarketConfig memory market)
-        private
-        view
-        returns (uint256)
-    {
-        uint256 valueAtFeedDecimals = Math.mulDiv(amount, price, 10 ** market.tokenDecimals);
-        return Math.mulDiv(valueAtFeedDecimals, 10 ** settlementDecimals, 10 ** market.feedDecimals);
+    function _tokenNotional(
+        uint256 amount,
+        uint256 price,
+        uint256 multiplier,
+        MarketConfig memory market,
+        Math.Rounding rounding
+    ) private view returns (uint256) {
+        uint256 adjustedAmount = Math.mulDiv(amount, multiplier, 1e18, rounding);
+        uint256 valueAtFeedDecimals =
+            Math.mulDiv(adjustedAmount, price, 10 ** market.tokenDecimals, rounding);
+        return Math.mulDiv(
+            valueAtFeedDecimals, 10 ** settlementDecimals, 10 ** market.feedDecimals, rounding
+        );
     }
 
     function _addActiveMarket(address stockToken) private {

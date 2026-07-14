@@ -16,4 +16,5 @@ interface IMainnetExecutionRegistry {
 
     function registerGraph(address owner, address vault, address riskManager, address spotAdapter)
         external;
+    function restrictVaultMode(address vault, Mode mode) external;
 }

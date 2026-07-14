@@ -7,6 +7,7 @@ import type {
   DashboardSnapshot,
   ExecutionAccountRecord,
   ExecutionBindingRecord,
+  LighterLinkRequest,
   MeResponse,
   PreferencesRecord,
   TransactionPlan,
@@ -61,10 +62,6 @@ export class AppApi {
     });
   }
 
-  launchPaperAgent(): Promise<AgentRecord> {
-    return this.request("/v1/agents", { method: "POST" });
-  }
-
   updatePaperAgent(id: string, status: "running" | "paused"): Promise<AgentRecord> {
     return this.request(`/v1/agents/${encodeURIComponent(id)}`, {
       method: "PUT",
@@ -80,10 +77,10 @@ export class AppApi {
     return this.request(`/v1/agents/${encodeURIComponent(agentId)}/readiness`);
   }
 
-  requestLighterLink(agentId: string, ownerAddress: string, accountIndex: number, nonce: number): Promise<ExecutionBindingRecord> {
+  requestLighterLink(agentId: string, input: LighterLinkRequest): Promise<ExecutionBindingRecord> {
     return this.request(`/v1/agents/${encodeURIComponent(agentId)}/lighter/link-request`, {
       method: "POST",
-      body: JSON.stringify({ ownerAddress, accountIndex, nonce }),
+      body: JSON.stringify(input),
     });
   }
 

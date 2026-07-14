@@ -32,31 +32,28 @@ For each spot or perp venue, the integration work records the following in a rev
 
 An integration is ready to connect when the following are complete:
 
-- Independent review of adapter code and ABI/API payload construction.
+- Internal review of adapter code and ABI/API payload construction.
 - Engine inputs calibrated from frozen historical data, including costs.
 - Partial-fill state machine and emergency unwind covered by tests.
 - Oracle/sequencer health policy covered by tests.
 - Onchain cap, operator approval gate, and venue-specific limits reviewed together.
-- Testnet end-to-end evidence published and independently verified.
+- End-to-end evidence retained with reproducible transaction and reconciliation records.
 
 This work keeps the execution layer aligned with the strategy engine, venue semantics, and
 operational controls from the first live integration onward.
 
-## Research and shadow gates
+## Strategy evidence
 
-The runtime may capture public data continuously. It may not turn that data into a live order.
-Before a strategy enters paired shadow execution, it must have a registered hypothesis, immutable
-dataset snapshot, verified executable spot and perp quote sources, and a cost model that includes
-fees, gas, funding, impact, and quote age.
+The runtime captures public data continuously. The capped canary may turn a fresh approved
+evaluation into a live order only when its immutable strategy manifest, executable spot and perp
+quotes, account binding, and cost model all match the production policy.
 
 Where a strategy uses convergence or regime assumptions, it must also demonstrate rolling
 cointegration, residual stationarity, capacity, and an HMM `unknown`/`dislocated` veto before
 it can create a shadow intent. Portfolio sizing requires shrinkage covariance, concentration, and
 factor-exposure controls rather than independent per-trade Kelly allocations.
 
-Before market configuration, funding, or capital activation, retain at least 180 calendar days of
-capture and 60 continuous shadow days covering off-hours, weekends, volatile windows, and
-low-liquidity windows.
-Require embargoed walk-forward results, adjusted significance of at least 3.0, positive
-lower-confidence net return, bounded capacity, partial-fill and unwind tests, independent contract
-audit, and operational key review. These are additive to the execution enablement checklist.
+Research history informs strategy promotion but is not an elapsed-time activation gate. Every live
+entry still requires fresh authenticated state, a profitable executable quote after costs, bounded
+capacity, and a complete reduce-only exit path. The initial policy permits one account, one active
+episode, $25 per leg, $50 gross, and $50 daily turnover.

@@ -19,13 +19,15 @@ const (
 )
 
 type SpotIntentRequest struct {
-	ID            string `json:"id"`
-	StockToken    string `json:"stock_token"`
-	Side          string `json:"side"`
-	AmountIn      string `json:"amount_in"`
-	MinAmountOut  string `json:"min_amount_out"`
-	Deadline      uint64 `json:"deadline"`
-	ConfigVersion uint64 `json:"config_version"`
+	ID                   string `json:"id"`
+	StockToken           string `json:"stock_token"`
+	Side                 string `json:"side"`
+	AmountIn             string `json:"amount_in"`
+	MinAmountOut         string `json:"min_amount_out"`
+	ExpectedUIMultiplier string `json:"expected_ui_multiplier"`
+	MinOracleRoundID     string `json:"min_oracle_round_id"`
+	Deadline             uint64 `json:"deadline"`
+	ConfigVersion        uint64 `json:"config_version"`
 }
 
 type ExecuteRequest struct {
@@ -36,13 +38,15 @@ type ExecuteRequest struct {
 }
 
 type SpotIntent struct {
-	ID            [32]byte
-	StockToken    common.Address
-	Side          SpotSide
-	AmountIn      *big.Int
-	MinAmountOut  *big.Int
-	Deadline      uint64
-	ConfigVersion uint64
+	ID                   [32]byte
+	StockToken           common.Address
+	Side                 SpotSide
+	AmountIn             *big.Int
+	MinAmountOut         *big.Int
+	ExpectedUIMultiplier *big.Int
+	MinOracleRoundID     *big.Int
+	Deadline             uint64
+	ConfigVersion        uint64
 }
 
 type SubmissionStatus string
@@ -131,31 +135,42 @@ func (request SpotIntentRequest) parse() (SpotIntent, error) {
 	default:
 		return intent, errors.New("side must be buy_spot or sell_spot")
 	}
-	amountIn, err := parseUint128(request.AmountIn)
+	amountIn, err := parseUint(request.AmountIn, 128)
 	if err != nil || amountIn.Sign() == 0 {
 		return intent, errors.New("amount_in must be a positive uint128")
 	}
-	minimum, err := parseUint128(request.MinAmountOut)
+	minimum, err := parseUint(request.MinAmountOut, 128)
 	if err != nil || minimum.Sign() == 0 {
 		return intent, errors.New("min_amount_out must be a positive uint128")
+	}
+	multiplier, err := parseUint(request.ExpectedUIMultiplier, 256)
+	if err != nil || multiplier.Sign() == 0 {
+		return intent, errors.New("expected_ui_multiplier must be a positive uint256")
+	}
+	minimumRound, err := parseUint(request.MinOracleRoundID, 80)
+	if err != nil || minimumRound.Sign() == 0 {
+		return intent, errors.New("min_oracle_round_id must be a positive uint80")
 	}
 	if request.Deadline == 0 || request.ConfigVersion == 0 {
 		return intent, errors.New("deadline and config_version must be positive")
 	}
 	intent.AmountIn = amountIn
 	intent.MinAmountOut = minimum
+	intent.ExpectedUIMultiplier = multiplier
+	intent.MinOracleRoundID = minimumRound
 	intent.Deadline = request.Deadline
 	intent.ConfigVersion = request.ConfigVersion
 	return intent, nil
 }
 
-func parseUint128(value string) (*big.Int, error) {
-	if value == "" || strings.TrimSpace(value) != value || strings.HasPrefix(value, "+") {
+func parseUint(value string, bits int) (*big.Int, error) {
+	if value == "" || strings.TrimSpace(value) != value || strings.HasPrefix(value, "+") ||
+		(len(value) > 1 && value[0] == '0') {
 		return nil, errors.New("invalid integer")
 	}
 	number, ok := new(big.Int).SetString(value, 10)
-	if !ok || number.Sign() < 0 || number.BitLen() > 128 {
-		return nil, fmt.Errorf("outside uint128")
+	if !ok || number.Sign() < 0 || number.BitLen() > bits {
+		return nil, fmt.Errorf("outside uint%d", bits)
 	}
 	return number, nil
 }

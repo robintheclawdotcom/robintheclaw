@@ -118,7 +118,8 @@ RWA histories are short and sparse. Promotion therefore requires:
 | Shrinkage covariance and portfolio-factor limits | Planned | Portfolio simulator and capacity tests. |
 | Adversarial routing and private-order-flow analysis | Planned | Venue-specific economics and no-leak operational review. |
 | LLM slow research loop | Planned | Isolated credentials, immutable experiment logs, and no execution authority. |
-| Live execution | Blocked | All venue, research, contract-audit, and operational gates pass. |
+| `basis-aapl-v1` live execution | Canary enabled | Each account passes current identity, funding, gas, market, margin, oracle, sequencer, nonce, reconciliation, and control checks. |
 
-This methodology defines the research standard. It does not assert live performance or a proven
-edge; only complete, versioned results can support either conclusion.
+This methodology defines the research standard for strategy promotion and cohort expansion. It
+does not disable the fixed capped canary, assert live performance, or claim a proven edge; only
+complete, versioned results can support performance claims or increased capacity.

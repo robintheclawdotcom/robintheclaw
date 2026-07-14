@@ -205,10 +205,12 @@ func (s *Service) publishAccount(ctx context.Context, account AccountBinding, li
 		ExecutionAccountID: account.ExecutionAccountID, Source: "lighter-auth", SourceSession: s.session,
 		SourceSequence: s.nextSequence(account.ExecutionAccountID + ":lighter"),
 		Payload: LighterPayload{
-			AccountIndex: lighter.AccountIndex, APIKeyIndex: lighter.APIKeyIndex,
+			AccountIndex: lighter.AccountIndex, APIKeyIndex: lighter.APIKeyIndex, MarketIndex: lighter.MarketID,
 			NonceAligned: lighter.Nonce == lighter.ExpectedNonce, NoUnknownOrders: lighter.NoUnknownOrders,
 			NoUnknownPositions: lighter.NoUnknownPositions, CollateralReady: lighter.CollateralReady,
-			MaintenanceMarginRatioMicros: lighter.MaintenanceMarginRatioMicros, Flat: lighter.Flat,
+			MaintenanceMarginRatioMicros: lighter.MaintenanceMarginRatioMicros,
+			CollateralMicros:             lighter.CollateralMicros, MaintenanceMarginMicros: lighter.MaintenanceMarginMicros,
+			Flat: lighter.Flat,
 		},
 		ObservedAtMS: lighter.ObservedAt.UnixMilli(), ReceivedAtMS: now.UnixMilli(), ExpiresAtMS: now.Add(5 * time.Second).UnixMilli(),
 	}
@@ -220,6 +222,11 @@ func (s *Service) publishAccount(ctx context.Context, account AccountBinding, li
 			WiringVerified: robinhood.WiringVerified, FinalityHealthy: robinhood.FinalityHealthy,
 			Flat: robinhood.Flat, OwnerAddress: robinhood.Owner, AgentEnabled: robinhood.AgentEnabled,
 			RiskMode: robinhood.RiskMode, SettlementBalanceRaw: robinhood.SettlementBalanceRaw,
+			NonceAligned: robinhood.SignerNonceAligned, SpotConfigVersion: robinhood.SpotConfigVersion,
+			StockDecimals: robinhood.StockDecimals, UIMultiplierE18: robinhood.UIMultiplierE18,
+			NewUIMultiplierE18: robinhood.NewUIMultiplierE18, OraclePaused: robinhood.OraclePaused,
+			OracleHealthy: robinhood.OracleHealthy, SequencerHealthy: robinhood.SequencerHealthy,
+			SignerGasReady: robinhood.SignerGasReady,
 		},
 		ObservedAtMS: robinhood.ObservedAt.UnixMilli(), ReceivedAtMS: now.UnixMilli(), ExpiresAtMS: now.Add(5 * time.Second).UnixMilli(),
 	}
@@ -245,8 +252,8 @@ func (s *Service) publishReadiness(ctx context.Context, accountID string, policy
 		Robinhood RobinhoodObservation
 	}{lighter, robinhood})
 	reconciled := lighter.RESTReconstructed && lighter.Nonce == lighter.ExpectedNonce &&
-		lighter.NoUnknownOrders && lighter.NoUnknownPositions && lighter.Flat &&
-		robinhood.WiringVerified && robinhood.FinalityHealthy && robinhood.Flat
+		lighter.NoUnknownOrders && lighter.NoUnknownPositions &&
+		robinhood.WiringVerified && robinhood.FinalityHealthy && robinhood.SignerNonceAligned
 	checks := []ReadinessEvidence{
 		readiness("execution_gas_ready", robinhood.SignerGasReady, "robinhood-dual-rpc", digest, now),
 		readiness("lighter_funded", lighter.CollateralReady, "lighter-auth-rest", digest, now),

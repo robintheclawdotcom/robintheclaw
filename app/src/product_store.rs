@@ -712,6 +712,7 @@ impl ProductStore {
                 robinhood_registry_address, robinhood_policy_digest,
                 robinhood_risk_manager_address, robinhood_spot_adapter_address,
                 robinhood_deployment_block, robinhood_deployment_action,
+                robinhood_authorization_transaction_hash, robinhood_authorization_block,
                 public_identifier, public_key, association_payload, proof_transaction_hash, status,
                 created_at, updated_at
             "#,
@@ -765,12 +766,14 @@ impl ProductStore {
                 robinhood_risk_manager_address = $11,
                 robinhood_spot_adapter_address = $12,
                 robinhood_deployment_action = CASE
-                    WHEN $16 = 'linked' THEN NULL
+                    WHEN $18 = 'linked' THEN NULL
                     ELSE coalesce($13, robinhood_deployment_action)
                 END,
                 proof_transaction_hash = coalesce($14, proof_transaction_hash),
                 robinhood_deployment_block = coalesce($15, robinhood_deployment_block),
-                status = $16,
+                robinhood_authorization_transaction_hash = coalesce($16, robinhood_authorization_transaction_hash),
+                robinhood_authorization_block = coalesce($17, robinhood_authorization_block),
+                status = $18,
                 updated_at = now()
             WHERE execution_account_id = $1 AND venue = 'robinhood' AND request_id = $2
               AND owner_address = $3
@@ -786,6 +789,8 @@ impl ProductStore {
               AND ($13::jsonb IS NULL OR robinhood_deployment_action IS NULL OR robinhood_deployment_action = $13)
               AND (proof_transaction_hash IS NULL OR proof_transaction_hash = $14)
               AND ($15::bigint IS NULL OR robinhood_deployment_block IS NULL OR robinhood_deployment_block = $15)
+              AND ($16::text IS NULL OR robinhood_authorization_transaction_hash IS NULL OR robinhood_authorization_transaction_hash = $16)
+              AND ($17::bigint IS NULL OR robinhood_authorization_block IS NULL OR robinhood_authorization_block = $17)
               AND status IN ('provisioning', 'awaiting_signature', 'linked')
               AND EXISTS (
                   SELECT 1 FROM execution_accounts account
@@ -800,6 +805,7 @@ impl ProductStore {
                 robinhood_registry_address, robinhood_policy_digest,
                 robinhood_risk_manager_address, robinhood_spot_adapter_address,
                 robinhood_deployment_block, robinhood_deployment_action,
+                robinhood_authorization_transaction_hash, robinhood_authorization_block,
                 public_identifier, public_key, association_payload, proof_transaction_hash, status,
                 created_at, updated_at
             "#,
@@ -819,6 +825,8 @@ impl ProductStore {
         .bind(public.action)
         .bind(public.deployment_transaction_hash)
         .bind(public.deployment_block)
+        .bind(public.authorization_transaction_hash)
+        .bind(public.authorization_block)
         .bind(public.status)
         .fetch_optional(self.pool()?)
         .await?
@@ -839,20 +847,36 @@ impl ProductStore {
                 "Robinhood provisioner returned a different execution account"
             ));
         }
-        let transaction_hash = normalize_bytes32(transaction_hash, "deployment transaction")?;
+        let transaction_hash = normalize_bytes32(transaction_hash, "Robinhood transaction")?;
         let public = validate_robinhood_graph(graph, true)?;
-        if public.deployment_transaction_hash.as_deref() != Some(transaction_hash.as_str()) {
-            return Err(anyhow!(
-                "Robinhood provisioner returned a different deployment transaction"
-            ));
+        let existing = self
+            .execution_binding(did, agent_id, "robinhood", request_id)
+            .await?;
+        match public.status {
+            "awaiting_signature"
+                if public.deployment_transaction_hash.as_deref()
+                    == Some(transaction_hash.as_str())
+                    && public.authorization_transaction_hash.is_none() => {}
+            "linked"
+                if public.authorization_transaction_hash.as_deref()
+                    == Some(transaction_hash.as_str())
+                    && existing.proof_transaction_hash.as_deref()
+                        == public.deployment_transaction_hash.as_deref() => {}
+            _ => {
+                return Err(anyhow!(
+                    "Robinhood provisioner returned a different transaction proof"
+                ));
+            }
         }
         sqlx::query_as::<_, ExecutionBindingRecord>(
             r#"
             UPDATE execution_account_bindings SET
-                proof_transaction_hash = $13,
-                robinhood_deployment_action = NULL,
-                robinhood_deployment_block = $14,
-                status = 'linked',
+                proof_transaction_hash = coalesce(proof_transaction_hash, $12),
+                robinhood_deployment_action = $14,
+                robinhood_deployment_block = $13,
+                robinhood_authorization_transaction_hash = coalesce(robinhood_authorization_transaction_hash, $15),
+                robinhood_authorization_block = coalesce(robinhood_authorization_block, $16),
+                status = $17,
                 updated_at = now()
             WHERE execution_account_id = $1 AND venue = 'robinhood' AND request_id = $2
               AND provider_request_id = $1
@@ -868,7 +892,9 @@ impl ProductStore {
               AND public_identifier = $4
               AND status IN ('awaiting_signature', 'verifying', 'linked')
               AND (proof_transaction_hash IS NULL OR lower(proof_transaction_hash) = lower($12))
-              AND (robinhood_deployment_block IS NULL OR robinhood_deployment_block = $14)
+              AND (robinhood_deployment_block IS NULL OR robinhood_deployment_block = $13)
+              AND ($15::text IS NULL OR robinhood_authorization_transaction_hash IS NULL OR lower(robinhood_authorization_transaction_hash) = lower($15))
+              AND ($16::bigint IS NULL OR robinhood_authorization_block IS NULL OR robinhood_authorization_block = $16)
               AND EXISTS (
                   SELECT 1 FROM execution_accounts account
                   JOIN agents agent ON agent.id = account.agent_id
@@ -882,6 +908,7 @@ impl ProductStore {
                 robinhood_registry_address, robinhood_policy_digest,
                 robinhood_risk_manager_address, robinhood_spot_adapter_address,
                 robinhood_deployment_block, robinhood_deployment_action,
+                robinhood_authorization_transaction_hash, robinhood_authorization_block,
                 public_identifier, public_key, association_payload, proof_transaction_hash, status,
                 created_at, updated_at
             "#,
@@ -897,9 +924,12 @@ impl ProductStore {
         .bind(public.policy_digest)
         .bind(public.risk_manager_address)
         .bind(public.spot_adapter_address)
-        .bind(&transaction_hash)
-        .bind(&transaction_hash)
+        .bind(public.deployment_transaction_hash)
         .bind(public.deployment_block)
+        .bind(public.action)
+        .bind(public.authorization_transaction_hash)
+        .bind(public.authorization_block)
+        .bind(public.status)
         .fetch_optional(self.pool()?)
         .await?
         .ok_or_else(|| anyhow!("Robinhood confirmation does not match its prepared graph"))
@@ -969,6 +999,7 @@ impl ProductStore {
                 robinhood_registry_address, robinhood_policy_digest,
                 robinhood_risk_manager_address, robinhood_spot_adapter_address,
                 robinhood_deployment_block, robinhood_deployment_action,
+                robinhood_authorization_transaction_hash, robinhood_authorization_block,
                 public_identifier, public_key, association_payload, proof_transaction_hash, status,
                 created_at, updated_at
             "#,
@@ -1005,8 +1036,9 @@ impl ProductStore {
                 binding.robinhood_factory_address, binding.robinhood_registry_address,
                 binding.robinhood_policy_digest, binding.robinhood_risk_manager_address,
                 binding.robinhood_spot_adapter_address, binding.robinhood_deployment_block,
-                binding.robinhood_deployment_action, binding.public_identifier,
-                binding.public_key, binding.association_payload,
+                binding.robinhood_deployment_action,
+                binding.robinhood_authorization_transaction_hash, binding.robinhood_authorization_block,
+                binding.public_identifier, binding.public_key, binding.association_payload,
                 binding.proof_transaction_hash, binding.status,
                 binding.created_at, binding.updated_at
             FROM execution_account_bindings binding
@@ -1410,23 +1442,36 @@ impl ProductStore {
         let user = self.ensure_user(did).await?;
         let pool = self.pool()?;
         let mut tx = pool.begin().await?;
-        let (agent_status, account_id, coordinator_registered) =
-            sqlx::query_as::<_, (String, Uuid, bool)>(
-                r#"
-            SELECT a.status, e.id,
-                coalesce(registration.status = 'registered', false)
+        let (agent_status, account_id) = sqlx::query_as::<_, (String, Uuid)>(
+            r#"
+            SELECT a.status, e.id
             FROM agents a JOIN execution_accounts e ON e.agent_id = a.id
-            LEFT JOIN coordinator_account_registrations registration
-              ON registration.execution_account_id = e.id
             WHERE a.id = $1 AND a.user_id = $2 AND a.mode = 'live'
             FOR UPDATE OF a, e
             "#,
-            )
-            .bind(agent_id)
-            .bind(user.id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| anyhow!("live agent not found"))?;
+        )
+        .bind(agent_id)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow!("live agent not found"))?;
+        let registration = sqlx::query_as::<_, (String, Option<DateTime<Utc>>)>(
+            r#"
+            SELECT status, registered_at
+            FROM coordinator_account_registrations
+            WHERE execution_account_id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(account_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let coordinator_registered = registration
+            .as_ref()
+            .is_some_and(|(status, _)| status == "registered");
+        let coordinator_ever_registered = registration
+            .as_ref()
+            .is_some_and(|(_, registered_at)| registered_at.is_some());
         if let Some(existing) = sqlx::query_as::<_, AgentCommandRecord>(
             r#"
             SELECT id, agent_id, execution_account_id, idempotency_key,
@@ -1456,6 +1501,13 @@ impl ProductStore {
                 robinhood_deployed, robinhood_funded, user_gas_ready,
                 execution_gas_ready, policy_active, reconciled, valid_until,
                 coalesce((
+                    SELECT lighter_account_index FROM coordinator_account_registrations
+                    WHERE execution_account_id = $1
+                ), (
+                    SELECT lighter_account_index FROM execution_account_bindings
+                    WHERE execution_account_id = $1 AND venue = 'lighter' AND status = 'linked'
+                )) AS lighter_account_index,
+                coalesce((
                     SELECT robinhood_owner FROM coordinator_account_registrations
                     WHERE execution_account_id = $1
                 ), (
@@ -1469,6 +1521,13 @@ impl ProductStore {
                     SELECT robinhood_vault_address FROM execution_account_bindings
                     WHERE execution_account_id = $1 AND venue = 'robinhood' AND status = 'linked'
                 )) AS robinhood_vault_address,
+                coalesce((
+                    SELECT robinhood_signer FROM coordinator_account_registrations
+                    WHERE execution_account_id = $1
+                ), (
+                    SELECT robinhood_signer_address FROM execution_account_bindings
+                    WHERE execution_account_id = $1 AND venue = 'robinhood' AND status = 'linked'
+                )) AS robinhood_signer_address,
                 EXISTS (
                     SELECT 1 FROM coordinator_account_registrations
                     WHERE execution_account_id = $1 AND status = 'registered'
@@ -1480,7 +1539,9 @@ impl ProductStore {
         .fetch_one(&mut *tx)
         .await?
         .finalize();
-        let transition = if coordinator_registered {
+        let local_close =
+            command == "close" && !coordinator_registered && !coordinator_ever_registered;
+        let transition = if coordinator_registered || local_close {
             command_transition(
                 &agent_status,
                 command,
@@ -1491,16 +1552,59 @@ impl ProductStore {
             Err("coordinator_account_not_registered")
         };
         let (command_status, next_status, error_reason) = match transition {
+            Ok(next) if local_close => ("completed", next, None),
             Ok(next) => ("pending", next, None),
             Err(reason) => ("rejected", agent_status.as_str(), Some(reason)),
         };
+        if local_close {
+            sqlx::query(
+                r#"
+                UPDATE coordinator_account_registrations SET
+                    status = 'blocked', last_error = 'owner_closed_before_registration',
+                    updated_at = now()
+                WHERE execution_account_id = $1 AND registered_at IS NULL
+                "#,
+            )
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE coordinator_account_registration_outbox SET
+                    delivered_at = coalesce(delivered_at, now()), claimed_at = NULL,
+                    claimed_by = NULL, updated_at = now()
+                WHERE execution_account_id = $1
+                "#,
+            )
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE execution_accounts SET status = 'closed', updated_at = now() WHERE id = $1",
+            )
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE agents SET status = 'closed', blocked_reason = NULL, updated_at = now() WHERE id = $1",
+            )
+            .bind(agent_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         let command_id = Uuid::new_v4();
+        let recorded_agent_status = if local_close {
+            next_status
+        } else {
+            agent_status.as_str()
+        };
         let record = sqlx::query_as::<_, AgentCommandRecord>(
             r#"
             INSERT INTO agent_commands (
                 id, agent_id, execution_account_id, idempotency_key, command,
-                status, agent_status, target_agent_status, error_reason
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                status, agent_status, target_agent_status, error_reason, completed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                      CASE WHEN $10 THEN now() END)
             RETURNING id, agent_id, execution_account_id, idempotency_key,
                 command, status, agent_status, target_agent_status, error_reason,
                 result_evidence_digest, result_owner_actions AS owner_actions,
@@ -1513,9 +1617,10 @@ impl ProductStore {
         .bind(idempotency_key)
         .bind(command)
         .bind(command_status)
-        .bind(&agent_status)
+        .bind(recorded_agent_status)
         .bind(next_status)
         .bind(error_reason)
+        .bind(local_close)
         .fetch_one(&mut *tx)
         .await?;
         if command_status == "pending" {
@@ -1653,6 +1758,13 @@ impl ProductStore {
                 robinhood_deployed, robinhood_funded, user_gas_ready,
                 execution_gas_ready, policy_active, reconciled, valid_until,
                 coalesce((
+                    SELECT lighter_account_index FROM coordinator_account_registrations
+                    WHERE execution_account_id = $1
+                ), (
+                    SELECT lighter_account_index FROM execution_account_bindings
+                    WHERE execution_account_id = $1 AND venue = 'lighter' AND status = 'linked'
+                )) AS lighter_account_index,
+                coalesce((
                     SELECT robinhood_owner FROM coordinator_account_registrations
                     WHERE execution_account_id = $1
                 ), (
@@ -1666,6 +1778,13 @@ impl ProductStore {
                     SELECT robinhood_vault_address FROM execution_account_bindings
                     WHERE execution_account_id = $1 AND venue = 'robinhood' AND status = 'linked'
                 )) AS robinhood_vault_address,
+                coalesce((
+                    SELECT robinhood_signer FROM coordinator_account_registrations
+                    WHERE execution_account_id = $1
+                ), (
+                    SELECT robinhood_signer_address FROM execution_account_bindings
+                    WHERE execution_account_id = $1 AND venue = 'robinhood' AND status = 'linked'
+                )) AS robinhood_signer_address,
                 EXISTS (
                     SELECT 1 FROM coordinator_account_registrations
                     WHERE execution_account_id = $1 AND status = 'registered'
@@ -1867,11 +1986,11 @@ impl ProductStore {
 
         let pool = self.pool()?;
         let mut tx = pool.begin().await?;
-        let (status, agent_id, initial_status, target_status, current_status) =
-            sqlx::query_as::<_, (String, Uuid, String, String, String)>(
+        let (status, agent_id, execution_account_id, initial_status, target_status, current_status) =
+            sqlx::query_as::<_, (String, Uuid, Uuid, String, String, String)>(
                 r#"
-                SELECT command.status, command.agent_id, command.agent_status,
-                    command.target_agent_status, agent.status
+                SELECT command.status, command.agent_id, command.execution_account_id,
+                    command.agent_status, command.target_agent_status, agent.status
                 FROM agent_commands command
                 JOIN agents agent ON agent.id = command.agent_id
                 JOIN agent_command_outbox outbox ON outbox.command_id = command.id
@@ -1888,6 +2007,25 @@ impl ProductStore {
         }
 
         let final_status = if let Some(reason) = error_reason {
+            sqlx::query(
+                r#"
+                UPDATE execution_accounts SET status = 'blocked', updated_at = now()
+                WHERE id = $1 AND status <> 'closed'
+                "#,
+            )
+            .bind(execution_account_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE agents SET status = 'blocked', blocked_reason = $2, updated_at = now()
+                WHERE id = $1 AND status <> 'closed'
+                "#,
+            )
+            .bind(agent_id)
+            .bind(reason)
+            .execute(&mut *tx)
+            .await?;
             sqlx::query(
                 r#"
                 UPDATE agent_commands SET status = 'failed', error_reason = $2,
@@ -2257,6 +2395,8 @@ struct ValidatedRobinhoodGraph {
     spot_adapter_address: String,
     deployment_transaction_hash: Option<String>,
     deployment_block: Option<i64>,
+    authorization_transaction_hash: Option<String>,
+    authorization_block: Option<i64>,
     action: Option<serde_json::Value>,
     status: &'static str,
 }
@@ -2297,9 +2437,23 @@ fn validate_robinhood_graph(
         .as_deref()
         .map(|value| normalize_bytes32(value, "deployment transaction"))
         .transpose()?;
+    let authorization_transaction_hash = graph
+        .authorization_transaction_hash
+        .as_deref()
+        .map(|value| normalize_bytes32(value, "authorization transaction"))
+        .transpose()?;
+    if deployment_transaction_hash.is_some()
+        && deployment_transaction_hash == authorization_transaction_hash
+    {
+        return Err(anyhow!("Robinhood provisioner reused a transaction proof"));
+    }
     let (status, action) = match graph.status.as_str() {
         "awaiting_deployment" if !confirming => {
-            if deployment_transaction_hash.is_some() || graph.deployment_block.is_some() {
+            if deployment_transaction_hash.is_some()
+                || graph.deployment_block.is_some()
+                || authorization_transaction_hash.is_some()
+                || graph.authorization_block.is_some()
+            {
                 return Err(anyhow!(
                     "Robinhood provisioner returned premature deployment evidence"
                 ));
@@ -2312,10 +2466,35 @@ fn validate_robinhood_graph(
             validate_deployment_action(action, &factory_address, &owner_address)?;
             ("awaiting_signature", Some(serde_json::to_value(action)?))
         }
+        "confirming" => {
+            if deployment_transaction_hash.is_none()
+                || graph.deployment_block.is_none_or(|block| block == 0)
+                || authorization_transaction_hash.is_some()
+                || graph.authorization_block.is_some()
+            {
+                return Err(anyhow!(
+                    "Robinhood provisioner returned incomplete deployment evidence"
+                ));
+            }
+            match graph.actions.as_slice() {
+                [action] => {
+                    validate_agent_authorization_action(action, &vault_address, &signer_address)?;
+                    ("awaiting_signature", Some(serde_json::to_value(action)?))
+                }
+                [] if !confirming => ("awaiting_signature", None),
+                _ => {
+                    return Err(anyhow!(
+                        "Robinhood provisioner returned invalid agent authorization actions"
+                    ));
+                }
+            }
+        }
         "active" => {
             if !graph.actions.is_empty()
                 || deployment_transaction_hash.is_none()
                 || graph.deployment_block.is_none_or(|block| block == 0)
+                || authorization_transaction_hash.is_none()
+                || graph.authorization_block.is_none_or(|block| block == 0)
             {
                 return Err(anyhow!(
                     "Robinhood provisioner returned incomplete active deployment evidence"
@@ -2329,12 +2508,6 @@ fn validate_robinhood_graph(
             ));
         }
     };
-    if confirming && status != "linked" {
-        return Err(anyhow!(
-            "Robinhood provisioner did not confirm an active graph"
-        ));
-    }
-
     Ok(ValidatedRobinhoodGraph {
         owner_address,
         signer_address,
@@ -2350,6 +2523,14 @@ fn validate_robinhood_graph(
             .map(i64::try_from)
             .transpose()
             .map_err(|_| anyhow!("Robinhood provisioner returned an invalid deployment block"))?,
+        authorization_transaction_hash,
+        authorization_block: graph
+            .authorization_block
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| {
+                anyhow!("Robinhood provisioner returned an invalid authorization block")
+            })?,
         action,
         status,
     })
@@ -2375,6 +2556,31 @@ fn validate_deployment_action(
     {
         return Err(anyhow!(
             "Robinhood provisioner returned an invalid deployment action"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_authorization_action(
+    action: &UnsignedAction,
+    vault_address: &str,
+    signer_address: &str,
+) -> Result<()> {
+    let selector = Keccak256::digest(b"authorizeInitialAgent(address)");
+    let expected_data = format!(
+        "0x{}{}{}",
+        hex::encode(&selector[..4]),
+        "0".repeat(24),
+        signer_address.trim_start_matches("0x").to_ascii_lowercase()
+    );
+    if action.kind != "authorize_execution_agent"
+        || action.chain_id != "4663"
+        || action.value != "0"
+        || !action.to.eq_ignore_ascii_case(vault_address)
+        || !action.data.eq_ignore_ascii_case(&expected_data)
+    {
+        return Err(anyhow!(
+            "Robinhood provisioner returned an invalid agent authorization action"
         ));
     }
     Ok(())
@@ -2460,6 +2666,57 @@ mod tests {
         assert!(validate_deployment_action(&action, factory, owner).is_ok());
         action.data.replace_range(action.data.len() - 1.., "2");
         assert!(validate_deployment_action(&action, factory, owner).is_err());
+    }
+
+    #[test]
+    fn robinhood_agent_authorization_action_is_exact() {
+        let vault = "0x3333333333333333333333333333333333333333";
+        let signer = "0x4444444444444444444444444444444444444444";
+        let selector = Keccak256::digest(b"authorizeInitialAgent(address)");
+        let mut action = UnsignedAction {
+            kind: "authorize_execution_agent".into(),
+            chain_id: "4663".into(),
+            to: vault.into(),
+            value: "0".into(),
+            data: format!(
+                "0x{}{}{}",
+                hex::encode(&selector[..4]),
+                "0".repeat(24),
+                signer.trim_start_matches("0x")
+            ),
+        };
+        assert!(validate_agent_authorization_action(&action, vault, signer).is_ok());
+        action.to = signer.into();
+        assert!(validate_agent_authorization_action(&action, vault, signer).is_err());
+    }
+
+    #[test]
+    fn robinhood_prepare_recovers_after_authorization_broadcast() {
+        let graph = PublicGraphBinding {
+            execution_account_id: Uuid::new_v4(),
+            owner_address: "0x1111111111111111111111111111111111111111".into(),
+            signer_address: "0x2222222222222222222222222222222222222222".into(),
+            key_version: 1,
+            factory_address: "0x3333333333333333333333333333333333333333".into(),
+            registry_address: "0x4444444444444444444444444444444444444444".into(),
+            policy_digest: format!("0x{}", "55".repeat(32)),
+            graph: crate::robinhood_provisioner::Graph {
+                risk_manager: "0x6666666666666666666666666666666666666666".into(),
+                spot_adapter: "0x7777777777777777777777777777777777777777".into(),
+                vault: "0x8888888888888888888888888888888888888888".into(),
+            },
+            status: "confirming".into(),
+            deployment_transaction_hash: Some(format!("0x{}", "99".repeat(32))),
+            deployment_block: Some(123),
+            authorization_transaction_hash: None,
+            authorization_block: None,
+            actions: Vec::new(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        let recovered = validate_robinhood_graph(&graph, false).unwrap();
+        assert_eq!(recovered.status, "awaiting_signature");
+        assert!(recovered.action.is_none());
+        assert!(validate_robinhood_graph(&graph, true).is_err());
     }
 
     #[test]

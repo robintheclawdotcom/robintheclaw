@@ -1,8 +1,8 @@
 # Infrastructure readiness
 
-`render.yaml` is the production topology definition. Declaring a service does not authorize it to
-trade. The coordinator and both signers are created disabled, use liveness-only deployment checks,
-and remain unable to pass readiness until their separate activation requirements are satisfied.
+`render.yaml` is the production topology definition. The coordinator, publishers, scheduler,
+evaluation authority, provisioners, and both signers are enabled. Live admission is account-scoped
+and remains impossible until every authenticated readiness input is current.
 
 ## Service boundaries
 
@@ -17,40 +17,39 @@ and remain unable to pass readiness until their separate activation requirements
 | `robin-robinhood-signer` | Private service | Render private network | Typed `executeSpot` transactions through one KMS key |
 | `robin-research` | Render Postgres | Private network only | Runtime, evidence, saga, nonce, and audit state |
 
-No execution endpoint is public. The product API is not the operator control plane and receives no
-signer credential. A separate authenticated, read-only operator service remains a technical
-readiness blocker. Render service references provide the coordinator with private signer host and
-port values. The coordinator constructs private HTTP endpoints only from validated single-label
-service names and numeric ports; arbitrary public plaintext signer URLs are rejected.
+No execution endpoint is public. The product API receives no signer credential. Restriction actions
+use the signed `restrictctl` operator path, while activation is derived from the committed canary
+policy and current account evidence. Render service references provide the coordinator with private
+signer host and port values. The coordinator constructs private HTTP endpoints only from validated
+single-label service names and numeric ports; arbitrary public plaintext signer URLs are rejected.
 
 ## Deployment state and readiness
 
 The execution services enter the Blueprint with these values:
 
 ```text
-COORDINATOR_ENABLED=false
-LIGHTER_SIGNER_ENABLED=false
-ROBINHOOD_SIGNER_ENABLED=false
+COORDINATOR_ENABLED=true
+LIGHTER_SIGNER_ENABLED=true
+ROBINHOOD_SIGNER_ENABLED=true
 ```
 
-`/livez` proves only that the process is running. Disabled services return an unsuccessful response
-from `/readyz` and reject every write request. Render deploys use `/livez` because an intentionally
-disabled service must be deployable without being represented as operationally ready.
+`/livez` proves only that the process is running. `/readyz` requires the service's database and
+private dependencies. Account readiness is stricter and is published separately from process
+health.
 
-Changing an enable flag is a release operation, not routine configuration. It requires:
+Deploying a release requires:
 
 1. a reviewed release commit with all required checks passing;
 2. applied and verified database migrations;
 3. a production RPC pair, R2 credentials, KMS key, and venue subaccount scoped to the service;
 4. an approved deployment manifest and code hashes;
 5. a successful backup restore and incident-response review;
-6. the audit, legal, venue, key, and empirical promotion evidence required by the execution gate;
-7. an operator record identifying the approver, release, configuration digest, and rollback owner.
+6. the internal audit and key review recorded for the exact release;
+7. an operator record identifying the release, configuration digest, and rollback owner.
 
-Enabling one signer does not enable the coordinator. Enabling the coordinator does not authorize an
-intent without `canary_eligible` evidence. The durable coordinator mode is independently initialized
-to `HALTED`; changing an environment flag does not change it. Contract deployment does not authorize
-funding.
+Running a signer or coordinator does not authorize an intent without `canary_eligible` evidence and
+current account readiness. Shared integrity failures restrict global admission; tenant failures
+restrict only the affected account.
 
 ## Database connections
 
@@ -63,8 +62,8 @@ storage autoscaling. The research database also uses integrated PgBouncer for ru
   must move to the release identity before activation.
 - Migrations are release tasks. Signers and the coordinator do not acquire schema authority at
   startup.
-- The collector may run runtime migrations only until migration ownership is moved into the release
-  job. Production activation remains blocked until that transition is complete.
+- The release job owns runtime migrations. Execution services never acquire schema authority at
+  startup.
 
 CI applies every runtime migration to a disposable PostgreSQL 18 instance and runs the coordinator's
 ignored database promotion test explicitly. The Robinhood signer journal test runs against the same
@@ -114,29 +113,27 @@ The release sequence is:
 2. run Foundry, Rust, Go, Node, migration, security, dependency, leak, and identity checks;
 3. merge the reviewed release through protected `main`;
 4. sync the Blueprint and review the resource diff;
-5. deploy disabled services and verify `/livez`;
+5. deploy the service revisions and verify `/livez`;
 6. apply migrations as a separate release action;
-7. verify `/readyz` remains unsuccessful before activation;
-8. populate approved secrets and configuration;
-9. enable one service at a time in dependency order and record its readiness evidence;
-10. revert enable flags immediately if any identity, reconciliation, or health check disagrees.
+7. populate approved secrets and configuration;
+8. verify `/readyz` for every private dependency;
+9. record canary account readiness evidence;
+10. restrict admission immediately if any identity, reconciliation, or health check disagrees.
 
-## Remaining infrastructure blockers
+## Per-account admission
 
-The Blueprint is an infrastructure boundary, not evidence that the full runtime is ready. Capital
-activation remains blocked while any of the following is true:
+The mainnet services and canary policy are enabled. An execution account becomes `ACTIVE` when the
+control plane verifies all of the following from current evidence:
 
-- collector production RPC, sequencer verification, archive reconciliation, or soak evidence is incomplete;
-- runtime collectors do not yet deliver authenticated Lighter account and Robinhood chain
-  observations into the coordinator's durable reconciliation stream;
-- the execution-authority publisher does not yet deliver contemporaneous Lighter marks and
-  block-pinned Uniswap v4 exact-input spot-exit quotes, including reviewed pool, hook, and runtime
-  code-hash evidence;
-- the coordinator does not yet verify live Lighter collateral, margin, and account position before
-  signing, so the declared leverage field is not a capital-safety control;
-- either signer relies on an authentication or nonce design with an unresolved audit finding;
-- R2 retention locks, database recovery exports, telemetry sinks, or alert routes are unverified;
-- contract, executor, key, legal, venue, or empirical promotion evidence is incomplete.
+- the account binding, strategy version, signer identities, vault graph, and runtime code hashes are canonical;
+- the user's vault and Lighter subaccount are funded within policy, and both execution signers have gas;
+- authenticated Lighter orders, positions, collateral, trades, nonce state, and stream continuity are fresh;
+- dual-RPC Robinhood receipts, balances, vault wiring, and finality observations agree;
+- executable perp and block-pinned spot quotes are less than five seconds old;
+- margin coverage is at least twice maintenance, nonces are aligned, and there are no unknown orders or positions;
+- the route, oracle, and sequencer quorum are healthy and current;
+- global, strategy, and account controls permit entry, with no unresolved reconciliation ambiguity;
+- the exact release has no open internal critical or high contract, executor, or key finding.
 
-These blockers must be resolved in code and release evidence. They are not waived by a successful
-Render deploy.
+A shared integrity failure restricts global admission; an account-specific failure restricts only
+that account and leaves reduce-only recovery available.

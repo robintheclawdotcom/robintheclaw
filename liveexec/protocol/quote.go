@@ -31,7 +31,7 @@ const (
 	EntryNotionalMicros         = uint64(25_000_000)
 	MaximumQuoteLifetimeMS      = uint64(5_000)
 	MaximumExitReconciliationMS = uint64(24 * 60 * 60 * 1_000)
-	QuoteSchemaVersion          = uint8(2)
+	QuoteSchemaVersion          = uint8(3)
 )
 
 var (
@@ -73,6 +73,8 @@ type SpotQuote struct {
 	SettlementAmount     string `json:"settlement_amount"`
 	StockAmount          string `json:"stock_amount"`
 	MinimumAmountOut     string `json:"minimum_amount_out"`
+	ExpectedUIMultiplier string `json:"expected_ui_multiplier"`
+	MinOracleRoundID     string `json:"min_oracle_round_id"`
 	ReferencePriceMicros uint64 `json:"reference_price_micros"`
 	BlockHash            string `json:"block_hash"`
 	ObservedAtMS         uint64 `json:"observed_at_ms"`
@@ -84,6 +86,7 @@ type PerpQuote struct {
 	MarketIndex   uint32 `json:"market_index"`
 	Side          string `json:"side"`
 	ReduceOnly    bool   `json:"reduce_only"`
+	Phase         string `json:"phase,omitempty"`
 	BaseAmount    uint64 `json:"base_amount"`
 	BaseDecimals  uint8  `json:"base_decimals"`
 	PriceDecimals uint8  `json:"price_decimals"`
@@ -111,21 +114,26 @@ type MarketQuotePublication struct {
 	SourceSession               string `json:"source_session"`
 	SourceEventID               string `json:"source_event_id"`
 	SourceSequence              int64  `json:"source_sequence"`
-	ExecutionAccountID          string `json:"execution_account_id"`
+	ExecutionAccountID          string `json:"execution_account_id,omitempty"`
 	MarketManifest              string `json:"market_manifest"`
-	StrategyManifestSHA256      string `json:"strategy_manifest_sha256"`
-	RouteSHA256                 string `json:"route_sha256"`
-	LighterMarketIndex          uint32 `json:"lighter_market_index"`
+	StrategyManifestSHA256      string `json:"strategy_manifest_sha256,omitempty"`
+	RouteSHA256                 string `json:"route_sha256,omitempty"`
+	LighterMarketIndex          uint32 `json:"lighter_market_index,omitempty"`
 	QuoteBlockHash              string `json:"quote_block_hash"`
 	MarkPrice                   uint32 `json:"mark_price"`
+	ExpectedUIMultiplier        string `json:"expected_ui_multiplier"`
+	MinOracleRoundID            string `json:"min_oracle_round_id"`
 	PublisherAtMS               int64  `json:"publisher_at_ms"`
 	ReceivedAtMS                int64  `json:"received_at_ms"`
 	ExpiresAtMS                 int64  `json:"expires_at_ms"`
-	IntentID                    string `json:"intent_id"`
-	SpotUnwindAmountIn          string `json:"spot_unwind_amount_in"`
-	SpotUnwindExpectedAmountOut string `json:"spot_unwind_expected_amount_out"`
-	SubmissionDeadlineMS        int64  `json:"submission_deadline_ms"`
-	ReconciliationDeadlineMS    int64  `json:"reconciliation_deadline_ms"`
+	IntentID                    string `json:"intent_id,omitempty"`
+	SpotUnwindAmountIn          string `json:"spot_unwind_amount_in,omitempty"`
+	SpotUnwindExpectedAmountOut string `json:"spot_unwind_expected_amount_out,omitempty"`
+	UnwindPhase                 string `json:"unwind_phase,omitempty"`
+	PerpUnwindBaseAmount        uint64 `json:"perp_unwind_base_amount,omitempty"`
+	PerpUnwindLimitPrice        uint32 `json:"perp_unwind_limit_price,omitempty"`
+	SubmissionDeadlineMS        int64  `json:"submission_deadline_ms,omitempty"`
+	ReconciliationDeadlineMS    int64  `json:"reconciliation_deadline_ms,omitempty"`
 }
 
 type MarketQuoteReceipt struct {
@@ -243,15 +251,25 @@ func (q QuoteBundle) validateCanonical(expectedMarketIndex uint32) error {
 	if q.Spot.Side != wantSpotSide || q.Perp.Side != wantPerpSide || q.Perp.ReduceOnly != wantReduceOnly {
 		return errors.New("quote direction mismatch")
 	}
+	if q.Action == ActionEntry && q.Perp.Phase != "" {
+		return errors.New("entry quote contains an unwind phase")
+	}
+	if q.Action == ActionUnwind && q.Perp.Phase != "perp_and_spot" && q.Perp.Phase != "spot_only" {
+		return errors.New("unwind quote phase is invalid")
+	}
+	spotOnly := q.Action == ActionUnwind && q.Perp.Phase == "spot_only"
 	if q.Spot.SettlementAmount == "" || q.Spot.StockAmount == "" || q.Spot.MinimumAmountOut == "" ||
-		q.Spot.ReferencePriceMicros == 0 || q.Perp.BaseAmount == 0 || q.Perp.LimitPrice == 0 || q.Perp.MarkPrice == 0 ||
+		q.Spot.ReferencePriceMicros == 0 || (!spotOnly && q.Perp.BaseAmount == 0) || q.Perp.LimitPrice == 0 || q.Perp.MarkPrice == 0 ||
 		q.Perp.MarketIndex != expectedMarketIndex || q.Perp.BaseDecimals > 18 || q.Perp.PriceDecimals > 18 {
 		return errors.New("quote amounts are invalid")
 	}
 	settlement, settlementOK := positiveDecimal(q.Spot.SettlementAmount)
 	stock, stockOK := positiveDecimal(q.Spot.StockAmount)
 	minimum, minimumOK := positiveDecimal(q.Spot.MinimumAmountOut)
-	if !settlementOK || !stockOK || !minimumOK ||
+	multiplier, multiplierOK := positiveDecimal(q.Spot.ExpectedUIMultiplier)
+	minimumRound, minimumRoundOK := positiveDecimal(q.Spot.MinOracleRoundID)
+	if !settlementOK || !stockOK || !minimumOK || !multiplierOK || !minimumRoundOK ||
+		multiplier.BitLen() > 256 || minimumRound.BitLen() > 80 || q.Source.OracleRound != q.Spot.MinOracleRoundID ||
 		(q.Action == ActionEntry && minimum.Cmp(stock) > 0) ||
 		(q.Action == ActionUnwind && minimum.Cmp(settlement) > 0) {
 		return errors.New("quote amounts are invalid")

@@ -49,6 +49,8 @@ struct ExitAuthority {
     perp_unwind_price: u32,
     spot_amount_in: String,
     minimum_unwind_settlement_out: String,
+    expected_ui_multiplier: String,
+    min_oracle_round_id: String,
     submission_deadline_ms: u64,
     reconciliation_deadline_ms: u64,
 }
@@ -132,7 +134,13 @@ impl Worker {
         }
 
         let now = now_ms()?;
-        if unwind && exit_authority(&action).is_err() {
+        let recovered_signed = saved_result::<SignedLighterTransaction>(&action.result, "signed");
+        let send_authorized = lighter_send_authorized(&action.result);
+        if unwind
+            && recovered_signed.is_none()
+            && !send_authorized
+            && !exit_authority_is_current(&action, now)
+        {
             if now > action.intent.emergency_deadline_ms {
                 self.store
                     .stop_action(
@@ -162,8 +170,6 @@ impl Worker {
             .await?;
             return Ok(());
         }
-        let recovered_signed = saved_result::<SignedLighterTransaction>(&action.result, "signed");
-        let send_authorized = lighter_send_authorized(&action.result);
         if unwind && now > unwind_submission_deadline_ms(&action) {
             if send_authorized {
                 if let Some(signed) = recovered_signed.as_ref() {
@@ -588,8 +594,20 @@ impl Worker {
 
     async fn reconcile_perp(&self, action: ClaimedAction) -> Result<(), WorkerError> {
         let Some(event) = self.store.next_venue_event(&action).await? else {
-            if now_ms()? > action.intent.perp_order_expiry_ms {
-                self.store.halt("perp_reconciliation_overdue").await?;
+            let now = now_ms()?;
+            if now > action.intent.perp_order_expiry_ms {
+                self.store
+                    .escalate_reconciliation(
+                        &action.id,
+                        &self.worker_id,
+                        &action.lease_token,
+                        "perp_reconciliation_overdue",
+                        json!({
+                            "deadline_ms": action.intent.perp_order_expiry_ms,
+                            "observed_at_ms": now,
+                        }),
+                    )
+                    .await?;
             }
             self.retry(&action, "awaiting_perp_event").await?;
             return Ok(());
@@ -769,6 +787,8 @@ impl Worker {
                 side: "buy_spot".into(),
                 amount_in: amounts.settlement_amount_in.to_string(),
                 min_amount_out: amounts.minimum_spot_amount_out.to_string(),
+                expected_ui_multiplier: action.intent.expected_ui_multiplier.to_string(),
+                min_oracle_round_id: action.intent.min_oracle_round_id.to_string(),
                 deadline: action.intent.deadline_ms.div_ceil(1_000),
                 config_version: action.intent.spot_config_version,
             },
@@ -830,8 +850,28 @@ impl Worker {
                 self.schedule_unwind(&action, "spot_submission_rejected")
                     .await?;
             }
-            Err(_) => {
-                self.retry(&action, "robinhood_signer_unavailable").await?;
+            Err(error) => {
+                self.store
+                    .continue_ambiguous_action(
+                        &action.id,
+                        &self.worker_id,
+                        &action.lease_token,
+                        "robinhood_submission_ambiguous",
+                        Some(ExecutionEvent::SpotSubmitted),
+                        json!({
+                            "request_id": request.request_id,
+                            "classification": error.to_string(),
+                        }),
+                        NextAction {
+                            kind: ActionKind::ReconcileSpot,
+                            key: "reconcile-spot".into(),
+                            payload: json!({
+                                "filled_base": filled_base,
+                                "request_id": request.request_id,
+                            }),
+                        },
+                    )
+                    .await?;
             }
         }
         Ok(())
@@ -874,8 +914,20 @@ impl Worker {
 
     async fn reconcile_spot(&self, action: ClaimedAction) -> Result<(), WorkerError> {
         let Some(event) = self.store.next_venue_event(&action).await? else {
-            if now_ms()? > action.intent.reconciliation_deadline_ms {
-                self.store.halt("spot_reconciliation_overdue").await?;
+            let now = now_ms()?;
+            if now > action.intent.reconciliation_deadline_ms {
+                self.store
+                    .escalate_reconciliation(
+                        &action.id,
+                        &self.worker_id,
+                        &action.lease_token,
+                        "spot_reconciliation_overdue",
+                        json!({
+                            "deadline_ms": action.intent.reconciliation_deadline_ms,
+                            "observed_at_ms": now,
+                        }),
+                    )
+                    .await?;
             }
             self.retry(&action, "awaiting_spot_event").await?;
             return Ok(());
@@ -905,7 +957,24 @@ impl Worker {
                     .amount_out()
                     .ok_or(WorkerError::InvalidPayload)?;
                 let matched = observation.amount_in() == Some(amounts.settlement_amount_in)
-                    && received == amounts.target_spot_amount;
+                    && action.intent.spot_matches_perp_base(received, filled_base);
+                if !matched {
+                    self.store
+                        .block_action_account(
+                            &action.id,
+                            &self.worker_id,
+                            &action.lease_token,
+                            "spot_hedge_mismatch",
+                            json!({
+                                "venue_event_id": event.id,
+                                "expected_amount_in": amounts.settlement_amount_in.to_string(),
+                                "observed_amount_in": observation.amount_in().map(|value| value.to_string()),
+                                "observed_amount_out": received.to_string(),
+                                "perp_filled_base": filled_base,
+                            }),
+                        )
+                        .await?;
+                }
                 ObservationOutcome {
                     transition: Some(if matched {
                         ExecutionEvent::SpotConfirmed {
@@ -925,16 +994,30 @@ impl Worker {
                     }),
                 }
             }
-            "spot_rejected" => ObservationOutcome {
-                transition: Some(ExecutionEvent::SpotRejected),
-                complete: true,
-                result: event.payload.clone(),
-                next: Some(NextAction {
-                    kind: ActionKind::UnwindPerp,
-                    key: "emergency-unwind-perp".into(),
-                    payload: json!({"filled_base": filled_base}),
-                }),
-            },
+            "spot_rejected" => {
+                self.store
+                    .block_action_account(
+                        &action.id,
+                        &self.worker_id,
+                        &action.lease_token,
+                        "spot_hedge_rejected",
+                        json!({
+                            "venue_event_id": event.id,
+                            "perp_filled_base": filled_base,
+                        }),
+                    )
+                    .await?;
+                ObservationOutcome {
+                    transition: Some(ExecutionEvent::SpotRejected),
+                    complete: true,
+                    result: event.payload.clone(),
+                    next: Some(NextAction {
+                        kind: ActionKind::UnwindPerp,
+                        key: "emergency-unwind-perp".into(),
+                        payload: json!({"filled_base": filled_base}),
+                    }),
+                }
+            }
             _ => {
                 self.store
                     .stop_action(
@@ -964,9 +1047,20 @@ impl Worker {
 
     async fn reconcile_unwind(&self, action: ClaimedAction) -> Result<(), WorkerError> {
         let Some(event) = self.store.next_venue_event(&action).await? else {
-            if now_ms()? > unwind_reconciliation_deadline_ms(&action) {
+            let now = now_ms()?;
+            let deadline = unwind_reconciliation_deadline_ms(&action);
+            if now > deadline {
                 self.store
-                    .halt("perp_unwind_reconciliation_overdue")
+                    .escalate_reconciliation(
+                        &action.id,
+                        &self.worker_id,
+                        &action.lease_token,
+                        "perp_unwind_reconciliation_overdue",
+                        json!({
+                            "deadline_ms": deadline,
+                            "observed_at_ms": now,
+                        }),
+                    )
                     .await?;
             }
             self.retry(&action, "awaiting_unwind_event").await?;
@@ -1158,6 +1252,22 @@ impl Worker {
         let attempted = saved_result::<Value>(&action.result, "request").is_some()
             || recovered_request.is_some();
         let send_authorized = lighter_send_authorized(&action.result);
+        if !attempted && !send_authorized && !exit_authority_is_current(&action, now) {
+            let bound = self
+                .store
+                .bind_exit_authority(&action.id, &self.worker_id, &action.lease_token, now)
+                .await?;
+            self.retry(
+                &action,
+                if bound {
+                    "exit_authority_bound"
+                } else {
+                    "awaiting_exit_authority"
+                },
+            )
+            .await?;
+            return Ok(());
+        }
         let submission_deadline_ms = unwind_submission_deadline_ms(&action);
         if now > submission_deadline_ms && !attempted && !send_authorized {
             self.store
@@ -1198,6 +1308,7 @@ impl Worker {
             }
         }
         let minimum = unwind_minimum_out(&action, spot_amount)?;
+        let authority = exit_authority(&action)?;
         let expected = RobinhoodExecuteRequest {
             execution_account_id: action.intent.execution_account_id.clone(),
             request_id: recovered_request
@@ -1210,6 +1321,8 @@ impl Worker {
                 side: "sell_spot".into(),
                 amount_in: spot_amount.to_string(),
                 min_amount_out: minimum.to_string(),
+                expected_ui_multiplier: authority.expected_ui_multiplier,
+                min_oracle_round_id: authority.min_oracle_round_id,
                 deadline: submission_deadline_ms.div_ceil(1_000),
                 config_version: action.intent.spot_config_version,
             },
@@ -1281,8 +1394,28 @@ impl Worker {
                     )
                     .await?;
             }
-            Err(_) => {
-                self.retry(&action, "spot_unwind_signer_unavailable")
+            Err(error) => {
+                self.store
+                    .continue_ambiguous_action(
+                        &action.id,
+                        &self.worker_id,
+                        &action.lease_token,
+                        "robinhood_unwind_submission_ambiguous",
+                        None,
+                        json!({
+                            "request_id": request.request_id,
+                            "classification": error.to_string(),
+                        }),
+                        NextAction {
+                            kind: ActionKind::ReconcileUnwindSpot,
+                            key: "reconcile-unwind-spot".into(),
+                            payload: json!({
+                                "spot_amount": spot_amount.to_string(),
+                                "request_id": request.request_id,
+                                "exit_authority": action.payload.get("exit_authority"),
+                            }),
+                        },
+                    )
                     .await?;
             }
         }
@@ -1361,7 +1494,19 @@ impl Worker {
         venue_event_id: i64,
         filled_base: u64,
     ) -> Result<(), WorkerError> {
-        self.store.halt("perp_fill_limit_exceeded").await?;
+        self.store
+            .escalate_reconciliation(
+                &action.id,
+                &self.worker_id,
+                &action.lease_token,
+                "perp_fill_limit_exceeded",
+                json!({
+                    "venue_event_id": venue_event_id,
+                    "perp_filled_base": filled_base,
+                    "perp_base_cap": action.intent.perp_base_amount,
+                }),
+            )
+            .await?;
         self.store
             .apply_venue_event(
                 &action.id,
@@ -1410,9 +1555,20 @@ impl Worker {
 
     async fn reconcile_unwind_spot(&self, action: ClaimedAction) -> Result<(), WorkerError> {
         let Some(event) = self.store.next_venue_event(&action).await? else {
-            if now_ms()? > unwind_reconciliation_deadline_ms(&action) {
+            let now = now_ms()?;
+            let deadline = unwind_reconciliation_deadline_ms(&action);
+            if now > deadline {
                 self.store
-                    .halt("spot_unwind_reconciliation_overdue")
+                    .escalate_reconciliation(
+                        &action.id,
+                        &self.worker_id,
+                        &action.lease_token,
+                        "spot_unwind_reconciliation_overdue",
+                        json!({
+                            "deadline_ms": deadline,
+                            "observed_at_ms": now,
+                        }),
+                    )
                     .await?;
             }
             self.retry(&action, "awaiting_spot_unwind_event").await?;
@@ -1508,12 +1664,20 @@ impl Worker {
         action: &ClaimedAction,
         reason: &str,
     ) -> Result<(), StoreError> {
-        self.store.halt(reason).await?;
         let filled_base = action
             .payload
             .get("filled_base")
             .and_then(Value::as_u64)
             .ok_or(StoreError::InvalidAction)?;
+        self.store
+            .block_action_account(
+                &action.id,
+                &self.worker_id,
+                &action.lease_token,
+                reason,
+                json!({"perp_filled_base": filled_base}),
+            )
+            .await?;
         self.store
             .complete_action(
                 &action.id,
@@ -1592,10 +1756,28 @@ fn exit_authority(action: &ClaimedAction) -> Result<ExitAuthority, WorkerError> 
         || authority.reconciliation_deadline_ms <= authority.submission_deadline_ms
         || (spot_amount == 0) != (minimum == 0)
         || spot_amount != action.saga.spot_received_raw
+        || !valid_positive_uint_decimal(
+            &authority.expected_ui_multiplier,
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        )
+        || !valid_positive_uint_decimal(&authority.min_oracle_round_id, "1208925819614629174706175")
     {
         return Err(WorkerError::InvalidPayload);
     }
     Ok(authority)
+}
+
+fn valid_positive_uint_decimal(value: &str, maximum: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && !value.starts_with('0')
+        && (value.len() < maximum.len() || (value.len() == maximum.len() && value <= maximum))
+}
+
+fn exit_authority_is_current(action: &ClaimedAction, now_ms: u64) -> bool {
+    exit_authority(action).is_ok_and(|authority| {
+        now_ms <= authority.quote_expires_at_ms && now_ms <= authority.submission_deadline_ms
+    })
 }
 
 fn unwind_minimum_out(action: &ClaimedAction, spot_amount: u128) -> Result<u128, WorkerError> {
@@ -1917,6 +2099,19 @@ mod tests {
     }
 
     #[test]
+    fn exit_authority_rejects_noncanonical_or_out_of_range_oracle_values() {
+        let mut payload = exit_authority_payload();
+        payload["expected_ui_multiplier"] = json!("0500000000000000000");
+        let invalid = action(ActionKind::UnwindSpot, json!({"exit_authority": payload}));
+        assert!(exit_authority(&invalid).is_err());
+
+        let mut payload = exit_authority_payload();
+        payload["min_oracle_round_id"] = json!("1208925819614629174706176");
+        let invalid = action(ActionKind::UnwindSpot, json!({"exit_authority": payload}));
+        assert!(exit_authority(&invalid).is_err());
+    }
+
+    #[test]
     fn observations_are_bound_to_the_submitted_transaction() {
         let action = action(
             ActionKind::ReconcilePerp,
@@ -1956,7 +2151,7 @@ mod tests {
     }
 
     #[test]
-    fn robinhood_conflict_requires_reconciliation() {
+    fn nondeterministic_robinhood_failures_require_reconciliation() {
         assert!(!deterministic_robinhood_rejection(
             &SignerClientError::SignerRejected(409)
         ));
@@ -1971,6 +2166,9 @@ mod tests {
         ));
         assert!(!deterministic_robinhood_rejection(
             &SignerClientError::InvalidSignerResponse
+        ));
+        assert!(!deterministic_robinhood_rejection(
+            &SignerClientError::SignerTransport
         ));
     }
 
@@ -2048,6 +2246,8 @@ mod tests {
             settlement_amount_in: 25_000_000,
             minimum_spot_amount_out: 1_990_000,
             minimum_unwind_settlement_out: 24_000_000,
+            expected_ui_multiplier: 500_000_000_000_000_000,
+            min_oracle_round_id: 1,
             spot_decimals: 6,
             spot_config_version: 1,
             perp_base_amount: 1_000_000,
@@ -2103,6 +2303,8 @@ mod tests {
             "perp_unwind_price": 30_000,
             "spot_amount_in": "0",
             "minimum_unwind_settlement_out": "0",
+            "expected_ui_multiplier": "500000000000000000",
+            "min_oracle_round_id": "101",
             "submission_deadline_ms": 1_800_000_300_000u64,
             "reconciliation_deadline_ms": 1_800_086_400_000u64,
         })

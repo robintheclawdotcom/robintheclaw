@@ -52,6 +52,23 @@ describe("mainnet agent API", () => {
     }));
   });
 
+  it("lets the server discover the Lighter account and nonce", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "awaiting_signature" }), {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetch);
+    const api = new AppApi(async () => "access-token");
+    const ownerAddress = "0x1111111111111111111111111111111111111111";
+
+    await api.requestLighterLink("agent-id", { ownerAddress });
+
+    expect(fetch).toHaveBeenCalledWith("/api/app/v1/agents/agent-id/lighter/link-request", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ ownerAddress }),
+    }));
+  });
+
   it("reuses the idempotency key while a command is pending", async () => {
     const fetch = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
         id: "command-id",

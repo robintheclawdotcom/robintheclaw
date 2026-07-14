@@ -135,13 +135,13 @@ impl Config {
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             app_rpc_url: env_or("APP_RPC_URL", ""),
-            app_chain_id: env_u64("APP_CHAIN_ID", 46630),
+            app_chain_id: env_u64("APP_CHAIN_ID", 4663),
             product_indexer_lookback_blocks: env_u64("PRODUCT_INDEXER_LOOKBACK_BLOCKS", 50_000),
             product_indexer_block_range: env_u64("PRODUCT_INDEXER_BLOCK_RANGE", 10).max(1),
             personal_vault_factory: env_or("PERSONAL_VAULT_FACTORY", ""),
             test_asset_address: env_or("TEST_ASSET_ADDRESS", ""),
             test_faucet_address: env_or("TEST_FAUCET_ADDRESS", ""),
-            test_asset_symbol: env_or("TEST_ASSET_SYMBOL", "tUSDG"),
+            test_asset_symbol: env_or("TEST_ASSET_SYMBOL", "USDG"),
             test_asset_decimals: env_u64("TEST_ASSET_DECIMALS", 6) as u8,
             test_claim_amount: env_or("TEST_CLAIM_AMOUNT", "1000000000"),
             alchemy_wallet_rpc_url: env::var("ALCHEMY_WALLET_RPC_URL")

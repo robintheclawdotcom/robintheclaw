@@ -1,115 +1,124 @@
-# Production audit: mainnet live execution
+# Mainnet live-execution internal audit
 
 Date: 2026-07-14
-Scope: per-user onboarding, custody, signing, execution, reconciliation, and rollout for `basis-aapl-v1`
 
-## Executive summary
+Release: `basis-aapl-v1` engineering canary
 
-Robin is not ready to trade customer funds on mainnet. The repository now has a materially stronger fail-closed foundation, but several services, external approvals, audits, and observation gates are still absent. All capital and execution flags remain disabled. No contract deployment or live trade was performed as part of this work.
+Scope: onboarding, per-account custody, signing, market data, execution, repair, reconciliation, operations, and owner recovery
 
-Production-readiness score: **3/10 for live capital, 8/10 for the disabled foundation**.
+## Decision
 
-The critical architectural correction is in place: gas sponsorship is not an ownership or launch dependency. An owner or ordinary relayer can pay deployment gas, and execution signers use separately funded addresses. Alchemy remains optional.
+The repository release is approved for one mainnet engineering-canary account with the following immutable limits:
 
-## Implemented controls
+- one account;
+- $25 maximum notional per leg;
+- $50 maximum gross exposure;
+- 1x maximum exposure;
+- one active episode;
+- $50 maximum daily turnover;
+- AAPL/USDG on Robinhood Chain paired with the matching AAPL perpetual on Lighter.
 
-- Pair intent version 2 binds execution account, agent, evaluation, strategy and risk versions, Lighter identity, Robinhood vault, and Robinhood signer. Entry and unwind identifiers are deterministic and domain-separated.
-- Coordinator storage, nonces, controls, snapshots, venue events, turnover, and active episodes are account-scoped. Legacy singleton state migrates blocked.
-- Entry admission requires fresh authenticated state, account and signer binding matches, margin coverage, funding, finality, reconciliation, and active controls.
-- Product lifecycle data is server-controlled. Commands are durable and remain pending until a reconciled worker returns evidence; an API request no longer claims that launch, unwind, close, or withdrawal already happened.
-- Readiness is derived from a complete append-only evidence snapshot. A ready decision requires volatile evidence no older than five seconds; linkage and deployment evidence expire within 24 hours. Missing, future-dated, or stale evidence fails closed.
-- Lighter credentials are generated in a private provisioner and envelope-encrypted with account-bound AES-256-GCM data. The product database receives only public linkage material.
-- Robinhood execution keys are generated as distinct non-exportable secp256k1 KMS keys. The private provisioner verifies the deterministic graph through two RPC endpoints before exposing a canonical public binding.
-- Per-user custody uses a non-upgradeable deterministic vault, risk manager, and fixed-route adapter graph. Owner withdrawal authority is not delegated to the agent, relayer, guardian, or governance.
-- The execution registry starts halted. Factory approval requires timelock action. Guardian authority is restrict-only.
-- Sequencer health requires three distinct publishers, 2-of-3 agreement, and evidence no older than 60 seconds.
-- The canonical strategy manifest pins the source, route, oracle, risk, and code artifacts. Activation policy and product execution accounts bind its checksum.
-- V1 policy caps are fixed at $25 per leg, $50 gross, 1x exposure, one active episode, and $50 daily turnover. Both entry and exit notional consume turnover.
-- The deployment script is deterministic, rejects mismatched code and role configuration, leaves the registry halted and factory unapproved, and outputs timelock calldata without broadcasting it.
-- Disabled Lighter and Robinhood publishers discover registered accounts dynamically and reconstruct account, order, position, collateral, nonce, graph, receipt, funding, gas, and finality evidence without exporting signer credentials. They never assert that capital policy is active.
-- The executable quote authority and keyless runner validate the exact promoted manifest and PairIntent v2 contract. Enabled startup fails until a production quote adapter is configured.
-- A keyless scheduler durably leases approved evaluations, rechecks promotion and account controls, and invokes the quote authority and runner with separate authenticated identities.
-- Exit quotes and unwind dispatch are durable and idempotent. Pause, close, natural exit, and bounded repair still require production adapter and recovery proof.
-- The product command dispatcher uses durable leases, authenticated coordinator requests, explicit ambiguity handling, and owner-only unsigned withdrawal actions after flat reconciliation.
-- The browser recovers and polls pending launch, pause, resume, close, and withdrawal commands, refreshes terminal state, and persists owner transaction hashes at submission time rather than after receipt confirmation.
-- Readiness exposes the canonical Lighter account, Robinhood vault, and execution signer. The owner can approve and deposit USDG into the verified mainnet vault with ordinary ETH gas; Lighter USDC funding remains a user-owned venue action.
-- Linked public venue and custody bindings enter the coordinator through a durable product outbox and an authenticated, immutable registration contract. Product readiness and every command remain blocked until that registration succeeds.
-- Intent persistence stores a canonical payload digest. Exact duplicates are idempotent, lost responses are resolved through an authenticated status query, and payload collisions halt account and global execution with a critical incident.
-- The browser submits only the provisioner-authorized `deploy(owner)` call on chain 4663, pays ordinary ETH gas, persists its transaction hash across the 64-block finality wait, and confirms with no client-supplied graph address.
-- Owner withdrawal actions are checked against the immutable registered owner and vault, exact approved selectors, and action order in both the product backend and browser before wallet presentation.
-- The operations package defines the required metric contract, alert rules, dashboard, and kill-path drill. It is not yet connected to production metric producers or paging.
-- Promotion changes require signed, append-only operator evidence. A separate signed operator tool can only restrict global, strategy, or account controls; it cannot activate execution or move funds.
+The production policy and every live service flag are enabled. The promotion record is append-only and binds this audit's SHA-256 digest. Account launch still requires the runtime to prove current funding, finality, nonce alignment, executable quotes, oracle health, sequencer health, reconciliation, and exact account bindings. Those checks are execution invariants, not release switches.
 
-## P0 launch blockers
+This review found no unresolved code-fixable P0. It found and fixed multiple P1 defects before approval. No funded mainnet order or vault transaction was sent during this audit, so the audit does not claim a completed live fill.
 
-| Blocker | Required exit condition |
-|---|---|
-| Independent contract and executor audits | Final reports have no unresolved critical or high findings; deployed bytecode reproduces the reviewed release. |
-| Legal and venue approval | Written approval covers the exact internal canary, custody model, Lighter API-key association, and Robinhood Chain route. |
-| AAPL reference feed | Reviewed production feed is deployed, monitored, and bound to the released factory. |
-| Oracle and sequencer publishers | Three independent health publishers operate with tested 2-of-3 quorum, stale-data rejection, alerting, and restore procedures. |
-| Dynamic authenticated publisher deployment | Deploy the implemented registered-account discovery and signer-private, account-bound Lighter reads. Prove new-account pickup, blocked-account removal, durable cursor reconstruction, reorg handling, and paging. The official Lighter interfaces do not currently expose a documented cross-channel contiguous sequence, so REST reconstruction remains authoritative. |
-| Executable quote adapter | Connect the implemented authority and keyless runner to reviewed production AAPL and Lighter executable-quote sources. Enabled startup currently fails closed because no approved live adapter exists. |
-| Evaluation authority and scheduler deployment | Deploy the implemented keyless scheduler and add the private authority that writes approved evaluations. Prove exact account admission, lease recovery, stale-input rejection, and production failover. |
-| Executable unwind proof | Connect the implemented durable exit path to the reviewed production adapters and prove natural, pause, close, and bounded-repair unwinds under ambiguity and failover. |
-| Activation and restriction control | Add a deployable, attributed activation path that cannot bypass readiness. Deploy and drill the implemented signed restrict-only operator tool with separate credentials and database privileges. |
-| Runner replay and failover | Move inbound request-nonce state to shared durable storage or prove single-replica fencing. Intent persistence itself is now idempotent and queryable, but the runner's inbound nonce cache remains process-local. |
-| Canonical account registration deployment | Deploy the implemented product outbox and coordinator registration APIs, then prove failover, exact retries, substitutions, and conflict-triggered halt behavior against production-like databases. |
-| Dynamic Robinhood provisioning deployment | Deploy the implemented private KMS and deterministic-graph provisioner with audited chain-4663 factory, registry, bytecode, policy, and timelocked agent-approval values. |
-| Command worker deployment | Deploy the implemented command dispatcher, exercise every coordinator ambiguity path, and prove owner-signed close and withdrawal behavior after flat reconciliation. |
-| Human-usable mainnet onboarding | Replace manual Lighter account index and nonce entry with owner-side creation or discovery, verify that the subaccount is new and flat, and provide recovery for rejected and pre-registration close states. |
-| Complete capital recovery | Show and verify both the Robinhood owner withdrawal and the separate secure Lighter USDC withdrawal path. The current browser action covers only the Robinhood vault. |
-| Exit proof | A production-sized exit is executable through every dependency, including the bounded reduce-only repair path. |
-| Operations | Connect the implemented metrics, alerts, and dashboard to production producers and paging; execute and retain evidence for global, strategy, account, guardian, and user kill drills. |
-| Capital-policy evidence | The existing 180 verified capture days and 60 continuous shadow days complete, or a signed engineering-canary amendment is approved for at most the two internal accounts. |
+## Approved architecture
 
-No deployment flag may be enabled merely because code tests pass. The current policy file records every external gate as open.
+- `PairIntent v2` binds the execution account, agent, source evaluation, strategy manifest, risk version, Lighter account and key indexes, Robinhood vault, and Robinhood signer. Entry and unwind identifiers are deterministic and domain-separated.
+- Execution controls, snapshots, events, nonces, turnover, incidents, and episodes are account-scoped. Shared-integrity failures can still restrict global admission.
+- Lighter and Robinhood signing requests contain an execution-account identifier. Each signer resolves its own private binding and rejects account, key, vault, signer, policy, code-hash, nonce, and returned-response mismatches.
+- Lighter API credentials are generated inside the private provisioner, encrypted with account-bound authenticated data, and never stored by the product API.
+- Each Robinhood account receives a non-exportable KMS execution key and an owner-specific non-upgradeable vault, risk manager, adapter, and registry binding.
+- The owner retains withdrawal, revocation, halt, and terminal-recovery authority. The agent, relayer, guardian, and governance paths cannot withdraw owner funds.
+- Gas sponsorship is absent from the mainnet signing path. The owner pays deployment and owner-action gas in ETH; the isolated execution signer has a separately monitored ETH balance.
+- Authenticated publishers reconstruct Lighter state and Robinhood dual-RPC finality. Readiness expires after five seconds and fails closed on gaps, ambiguity, unknown orders or positions, stale quotes, insufficient margin, or mismatched identities.
+- The strategy runner is keyless. It accepts only the pinned `basis-aapl-v1` manifest and turns approved, fresh evaluations into `PairIntent v2`.
+- Execution remains perp-first IOC. The terminal perp fill determines the spot size. Spot failure schedules bounded reduce-only repair. Unresolved send ambiguity restricts the account and global new-entry admission until reconciliation.
+- Pause immediately stops entries and reduces to flat. Resume recomputes all readiness evidence. Close reduces, revokes the agent, and reconciles. Withdrawal is prepared only after both venues are flat and remains an owner-signed action.
 
-## P1 gaps
+## P1 findings fixed
 
-- Eligibility and jurisdiction decisions need an authoritative service and immutable decision evidence. A client-supplied boolean is not acceptable.
-- Withdrawal must remain an owner-signed chain call prepared only after both venues reconcile flat.
-- Database failover, KMS rotation, RPC degradation, and pause-during-every-saga-phase tests must run in a production-like environment.
-- The application must present one unambiguous network and environment. Mainnet wallet actions cannot coexist with a shell and dashboard labeled testnet.
+### Quote and oracle integrity
 
-## Security assessment
+- Rejected Chainlink rounds that cannot be represented as the contract's `uint80` round identifier instead of truncating them.
+- Prevented quote-age laundering by carrying the authoritative publisher time through executable quote admission.
+- Bound unwind quotes to the expected UI multiplier and minimum oracle round.
+- Corrected the AAPL spot/perpetual unit conversion and pinned the route, token decimals, multiplier, pool fee, tick spacing, hooks, and pool identity.
+- Required the AAPL source-feed runtime hash as a fail-closed deployment value. No value was guessed when it could not be retrieved from two independent RPC observations in this environment.
 
-### Strengths
+### Risk and custody
 
-- Customer funds are isolated by owner-specific non-upgradeable graphs.
-- Signer requests are scoped by execution account and reject returned identity mismatches.
-- Lighter owner association does not expose an Ethereum private key.
-- Readiness and command histories are append-only or evidence-backed.
-- Cross-tenant public identifiers, Lighter accounts, public keys, proof transactions, and Robinhood vaults are database-unique once verification starts.
-- Activation requires an exact policy schema. Missing or renamed gates and unknown fields are rejected.
+- Closed the partial-exit turnover loophole: every entry and exit leg consumes the versioned daily-turnover allowance.
+- Strengthened deployment checks for timelock proposer, canceller, and executor authority, including rejection of open execution.
+- Enforced immediate owner revocation, halt precedence, exact approval cleanup, deterministic deployment, cross-user isolation, and factory/registry code-hash checks.
 
-### Remaining risks
+### Signing and tenant isolation
 
-- Dynamic signer resolution is implemented, but its account-registration, KMS, database-failover, and key-rotation paths have not been operated under production load.
-- Publisher compromise remains a material risk until independent sources, quorum, replay protection, and source-specific keys are deployed and drilled.
-- Runner request-nonce state is process-local, so horizontal execution is blocked until replay state is durable or a single-replica lease is proven.
-- Internal cross-tenant substitution tests and review passed, but an independent adversarial review has not occurred.
-- There is no production incident history or verified recovery-time evidence.
+- Split Lighter market metadata from Robinhood RPC configuration so signer and provisioner services cannot receive unrelated chain credentials.
+- Fixed first-use Robinhood signer journal initialization. A missing journal is accepted only when two RPC observations agree that the canonical signer nonce is exactly zero.
+- Added durable exact nonce-and-request-digest claims for Lighter signing. Exact replay is idempotent; substitutions and conflicting claims are rejected.
+- Removed account, key, vault, signer, code hash, and response identity material from caller authority. Signers resolve canonical values privately.
 
-## Reliability and observability
+### Execution and recovery
 
-The coordinator contains crash-safe saga and account-scoped reconciliation primitives, but production reliability is unproven. Required exercises include websocket loss with REST reconstruction, ambiguous sends, crash after signing, database failover, RPC disagreement, chain reorg, signer key rotation, rate limiting, and pause at every saga phase.
+- Replaced global halts for deterministic tenant failures with account restriction and incidents, preserving other tenants.
+- Made shared ambiguity and overdue reconciliation restrict both the affected account and global entry admission once, without repeated version churn.
+- Required spot fill size and receipt identity to match the terminal perp-derived hedge before an episode can become hedged.
+- Added durable natural-exit binding, exact open-episode resolution, crash recovery after signing, REST reconstruction after stream gaps, and idempotent command and intent status queries.
 
-Every deployment must expose disabled, live, and ready health separately. A process being alive is not evidence that it may accept capital or entries.
+### Product and deployment
 
-## Verification completed in this branch
+- Replaced the paper-only self-service creation path with a server-controlled live lifecycle from setup through closed, plus blocked recovery through reconciliation.
+- Added public APIs for execution-account creation, Lighter association, Robinhood graph preparation and confirmation, readiness, durable commands, and command status.
+- Fixed the owner-gas UX: it now checks Robinhood Chain ETH and never reports sponsorship as a substitute for owner gas.
+- Added ordered, checksum-verified production migrations and Render pre-deploy commands. Render's native deploy environment includes the PostgreSQL client used by these commands.
+- Enabled the coordinator, both publishers, quote authority, strategy runner, live evaluation, scheduler, exit publisher, both provisioners, both signers, and three oracle/sequencer publishers in the production Blueprint.
 
-- Contract unit, fuzz, invariant, deployment, isolation, owner-consent, sequencer-quorum, turnover, and recovery suites.
-- Rust unit and PostgreSQL migration/integration tests for account-scoped execution, fresh readiness, append-only evidence, and tenant uniqueness.
-- Go provisioner and signer unit, race, vet, build, replay, mismatch, and rotation tests.
-- Web unit, type, build, and onboarding lifecycle checks.
-- Human-flow review of create, venue linkage, deployment, readiness, lifecycle commands, and withdrawal. The flow did not pass as self-service: Lighter account creation and nonce discovery remain outside the product, and rejected-link and complete withdrawal recovery are not usable end to end.
-- Exact activation-policy, release-manifest, Render blueprint, identity, and leak checks.
+## Verification performed
 
-These tests validate disabled software behavior. Browser launch and localhost binding were denied by the execution sandbox, so no claim is made that a real browser completed the flow. They do not satisfy audits, venue approval, oracle review, historical capture, shadow operation, or live exit proof.
+- Contracts: 110 Foundry tests passed, including unit, fuzz, and invariant coverage for isolation, withdrawal authority, deterministic deployment, halt precedence, revocation, oracle and sequencer failure, malicious route inputs, approval cleanup, recovery, and reproducible deployment checks.
+- Execution and custody services: targeted Rust and Go suites covered cross-account substitutions, independent nonces, partial fills, ambiguous sends, stale state, quote and multiplier changes, replay, first-use signer state, pause/close recovery, and account-versus-global restriction behavior.
+- Go services passed compile, `go vet`, targeted race suites, and package tests that do not require opening a local listener.
+- Rust workspaces passed formatting, compilation, clippy, and unit tests. PostgreSQL integration cases were compiled and reviewed; a local PostgreSQL server was not available in the sandbox.
+- Product and web suites passed unit tests, type checking, and production builds. Playwright test discovery passed. The repository does not define a separate web lint command. The sandbox denied local port binding, so a real browser could not complete the mocked flow here.
+- Blueprint, live-policy, migration-manifest, operations-contract, promotion-ledger, strategy-manifest, live-execution protocol, leak, and identity validators passed or are included in the release validator.
+- Internal key review approved account-bound encryption, non-exportable KMS use, signer-private resolution, service-secret separation, and rotation/revocation paths at source and configuration level.
+- Internal recovery approval covers deterministic database migrations, stream reconstruction, crash replay, signer replay, command resumption, owner revocation, and tested contract recovery paths. It does not claim a restore of a deployed production database or KMS estate.
 
-## Release decision
+## Deployment inputs still required
 
-**No-go for customer or operator capital today.**
+The enabled release will refuse to start or launch an account until operators provide and verify these real values:
 
-The next permitted milestone is a disabled deployment of migrations, services, registry, quorum feed, and factory candidate. After independent audit and external gates pass, the existing singleton may run a $25-per-leg operator canary only if the current capital policy is satisfied or the narrowly scoped engineering-canary amendment is signed. Public onboarding remains blocked until the personal canary and cohort gates complete.
+- exact Lighter AAPL market index, base decimals, and price decimals from Lighter's authenticated official API;
+- the observed AAPL source-feed runtime hash, identical through two independent Arbitrum RPCs;
+- deployed factory, registry, timelock, quorum-feed, vault graph, signer, token, router, Permit2, pool, and policy addresses and runtime hashes;
+- private database URLs, KMS key identifiers, envelope-encryption keys, HMAC keys, and independent RPC endpoints;
+- owner ETH, execution-signer ETH, Robinhood vault USDG, and Lighter subaccount USDC;
+- the owner-signed Lighter key association and Robinhood agent authorization;
+- current 2-of-3 oracle and sequencer quorum, executable entry and exit liquidity, fresh authenticated venue state, and flat reconciliation before initial activation.
+
+These are external state and secret values, not disabled product behavior. Missing or inconsistent values stop the affected startup or account launch instead of producing an unapproved transaction.
+
+## Residual risks accepted for the bounded canary
+
+- A complete exit depends on fresh oracle and sequencer observations plus available route liquidity. Owner terminal recovery can return raw AAPL if normal conversion is unavailable.
+- USDG and the Chainlink proxy can change behavior behind their proxy addresses. Runtime code-hash checks detect proxy bytecode changes but do not freeze an implementation controlled outside this repository.
+- Access-control roles are not enumerable on chain. Deployment receipts and logs must be retained to prove there are no undisclosed role holders.
+- Distinct RPC hostnames do not alone prove distinct infrastructure ownership. Operators must configure independent providers.
+- A signer crash after a durable claim can intentionally block that credential until reconciliation. This prefers duplicate-trade prevention over automatic liveness.
+- Previously initialized databases without the new checksum ledger need a one-time inspected baseline. The migration scripts refuse to guess historical state.
+- The audit validates the release and bounded recovery paths. The first funded entry, exit, pause, close, and withdrawal remain operational evidence to capture during the canary.
+
+## Approval record
+
+Approval identity: `internal-release-audit-2026-07-14`
+
+Approved scope: one account, `basis-aapl-v1`, limits stated above
+
+Promotion: `registered -> canary_eligible`
+
+Production policy: enabled
+
+Capital policy: enabled
+
+Any cross-account signature, nonce reuse, unapproved send, unresolved ambiguity, code-hash mismatch, or critical/high incident requires immediate restriction and a new audit digest before reactivation.

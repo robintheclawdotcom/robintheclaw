@@ -30,19 +30,15 @@ const limitKeys = [
 ];
 const gateKeys = [
   "alerting",
-  "captureWindow",
-  "contractAudit",
   "executorReview",
   "exitAuthority",
+  "internalAudit",
   "keyReview",
-  "legalApproval",
   "oracleReview",
   "reconciliation",
   "restoreDrill",
   "safeOwnerRotation",
   "sequencerHealth",
-  "shadowWindow",
-  "venueApproval",
 ];
 const manifestKeys = [
   "chain_id",
@@ -189,6 +185,9 @@ export function validateLivePolicy({
     "LIGHTER_SIGNER_ENABLED",
     "ROBINHOOD_PROVISIONER_ENABLED",
     "ROBINHOOD_SIGNER_ENABLED",
+    "ROBIN_LIVE_SCHEDULER_ENABLED",
+    "ROBIN_LIVE_EVALUATION_ENABLED",
+    "ROBIN_EXIT_QUOTE_PUBLISHER_ENABLED",
     "ROBIN_QUOTE_AUTHORITY_ENABLED",
     "ROBIN_STRATEGY_RUNNER_ENABLED",
   ]) {

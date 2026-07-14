@@ -126,7 +126,8 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 
 func (s *Scheduler) resolveQuote(ctx context.Context, dispatch *Dispatch, now time.Time) (QuoteBundle, error) {
 	if dispatch.RequestID == "" {
-		dispatch.RequestID = requestID(dispatch.EvaluationID, dispatch.ExecutionAccountID)
+		dispatch.RequestID = requestID(dispatch.EvaluationID, dispatch.ExecutionAccountID,
+			dispatch.Evaluation.Action, dispatch.Evaluation.PairIntentID)
 		dispatch.RequestedAtMS = uint64(now.UnixMilli())
 		if err := s.store.PrepareQuote(ctx, *dispatch, dispatch.RequestID, dispatch.RequestedAtMS); err != nil {
 			return QuoteBundle{}, err
@@ -137,7 +138,8 @@ func (s *Scheduler) resolveQuote(ctx context.Context, dispatch *Dispatch, now ti
 		ExecutionAccountID: dispatch.ExecutionAccountID,
 		SourceEvaluationID: dispatch.EvaluationID,
 		MarketManifest:     dispatch.Evaluation.MarketManifest,
-		Action:             ActionEntry,
+		IntentID:           dispatch.Evaluation.PairIntentID,
+		Action:             dispatch.Evaluation.Action,
 		RequestedAtMS:      dispatch.RequestedAtMS,
 	}
 	if len(dispatch.QuoteBody) != 0 {
@@ -194,6 +196,7 @@ func (s *Scheduler) resolveRunnerBody(ctx context.Context, dispatch *Dispatch, _
 		Readiness:    dispatch.Readiness,
 		AccountState: dispatch.AccountState,
 		Quotes:       json.RawMessage(dispatch.QuoteBody),
+		OpenEpisode:  dispatch.OpenEpisode,
 	})
 	if err != nil {
 		return nil, err

@@ -1,7 +1,7 @@
 {
   "version": 2,
-  "id": "0x0905228e43333ec65bc4e93eb7cdb839000fd7571ba229b9b8183799c5a453fa",
-  "spot_unwind_intent_id": "0xc7bf6750a752495f3d859c49e1ed0b80b1d4747a70665f4bdd20a5e116df8526",
+  "id": "0x79cedc21f145c8701429300af0ad62e5d26d2af24a7fcdb4212af0eb9e69ecc3",
+  "spot_unwind_intent_id": "0xe5779d59e1b2d32870ee996819e361e3f018452be79cb7d11671fd0816c2c5de",
   "execution_account_id": "account-canary-1",
   "agent_id": "agent-canary-1",
   "source_evaluation_id": "0xefe77b201dc216c0edf435a227df2b2898d3f6ea1ff16e5d4d0d4ec0cf593271",
@@ -23,6 +23,8 @@
   "settlement_amount_in": "25000000",
   "minimum_spot_amount_out": "1990000",
   "minimum_unwind_settlement_out": "24000000",
+  "expected_ui_multiplier": "500000000000000000",
+  "min_oracle_round_id": "101",
   "spot_decimals": 6,
   "spot_config_version": 1,
   "perp_base_amount": 1000000,

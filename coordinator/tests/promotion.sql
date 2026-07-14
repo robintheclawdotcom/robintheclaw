@@ -3,7 +3,8 @@
 INSERT INTO execution_promotion_evidence
     (strategy_version, evidence, evidence_sha256, approved_by)
 VALUES
-    ('strategy-v1', '{}', repeat('a', 64), 'approval-record');
+    ('strategy-v1', '{}', repeat('a', 64), 'approval-record'),
+    ('direct-canary', '{}', repeat('b', 64), 'internal-review');
 
 DO $$
 BEGIN
@@ -18,6 +19,11 @@ BEGIN
     END;
 END;
 $$;
+
+INSERT INTO execution_promotion_events
+    (strategy_version, from_state, to_state, evidence_sha256, approved_by)
+VALUES
+    ('direct-canary', 'registered', 'canary_eligible', repeat('b', 64), 'internal-review');
 
 INSERT INTO execution_promotion_events
     (strategy_version, from_state, to_state, evidence_sha256, approved_by)

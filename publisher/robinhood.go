@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	usdgAddress = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
-	aaplAddress = "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9"
+	usdgAddress         = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+	aaplAddress         = "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9"
+	maxFinalizedHeadAge = 30 * time.Second
 )
 
 type RobinhoodClient struct {
@@ -55,13 +56,15 @@ type rpcError struct {
 }
 
 type blockRef struct {
-	Number uint64 `json:"number"`
-	Hash   string `json:"hash"`
+	Number    uint64 `json:"number"`
+	Hash      string `json:"hash"`
+	Timestamp uint64 `json:"timestamp"`
 }
 
 type rpcBlock struct {
-	Number string `json:"number"`
-	Hash   string `json:"hash"`
+	Number    string `json:"number"`
+	Hash      string `json:"hash"`
+	Timestamp string `json:"timestamp"`
 }
 
 type rpcProof struct {
@@ -102,7 +105,20 @@ type endpointObservation struct {
 	StockBalanceRaw      string
 	OwnerGasRaw          string
 	SignerGasRaw         string
+	SignerNonce          uint64
+	SpotConfigVersion    uint64
+	StockDecimals        uint8
+	UIMultiplierE18      string
+	NewUIMultiplierE18   string
+	OraclePaused         bool
+	OracleHealthy        bool
+	SequencerHealthy     bool
 	Receipts             []rpcReceipt
+}
+
+type endpointHeads struct {
+	Finalized blockRef
+	Safe      blockRef
 }
 
 func NewRobinhoodClient(primaryURL, secondaryURL string, client *http.Client) (*RobinhoodClient, error) {
@@ -139,14 +155,64 @@ func (c *RobinhoodClient) Collect(ctx context.Context, binding RobinhoodBinding)
 	prior := c.finalized[binding.Vault]
 	c.mu.Unlock()
 
+	type headResult struct {
+		endpoint *rpcEndpoint
+		heads    endpointHeads
+		err      error
+	}
+	headResults := make(chan headResult, 2)
+	for _, endpoint := range []*rpcEndpoint{c.primary, c.secondary} {
+		go func(endpoint *rpcEndpoint) {
+			heads, err := endpoint.heads(ctx, prior)
+			headResults <- headResult{endpoint: endpoint, heads: heads, err: err}
+		}(endpoint)
+	}
+	firstHead, secondHead := <-headResults, <-headResults
+	if firstHead.err != nil {
+		return RobinhoodObservation{}, firstHead.err
+	}
+	if secondHead.err != nil {
+		return RobinhoodObservation{}, secondHead.err
+	}
+	commonNumber := firstHead.heads.Finalized.Number
+	if secondHead.heads.Finalized.Number < commonNumber {
+		commonNumber = secondHead.heads.Finalized.Number
+	}
+	if commonNumber == 0 || firstHead.heads.Safe.Number < commonNumber || secondHead.heads.Safe.Number < commonNumber {
+		return unhealthyRobinhoodObservation(binding), nil
+	}
+	type blockResult struct {
+		endpoint *rpcEndpoint
+		block    blockRef
+		err      error
+	}
+	blockResults := make(chan blockResult, 2)
+	for _, result := range []headResult{firstHead, secondHead} {
+		go func(endpoint *rpcEndpoint) {
+			block, err := endpoint.block(ctx, encodeQuantity(commonNumber))
+			blockResults <- blockResult{endpoint: endpoint, block: block, err: err}
+		}(result.endpoint)
+	}
+	firstBlock, secondBlock := <-blockResults, <-blockResults
+	if firstBlock.err != nil {
+		return RobinhoodObservation{}, firstBlock.err
+	}
+	if secondBlock.err != nil {
+		return RobinhoodObservation{}, secondBlock.err
+	}
+	if firstBlock.block != secondBlock.block || staleFinalizedHead(firstBlock.block, time.Now().UTC()) ||
+		(prior.Number > 0 && commonNumber < prior.Number) {
+		return unhealthyRobinhoodObservation(binding), nil
+	}
+	common := firstBlock.block
 	type result struct {
 		observation endpointObservation
 		err         error
 	}
 	results := make(chan result, 2)
-	for _, endpoint := range []*rpcEndpoint{c.primary, c.secondary} {
+	for _, endpoint := range []*rpcEndpoint{firstBlock.endpoint, secondBlock.endpoint} {
 		go func(endpoint *rpcEndpoint) {
-			observation, err := endpoint.collect(ctx, binding, prior)
+			observation, err := endpoint.collectAt(ctx, binding, common)
 			results <- result{observation: observation, err: err}
 		}(endpoint)
 	}
@@ -159,7 +225,7 @@ func (c *RobinhoodClient) Collect(ctx context.Context, binding RobinhoodBinding)
 	}
 	primary, secondary := first.observation, second.observation
 	if !sameEndpointObservation(primary, secondary) {
-		return RobinhoodObservation{Vault: binding.Vault, Signer: binding.Signer, Owner: binding.Owner, ObservedAt: time.Now().UTC()}, nil
+		return unhealthyRobinhoodObservation(binding), nil
 	}
 
 	wiring := strings.EqualFold(primary.Owner, binding.Owner) && strings.EqualFold(primary.Factory, binding.Factory) &&
@@ -186,33 +252,46 @@ func (c *RobinhoodClient) Collect(ctx context.Context, binding RobinhoodBinding)
 		OwnerGasReady:  decimalAtLeast(primary.OwnerGasRaw, binding.MinimumOwnerGasRaw),
 		SignerGasReady: decimalAtLeast(primary.SignerGasRaw, binding.MinimumSignerGasRaw),
 		RiskMode:       modeName(primary.RiskMode), FinalizedNumber: primary.Finalized.Number,
-		FinalizedHash: primary.Finalized.Hash, ObservedAt: time.Now().UTC(),
+		SignerNonceAligned: signerNonceAligned(binding, primary.SignerNonce),
+		SpotConfigVersion:  primary.SpotConfigVersion, StockDecimals: primary.StockDecimals,
+		UIMultiplierE18: primary.UIMultiplierE18, NewUIMultiplierE18: primary.NewUIMultiplierE18,
+		OraclePaused: primary.OraclePaused, OracleHealthy: primary.OracleHealthy,
+		SequencerHealthy: primary.SequencerHealthy,
+		FinalizedHash:    primary.Finalized.Hash, ObservedAt: time.Now().UTC(),
 	}, nil
 }
 
-func (e *rpcEndpoint) collect(ctx context.Context, binding RobinhoodBinding, prior blockRef) (endpointObservation, error) {
+func signerNonceAligned(binding RobinhoodBinding, observed uint64) bool {
+	return binding.SignerJournalReady && observed == binding.ExpectedSignerNonce
+}
+
+func (e *rpcEndpoint) heads(ctx context.Context, prior blockRef) (endpointHeads, error) {
 	chainID, err := e.hexQuantity(ctx, "eth_chainId")
 	if err != nil || chainID != mainnetChainID {
-		return endpointObservation{}, errors.New("Robinhood RPC chain mismatch")
+		return endpointHeads{}, errors.New("Robinhood RPC chain mismatch")
 	}
 	var syncing json.RawMessage
 	if err := e.call(ctx, "eth_syncing", nil, &syncing); err != nil || string(syncing) != "false" {
-		return endpointObservation{}, errors.New("Robinhood RPC is not synchronized")
+		return endpointHeads{}, errors.New("Robinhood RPC is not synchronized")
 	}
 	finalized, err := e.block(ctx, "finalized")
 	if err != nil {
-		return endpointObservation{}, err
+		return endpointHeads{}, err
 	}
 	safe, err := e.block(ctx, "safe")
 	if err != nil {
-		return endpointObservation{}, err
+		return endpointHeads{}, err
 	}
 	if prior.Number > 0 {
 		previous, err := e.block(ctx, encodeQuantity(prior.Number))
 		if err != nil || previous.Hash != prior.Hash {
-			return endpointObservation{}, errors.New("Robinhood finalized chain reorg detected")
+			return endpointHeads{}, errors.New("Robinhood finalized chain reorg detected")
 		}
 	}
+	return endpointHeads{Finalized: finalized, Safe: safe}, nil
+}
+
+func (e *rpcEndpoint) collectAt(ctx context.Context, binding RobinhoodBinding, finalized blockRef) (endpointObservation, error) {
 	tag := encodeQuantity(finalized.Number)
 	proof, err := e.proof(ctx, binding.Vault, tag)
 	if err != nil {
@@ -261,6 +340,61 @@ func (e *rpcEndpoint) collect(ctx context.Context, binding RobinhoodBinding, pri
 	if err != nil {
 		return endpointObservation{}, err
 	}
+	market, err := e.ethCallWords(ctx, binding.RiskManager, addressCall("8e8f294b", aaplAddress), tag, 10)
+	if err != nil {
+		return endpointObservation{}, err
+	}
+	spotConfigVersion := abiUint(market[4])
+	if spotConfigVersion == 0 {
+		return endpointObservation{}, errors.New("Robinhood AAPL market is not configured")
+	}
+	marketFeed, err := abiAddress(market[0])
+	if err != nil {
+		return endpointObservation{}, errors.New("Robinhood AAPL market feed is invalid")
+	}
+	heartbeat := abiUint(market[3])
+	oracleRound, err := e.ethCallWords(ctx, marketFeed, "0xfeaf968c", tag, 5)
+	if err != nil {
+		return endpointObservation{}, err
+	}
+	oracleHealthy := oracleRoundHealthy(oracleRound, finalized.Timestamp, heartbeat)
+	sequencerFeedRaw, err := e.ethCall(ctx, binding.RiskManager, "0x3b521cb6", tag)
+	if err != nil {
+		return endpointObservation{}, err
+	}
+	sequencerFeed, err := abiAddress(sequencerFeedRaw)
+	if err != nil {
+		return endpointObservation{}, errors.New("Robinhood sequencer feed is invalid")
+	}
+	sequencerRound, err := e.ethCallWords(ctx, sequencerFeed, "0xfeaf968c", tag, 5)
+	if err != nil {
+		return endpointObservation{}, err
+	}
+	graceRaw, err := e.ethCall(ctx, binding.RiskManager, "0x26a97b94", tag)
+	if err != nil {
+		return endpointObservation{}, err
+	}
+	sequencerHealthy := sequencerRoundHealthy(sequencerRound, finalized.Timestamp, abiUint(graceRaw))
+	stockDecimalsRaw, err := e.ethCall(ctx, aaplAddress, "0x313ce567", tag)
+	if err != nil {
+		return endpointObservation{}, err
+	}
+	stockDecimals := abiUint(stockDecimalsRaw)
+	if stockDecimals > 18 {
+		return endpointObservation{}, errors.New("Robinhood AAPL decimals are invalid")
+	}
+	uiMultiplierRaw, err := e.ethCall(ctx, aaplAddress, "0xa60bf13d", tag)
+	if err != nil {
+		return endpointObservation{}, err
+	}
+	newUIMultiplierRaw, err := e.ethCall(ctx, aaplAddress, "0xdc767007", tag)
+	if err != nil {
+		return endpointObservation{}, err
+	}
+	oraclePausedRaw, err := e.ethCall(ctx, aaplAddress, "0x7706ba52", tag)
+	if err != nil {
+		return endpointObservation{}, err
+	}
 	settlementRaw, err := e.ethCall(ctx, usdgAddress, addressCall("70a08231", binding.Vault), tag)
 	if err != nil {
 		return endpointObservation{}, err
@@ -274,6 +408,10 @@ func (e *rpcEndpoint) collect(ctx context.Context, binding RobinhoodBinding, pri
 		return endpointObservation{}, err
 	}
 	signerGas, err := e.balance(ctx, binding.Signer, tag)
+	if err != nil {
+		return endpointObservation{}, err
+	}
+	signerNonce, err := e.transactionCount(ctx, binding.Signer, tag)
 	if err != nil {
 		return endpointObservation{}, err
 	}
@@ -293,13 +431,32 @@ func (e *rpcEndpoint) collect(ctx context.Context, binding RobinhoodBinding, pri
 		receipts = append(receipts, receipt)
 	}
 	return endpointObservation{
-		Finalized: finalized, Safe: safe, Owner: values[0], Factory: values[1], RiskManager: values[2], SpotAdapter: values[3],
+		Finalized: finalized, Safe: finalized, Owner: values[0], Factory: values[1], RiskManager: values[2], SpotAdapter: values[3],
 		VaultOwner: values[4], VaultAgent: values[5], VaultRegistry: values[6], VaultRiskManager: values[7], VaultSpotAdapter: values[8],
 		VaultCodeHash: strings.ToLower(proof.CodeHash), AgentEnabled: abiBool(agentEnabledRaw), Flat: abiBool(flatRaw),
 		GlobalMode: abiUint(globalModeRaw), RiskMode: abiUint(riskModeRaw), SettlementBalanceRaw: abiUintString(settlementRaw),
 		StockBalanceRaw: abiUintString(stockRaw),
 		OwnerGasRaw:     ownerGas, SignerGasRaw: signerGas, Receipts: receipts,
+		SignerNonce: signerNonce, SpotConfigVersion: spotConfigVersion, StockDecimals: uint8(stockDecimals),
+		UIMultiplierE18: abiUintString(uiMultiplierRaw), NewUIMultiplierE18: abiUintString(newUIMultiplierRaw),
+		OraclePaused: abiBool(oraclePausedRaw), OracleHealthy: oracleHealthy, SequencerHealthy: sequencerHealthy,
 	}, nil
+}
+
+func unhealthyRobinhoodObservation(binding RobinhoodBinding) RobinhoodObservation {
+	return RobinhoodObservation{
+		Vault: binding.Vault, Signer: binding.Signer, Owner: binding.Owner,
+		ObservedAt: time.Now().UTC(),
+	}
+}
+
+func staleFinalizedHead(block blockRef, now time.Time) bool {
+	if block.Number == 0 || block.Timestamp == 0 {
+		return true
+	}
+	observed := time.Unix(int64(block.Timestamp), 0)
+	age := now.Sub(observed)
+	return age < -5*time.Second || age > maxFinalizedHeadAge
 }
 
 func (e *rpcEndpoint) call(ctx context.Context, method string, params []interface{}, target interface{}) error {
@@ -338,10 +495,11 @@ func (e *rpcEndpoint) block(ctx context.Context, tag string) (blockRef, error) {
 		return blockRef{}, err
 	}
 	number, err := parseQuantity(block.Number)
-	if err != nil || !validHash(block.Hash) {
+	timestamp, timestampErr := parseQuantity(block.Timestamp)
+	if err != nil || timestampErr != nil || timestamp == 0 || !validHash(block.Hash) {
 		return blockRef{}, errors.New("invalid Robinhood block")
 	}
-	return blockRef{Number: number, Hash: strings.ToLower(block.Hash)}, nil
+	return blockRef{Number: number, Hash: strings.ToLower(block.Hash), Timestamp: timestamp}, nil
 }
 
 func (e *rpcEndpoint) proof(ctx context.Context, address, tag string) (rpcProof, error) {
@@ -364,6 +522,19 @@ func (e *rpcEndpoint) ethCall(ctx context.Context, to, data, tag string) (string
 	return result, nil
 }
 
+func (e *rpcEndpoint) ethCallWords(ctx context.Context, to, data, tag string, count int) ([]string, error) {
+	var result string
+	err := e.call(ctx, "eth_call", []interface{}{map[string]string{"to": to, "data": data}, tag}, &result)
+	if err != nil || count <= 0 || !strings.HasPrefix(result, "0x") || len(result) != 2+64*count {
+		return nil, errors.New("invalid Robinhood contract response")
+	}
+	words := make([]string, count)
+	for index := range words {
+		words[index] = "0x" + result[2+64*index:2+64*(index+1)]
+	}
+	return words, nil
+}
+
 func (e *rpcEndpoint) balance(ctx context.Context, address, tag string) (string, error) {
 	var result string
 	if err := e.call(ctx, "eth_getBalance", []interface{}{address, tag}, &result); err != nil {
@@ -374,6 +545,14 @@ func (e *rpcEndpoint) balance(ctx context.Context, address, tag string) (string,
 		return "", err
 	}
 	return value.String(), nil
+}
+
+func (e *rpcEndpoint) transactionCount(ctx context.Context, address, tag string) (uint64, error) {
+	var result string
+	if err := e.call(ctx, "eth_getTransactionCount", []interface{}{address, tag}, &result); err != nil {
+		return 0, err
+	}
+	return parseQuantity(result)
 }
 
 func (e *rpcEndpoint) hexQuantity(ctx context.Context, method string) (uint64, error) {
@@ -392,7 +571,7 @@ func validateRobinhoodBinding(binding RobinhoodBinding) error {
 	}
 	if !validHash(binding.VaultCodeHash) || !decimalAtLeast(binding.MinimumSettlementRaw, "25000000") ||
 		!decimalAtLeast(binding.MinimumOwnerGasRaw, "1") || !decimalAtLeast(binding.MinimumSignerGasRaw, "1") ||
-		len(binding.ReceiptHashes) == 0 {
+		len(binding.ReceiptHashes) == 0 || !binding.SignerJournalReady {
 		return errors.New("unsafe Robinhood minimums")
 	}
 	seen := make(map[string]struct{}, len(binding.ReceiptHashes))
@@ -487,6 +666,34 @@ func abiUintString(value string) string {
 		return ""
 	}
 	return parsed.String()
+}
+
+func roundIdentityHealthy(words []string, blockTimestamp uint64) bool {
+	if len(words) != 5 || blockTimestamp == 0 {
+		return false
+	}
+	roundID := abiUint(words[0])
+	startedAt := abiUint(words[2])
+	updatedAt := abiUint(words[3])
+	answeredInRound := abiUint(words[4])
+	return roundID > 0 && startedAt > 0 && updatedAt > 0 && startedAt <= blockTimestamp &&
+		updatedAt <= blockTimestamp && answeredInRound >= roundID
+}
+
+func oracleRoundHealthy(words []string, blockTimestamp, heartbeat uint64) bool {
+	if !roundIdentityHealthy(words, blockTimestamp) || heartbeat == 0 || blockTimestamp-abiUint(words[3]) > heartbeat {
+		return false
+	}
+	answer := new(big.Int)
+	_, ok := answer.SetString(words[1][2:], 16)
+	return ok && answer.Sign() > 0 && answer.Bit(255) == 0
+}
+
+func sequencerRoundHealthy(words []string, blockTimestamp, grace uint64) bool {
+	if !roundIdentityHealthy(words, blockTimestamp) || grace == 0 || blockTimestamp-abiUint(words[2]) <= grace {
+		return false
+	}
+	return abiUint(words[1]) == 0
 }
 
 func parseQuantity(value string) (uint64, error) {

@@ -7,6 +7,7 @@ import { RwaUserStrategyVaultV1 } from "./RwaUserStrategyVaultV1.sol";
 import { UniswapV4SpotAdapter } from "./UniswapV4SpotAdapter.sol";
 import { IChainlinkFeed } from "./interfaces/IChainlinkFeed.sol";
 import { IMainnetExecutionRegistry } from "./interfaces/IMainnetExecutionRegistry.sol";
+import { IQuorumAaplReferenceFeed } from "./interfaces/IQuorumAaplReferenceFeed.sol";
 import { IQuorumSequencerFeed } from "./interfaces/IQuorumSequencerFeed.sol";
 import { IRwaUserVaultFactoryV1 } from "./interfaces/IRwaUserVaultFactoryV1.sol";
 
@@ -16,6 +17,9 @@ contract MainnetExecutionRegistry is IMainnetExecutionRegistry {
     uint256 public constant MAX_PAIR_GROSS = 50e6;
     uint256 public constant MAX_DAILY_TURNOVER = 50e6;
     uint64 public constant TURNOVER_WINDOW = 1 days;
+    uint64 public constant AAPL_SOURCE_MAX_AGE = 25 hours;
+    bytes32 public constant AAPL_USDG_POOL_ID =
+        0xda4116b5894ee7479e64eae9276e1a2944ef0e5ce863a299d296a15618deee01;
 
     address public constant USDG = 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168;
     address public constant AAPL = 0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9;
@@ -167,10 +171,13 @@ contract MainnetExecutionRegistry is IMainnetExecutionRegistry {
                 true,
                 true
             );
+        MandateRiskManagerV1.Mode riskMode = MandateRiskManagerV1.Mode(uint8(globalMode));
+        MandateRiskManagerV1(riskManager).setMode(riskMode);
 
         emit GraphRegistered(
             msg.sender, owner, vault, riskManager, spotAdapter, approval.policyDigest
         );
+        emit VaultModeSet(vault, globalMode);
     }
 
     function setGlobalMode(Mode mode) external onlyConfigAdmin {
@@ -194,6 +201,19 @@ contract MainnetExecutionRegistry is IMainnetExecutionRegistry {
         emit VaultModeSet(vault, mode);
     }
 
+    function restrictVaultMode(address vault, Mode mode) external override {
+        address owner = ownerOfVault[vault];
+        if (msg.sender != guardian && msg.sender != owner) revert NotRestrictor();
+        address riskManager = riskManagerOfVault[vault];
+        if (riskManager == address(0)) revert UnknownVault(vault);
+        MandateRiskManagerV1.Mode current = MandateRiskManagerV1(riskManager).mode();
+        if (mode == Mode.Active || uint8(mode) < uint8(current)) {
+            revert InvalidModeTransition();
+        }
+        MandateRiskManagerV1(riskManager).setMode(MandateRiskManagerV1.Mode(uint8(mode)));
+        emit VaultModeSet(vault, mode);
+    }
+
     function setVaultAgent(address vault, address agent) external onlyConfigAdmin {
         address owner = ownerOfVault[vault];
         if (owner == address(0)) revert UnknownVault(vault);
@@ -212,8 +232,9 @@ contract MainnetExecutionRegistry is IMainnetExecutionRegistry {
         ) revert InvalidConfiguration();
         if (
             factoryPolicy.poolKey.currency0 != USDG || factoryPolicy.poolKey.currency1 != AAPL
-                || factoryPolicy.poolKey.fee != 3000 || factoryPolicy.poolKey.tickSpacing != 60
+                || factoryPolicy.poolKey.fee != 10_000 || factoryPolicy.poolKey.tickSpacing != 200
                 || factoryPolicy.poolKey.hooks != address(0)
+                || keccak256(abi.encode(factoryPolicy.poolKey)) != AAPL_USDG_POOL_ID
         ) revert InvalidConfiguration();
         if (
             factoryPolicy.maxSpotNotional != MAX_SPOT_NOTIONAL
@@ -221,9 +242,9 @@ contract MainnetExecutionRegistry is IMainnetExecutionRegistry {
                 || factoryPolicy.turnoverLimit != MAX_DAILY_TURNOVER
                 || factoryPolicy.turnoverWindow != TURNOVER_WINDOW
                 || factoryPolicy.maxInventory == 0 || factoryPolicy.marketVersion == 0
-                || factoryPolicy.heartbeat == 0 || factoryPolicy.maxDeadlineDelay == 0
-                || factoryPolicy.sequencerGracePeriod == 0 || factoryPolicy.policyVersion == 0
-                || factoryPolicy.maxSlippageBps > 100
+                || factoryPolicy.heartbeat != AAPL_SOURCE_MAX_AGE
+                || factoryPolicy.maxDeadlineDelay == 0 || factoryPolicy.sequencerGracePeriod == 0
+                || factoryPolicy.policyVersion == 0 || factoryPolicy.maxSlippageBps > 200
         ) revert InvalidConfiguration();
         if (
             factoryPolicy.marketFeed.code.length == 0
@@ -248,6 +269,15 @@ contract MainnetExecutionRegistry is IMainnetExecutionRegistry {
         if (
             sequencer.decimals() != 0 || sequencer.publisherCount() != 3 || sequencer.quorum() != 2
                 || sequencer.maxAge() != 60 seconds
+        ) revert InvalidConfiguration();
+        IQuorumAaplReferenceFeed market = IQuorumAaplReferenceFeed(factoryPolicy.marketFeed);
+        if (
+            market.decimals() != 8 || market.publisherCount() != 3 || market.quorum() != 2
+                || market.maxReportAge() != 60 seconds
+                || market.maxSourceAge() != AAPL_SOURCE_MAX_AGE
+                || market.publisher1() == market.publisher2()
+                || market.publisher1() == market.publisher3()
+                || market.publisher2() == market.publisher3()
         ) revert InvalidConfiguration();
     }
 

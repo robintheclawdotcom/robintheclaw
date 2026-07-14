@@ -5,11 +5,11 @@ import { Test } from "forge-std/Test.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { MainnetExecutionRegistry } from "../src/MainnetExecutionRegistry.sol";
 import { MandateRiskManagerV1 } from "../src/MandateRiskManagerV1.sol";
+import { QuorumAaplReferenceFeed } from "../src/QuorumAaplReferenceFeed.sol";
 import { QuorumSequencerFeed } from "../src/QuorumSequencerFeed.sol";
 import { RwaUserStrategyVaultV1 } from "../src/RwaUserStrategyVaultV1.sol";
 import { RwaUserVaultFactoryV1 } from "../src/RwaUserVaultFactoryV1.sol";
 import { UniswapV4SpotAdapter } from "../src/UniswapV4SpotAdapter.sol";
-import { IChainlinkFeed } from "../src/interfaces/IChainlinkFeed.sol";
 import { IMainnetExecutionRegistry } from "../src/interfaces/IMainnetExecutionRegistry.sol";
 import { ISpotExecution } from "../src/interfaces/ISpotExecution.sol";
 import {
@@ -55,24 +55,6 @@ contract CanonicalAaplMock is ERC20 {
     }
 }
 
-contract UserMarketFeed is IChainlinkFeed {
-    uint80 public roundId = 1;
-    int256 public answer = 100e8;
-    uint256 public updatedAt;
-
-    constructor() {
-        updatedAt = block.timestamp;
-    }
-
-    function decimals() external pure returns (uint8) {
-        return 8;
-    }
-
-    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
-        return (roundId, answer, updatedAt, updatedAt, roundId);
-    }
-}
-
 contract CanonicalUserRouter is IUniversalRouter {
     function execute(bytes calldata, bytes[] calldata, uint256) external { }
 }
@@ -90,13 +72,16 @@ contract RwaUserVaultFactoryV1Test is Test {
     UserFactoryAdmin private admin;
     MainnetExecutionRegistry private registry;
     QuorumSequencerFeed private sequencer;
-    UserMarketFeed private marketFeed;
+    QuorumAaplReferenceFeed private marketFeed;
     RwaUserVaultFactoryV1 private factory;
 
     address private guardian = makeAddr("guardian");
     address private publisher1 = makeAddr("publisher-1");
     address private publisher2 = makeAddr("publisher-2");
     address private publisher3 = makeAddr("publisher-3");
+    address private pricePublisher1 = makeAddr("price-publisher-1");
+    address private pricePublisher2 = makeAddr("price-publisher-2");
+    address private pricePublisher3 = makeAddr("price-publisher-3");
     address private owner = makeAddr("owner");
 
     function setUp() public {
@@ -107,7 +92,11 @@ contract RwaUserVaultFactoryV1Test is Test {
         admin = new UserFactoryAdmin();
         registry = new MainnetExecutionRegistry(address(admin), guardian);
         sequencer = new QuorumSequencerFeed(publisher1, publisher2, publisher3);
-        marketFeed = new UserMarketFeed();
+        marketFeed = new QuorumAaplReferenceFeed(pricePublisher1, pricePublisher2, pricePublisher3);
+        vm.prank(pricePublisher1);
+        marketFeed.report(1, 1, 100e8, uint64(block.timestamp - 1), 1);
+        vm.prank(pricePublisher2);
+        marketFeed.report(1, 1, 100e8, uint64(block.timestamp - 1), 1);
         factory = new RwaUserVaultFactoryV1(registry, _policy());
 
         vm.prank(address(admin));
@@ -169,6 +158,86 @@ contract RwaUserVaultFactoryV1Test is Test {
         registry.setGlobalMode(IMainnetExecutionRegistry.Mode.Active);
     }
 
+    function testNewGraphInheritsActiveGlobalMode() public {
+        vm.prank(address(admin));
+        registry.setGlobalMode(IMainnetExecutionRegistry.Mode.Active);
+
+        IRwaUserVaultFactoryV1.Graph memory graph = factory.deploy(owner);
+        MandateRiskManagerV1 risk = MandateRiskManagerV1(graph.riskManager);
+
+        assertEq(uint8(risk.mode()), uint8(MandateRiskManagerV1.Mode.Active));
+    }
+
+    function testNewGraphInheritsRestrictedGlobalModes() public {
+        vm.prank(address(admin));
+        registry.setGlobalMode(IMainnetExecutionRegistry.Mode.Active);
+        vm.prank(guardian);
+        registry.restrictGlobalMode(IMainnetExecutionRegistry.Mode.ReduceOnly);
+
+        IRwaUserVaultFactoryV1.Graph memory reducing = factory.deploy(owner);
+        assertEq(
+            uint8(MandateRiskManagerV1(reducing.riskManager).mode()),
+            uint8(MandateRiskManagerV1.Mode.ReduceOnly)
+        );
+
+        vm.prank(guardian);
+        registry.restrictGlobalMode(IMainnetExecutionRegistry.Mode.Halted);
+        IRwaUserVaultFactoryV1.Graph memory halted = factory.deploy(makeAddr("halted-owner"));
+        assertEq(
+            uint8(MandateRiskManagerV1(halted.riskManager).mode()),
+            uint8(MandateRiskManagerV1.Mode.Halted)
+        );
+    }
+
+    function testGuardianAndOwnerCanImmediatelyRestrictOnlyTheirVault() public {
+        vm.prank(address(admin));
+        registry.setGlobalMode(IMainnetExecutionRegistry.Mode.Active);
+        IRwaUserVaultFactoryV1.Graph memory first = factory.deploy(owner);
+        address secondOwner = makeAddr("second-owner");
+        IRwaUserVaultFactoryV1.Graph memory second = factory.deploy(secondOwner);
+
+        vm.prank(guardian);
+        registry.restrictVaultMode(first.vault, IMainnetExecutionRegistry.Mode.ReduceOnly);
+        assertEq(
+            uint8(MandateRiskManagerV1(first.riskManager).mode()),
+            uint8(MandateRiskManagerV1.Mode.ReduceOnly)
+        );
+        assertEq(
+            uint8(MandateRiskManagerV1(second.riskManager).mode()),
+            uint8(MandateRiskManagerV1.Mode.Active)
+        );
+
+        vm.prank(owner);
+        vm.expectRevert(MainnetExecutionRegistry.NotRestrictor.selector);
+        registry.restrictVaultMode(second.vault, IMainnetExecutionRegistry.Mode.Halted);
+        vm.prank(secondOwner);
+        registry.restrictVaultMode(second.vault, IMainnetExecutionRegistry.Mode.Halted);
+        assertEq(
+            uint8(MandateRiskManagerV1(second.riskManager).mode()),
+            uint8(MandateRiskManagerV1.Mode.Halted)
+        );
+    }
+
+    function testVaultRestrictionCannotExpandAuthorityOrCrossAccounts() public {
+        vm.prank(address(admin));
+        registry.setGlobalMode(IMainnetExecutionRegistry.Mode.Active);
+        IRwaUserVaultFactoryV1.Graph memory graph = factory.deploy(owner);
+
+        vm.prank(makeAddr("attacker"));
+        vm.expectRevert(MainnetExecutionRegistry.NotRestrictor.selector);
+        registry.restrictVaultMode(graph.vault, IMainnetExecutionRegistry.Mode.Halted);
+
+        vm.prank(owner);
+        vm.expectRevert(MainnetExecutionRegistry.InvalidModeTransition.selector);
+        registry.restrictVaultMode(graph.vault, IMainnetExecutionRegistry.Mode.Active);
+
+        vm.prank(owner);
+        registry.restrictVaultMode(graph.vault, IMainnetExecutionRegistry.Mode.Halted);
+        vm.prank(guardian);
+        vm.expectRevert(MainnetExecutionRegistry.InvalidModeTransition.selector);
+        registry.restrictVaultMode(graph.vault, IMainnetExecutionRegistry.Mode.ReduceOnly);
+    }
+
     function testVaultEnforcesGlobalModeBeforeExecution() public {
         IRwaUserVaultFactoryV1.Graph memory graph = factory.deploy(owner);
         RwaUserStrategyVaultV1 vault = RwaUserStrategyVaultV1(graph.vault);
@@ -201,6 +270,46 @@ contract RwaUserVaultFactoryV1Test is Test {
         vm.prank(agent);
         vm.expectRevert(RwaUserStrategyVaultV1.GlobalReduceOnly.selector);
         vault.executeSpot(intent);
+
+        vm.prank(address(admin));
+        registry.setVaultMode(graph.vault, IMainnetExecutionRegistry.Mode.Halted);
+        vm.prank(address(admin));
+        registry.setGlobalMode(IMainnetExecutionRegistry.Mode.Active);
+        vm.prank(agent);
+        vm.expectRevert(MandateRiskManagerV1.Halted.selector);
+        vault.executeSpot(intent);
+    }
+
+    function testVaultEnforcesOneEntryAndFullExitPerEpisode() public {
+        IRwaUserVaultFactoryV1.Graph memory graph = factory.deploy(owner);
+        RwaUserStrategyVaultV1 vault = RwaUserStrategyVaultV1(graph.vault);
+        MandateRiskManagerV1 risk = MandateRiskManagerV1(graph.riskManager);
+        address agent = makeAddr("episode-agent");
+        vm.startPrank(address(admin));
+        registry.setGlobalMode(IMainnetExecutionRegistry.Mode.Active);
+        registry.setVaultAgent(graph.vault, agent);
+        registry.setVaultMode(graph.vault, IMainnetExecutionRegistry.Mode.Active);
+        vm.stopPrank();
+        vm.prank(owner);
+        vault.enableAgent();
+
+        vm.mockCall(
+            address(risk),
+            abi.encodeWithSignature("inventory(address)", AAPL),
+            abi.encode(uint256(1e18))
+        );
+        vm.prank(agent);
+        vm.expectRevert(RwaUserStrategyVaultV1.EpisodeAlreadyActive.selector);
+        vault.executeSpot(_intent(keccak256("duplicate-entry")));
+
+        ISpotExecution.SpotIntent memory partialExit = _intent(keccak256("partial-exit"));
+        partialExit.side = ISpotExecution.Side.SellSpot;
+        partialExit.amountIn = 5e17;
+        vm.prank(agent);
+        vm.expectRevert(
+            abi.encodeWithSelector(RwaUserStrategyVaultV1.FullExitRequired.selector, 1e18, 5e17)
+        );
+        vault.executeSpot(partialExit);
     }
 
     function testTimelockAgentReplacementCannotBypassOwnerRevoke() public {
@@ -233,6 +342,46 @@ contract RwaUserVaultFactoryV1Test is Test {
         vm.prank(replacement);
         vault.anchorBatch(keccak256("replacement"), 2, 1);
         assertTrue(vault.agentEnabled());
+    }
+
+    function testOwnerCanAtomicallyAuthorizeExecutionAgent() public {
+        IRwaUserVaultFactoryV1.Graph memory graph = factory.deploy(owner);
+        RwaUserStrategyVaultV1 vault = RwaUserStrategyVaultV1(graph.vault);
+        address executionAgent = makeAddr("execution-agent");
+
+        vm.prank(makeAddr("attacker"));
+        vm.expectRevert(RwaUserStrategyVaultV1.NotOwner.selector);
+        vault.authorizeInitialAgent(executionAgent);
+
+        vm.prank(owner);
+        vault.authorizeInitialAgent(executionAgent);
+        assertEq(vault.agent(), executionAgent);
+        assertTrue(vault.agentEnabled());
+        assertTrue(vault.initialAgentAuthorized());
+
+        vm.prank(executionAgent);
+        vault.anchorBatch(keccak256("owner-authorized"), 1, 1);
+
+        vm.prank(owner);
+        vault.revokeAgent();
+        assertEq(vault.agent(), address(0));
+        assertFalse(vault.agentEnabled());
+
+        vm.prank(owner);
+        vm.expectRevert(RwaUserStrategyVaultV1.InitialAgentAlreadyAuthorized.selector);
+        vault.authorizeInitialAgent(makeAddr("replacement"));
+    }
+
+    function testOwnerCannotAuthorizeControlRolesAsAgent() public {
+        IRwaUserVaultFactoryV1.Graph memory graph = factory.deploy(owner);
+        RwaUserStrategyVaultV1 vault = RwaUserStrategyVaultV1(graph.vault);
+        address[4] memory forbidden = [owner, address(registry), address(admin), guardian];
+
+        for (uint256 i; i < forbidden.length; ++i) {
+            vm.prank(owner);
+            vm.expectRevert(RwaUserStrategyVaultV1.InvalidAddress.selector);
+            vault.authorizeInitialAgent(forbidden[i]);
+        }
     }
 
     function testOwnerEmergencyHaltAtomicallyRevokesExecution() public {
@@ -470,7 +619,7 @@ contract RwaUserVaultFactoryV1Test is Test {
             router: ROUTER,
             permit2: PERMIT2,
             poolKey: PoolKey({
-                currency0: USDG, currency1: AAPL, fee: 3000, tickSpacing: 60, hooks: address(0)
+                currency0: USDG, currency1: AAPL, fee: 10_000, tickSpacing: 200, hooks: address(0)
             }),
             settlementAssetCodeHash: USDG.codehash,
             stockTokenCodeHash: AAPL.codehash,
@@ -480,11 +629,11 @@ contract RwaUserVaultFactoryV1Test is Test {
             permit2CodeHash: PERMIT2.codehash,
             maxInventory: 1e18,
             marketVersion: 1,
-            heartbeat: 1 minutes,
+            heartbeat: 25 hours,
             maxDeadlineDelay: 5 minutes,
             sequencerGracePeriod: 5 minutes,
             policyVersion: 1,
-            maxSlippageBps: 100,
+            maxSlippageBps: 200,
             maxSpotNotional: 25e6,
             maxPairGross: 50e6,
             turnoverLimit: 50e6,

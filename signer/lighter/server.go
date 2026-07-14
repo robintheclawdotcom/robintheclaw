@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"strconv"
 	"sync"
@@ -17,6 +18,14 @@ import (
 )
 
 const maxBodyBytes = 64 << 10
+
+const (
+	txTypeCreateOrder        = uint8(14)
+	txTypeCancelOrder        = uint8(15)
+	txTypeCancelAll          = uint8(16)
+	maximumLighterOrderValue = int64(1<<48 - 1)
+	maximumLighterOrderIndex = int64(1<<60 - 1)
+)
 
 type signerServer struct {
 	config config
@@ -70,17 +79,6 @@ type createOrderRequest struct {
 	TransactOptions    transactOptions `json:"transaction"`
 }
 
-type modifyOrderRequest struct {
-	ExecutionAccountID string          `json:"executionAccountId"`
-	IntentID           string          `json:"intentId"`
-	MarketIndex        int16           `json:"marketIndex"`
-	OrderIndex         int64           `json:"orderIndex"`
-	BaseAmount         int64           `json:"baseAmount"`
-	Price              uint32          `json:"price"`
-	TriggerPrice       uint32          `json:"triggerPrice"`
-	TransactOptions    transactOptions `json:"transaction"`
-}
-
 type cancelOrderRequest struct {
 	ExecutionAccountID string          `json:"executionAccountId"`
 	IntentID           string          `json:"intentId"`
@@ -116,7 +114,6 @@ func (s *signerServer) routes() http.Handler {
 	mux.HandleFunc("GET /livez", s.livez)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.Handle("POST /v1/sign/create-order", s.authorize(http.HandlerFunc(s.createOrder)))
-	mux.Handle("POST /v1/sign/modify-order", s.authorize(http.HandlerFunc(s.modifyOrder)))
 	mux.Handle("POST /v1/sign/cancel-order", s.authorize(http.HandlerFunc(s.cancelOrder)))
 	mux.Handle("POST /v1/sign/cancel-all", s.authorize(http.HandlerFunc(s.cancelAll)))
 	return securityHeaders(mux)
@@ -255,15 +252,11 @@ func (s *signerServer) createOrder(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
-	s.forwardTransaction(w, r, "/v1/signer/create-order", request.ExecutionAccountID, request.IntentID, request)
-}
-
-func (s *signerServer) modifyOrder(w http.ResponseWriter, r *http.Request) {
-	var request modifyOrderRequest
-	if err := decodeBody(w, r, &request); err != nil {
+	if err := validateCreateOrderPolicy(request, s.config.marketIndex, s.config.baseDecimals, s.config.priceDecimals); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.forwardTransaction(w, r, "/v1/signer/modify-order", request.ExecutionAccountID, request.IntentID, request)
+	s.forwardTransaction(w, r, "/v1/signer/create-order", request.ExecutionAccountID, request.IntentID, txTypeCreateOrder, request)
 }
 
 func (s *signerServer) cancelOrder(w http.ResponseWriter, r *http.Request) {
@@ -271,7 +264,42 @@ func (s *signerServer) cancelOrder(w http.ResponseWriter, r *http.Request) {
 	if err := decodeBody(w, r, &request); err != nil {
 		return
 	}
-	s.forwardTransaction(w, r, "/v1/signer/cancel-order", request.ExecutionAccountID, request.IntentID, request)
+	if request.MarketIndex != s.config.marketIndex {
+		writeError(w, http.StatusBadRequest, "cancel market does not match the verified AAPL perpetual")
+		return
+	}
+	if request.OrderIndex <= 0 || request.OrderIndex > maximumLighterOrderIndex {
+		writeError(w, http.StatusBadRequest, "cancel order index is invalid")
+		return
+	}
+	s.forwardTransaction(w, r, "/v1/signer/cancel-order", request.ExecutionAccountID, request.IntentID, txTypeCancelOrder, request)
+}
+
+func validateCreateOrderPolicy(request createOrderRequest, marketIndex int16, baseDecimals, priceDecimals uint8) error {
+	if request.MarketIndex != marketIndex {
+		return errors.New("order market does not match the verified AAPL perpetual")
+	}
+	if request.ClientOrderID <= 0 || request.ClientOrderID > maximumLighterOrderValue ||
+		request.BaseAmount <= 0 || request.BaseAmount > maximumLighterOrderValue || request.Price == 0 {
+		return errors.New("order index, base amount, or price is outside the supported range")
+	}
+	if request.OrderType != 0 || request.TimeInForce != 0 || request.TriggerPrice != 0 || request.OrderExpiryMS != 0 {
+		return errors.New("only non-triggered IOC limit orders are allowed")
+	}
+	if !((request.IsAsk && !request.ReduceOnly) || (!request.IsAsk && request.ReduceOnly)) {
+		return errors.New("order must be an entry ask or a reduce-only unwind bid")
+	}
+	if request.ReduceOnly {
+		return nil
+	}
+	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(baseDecimals)+int64(priceDecimals)), nil)
+	numerator := new(big.Int).Mul(big.NewInt(request.BaseAmount), new(big.Int).SetUint64(uint64(request.Price)))
+	numerator.Mul(numerator, big.NewInt(1_000_000))
+	numerator.Add(numerator, new(big.Int).Sub(scale, big.NewInt(1))).Quo(numerator, scale)
+	if numerator.Cmp(big.NewInt(25_000_000)) > 0 {
+		return errors.New("order notional exceeds the $25 AAPL leg cap")
+	}
+	return nil
 }
 
 func (s *signerServer) cancelAll(w http.ResponseWriter, r *http.Request) {
@@ -283,10 +311,10 @@ func (s *signerServer) cancelAll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid cancel-all mode")
 		return
 	}
-	s.forwardTransaction(w, r, "/v1/signer/cancel-all", request.ExecutionAccountID, request.IntentID, request)
+	s.forwardTransaction(w, r, "/v1/signer/cancel-all", request.ExecutionAccountID, request.IntentID, txTypeCancelAll, request)
 }
 
-func (s *signerServer) forwardTransaction(w http.ResponseWriter, r *http.Request, path, executionID, intentID string, request any) {
+func (s *signerServer) forwardTransaction(w http.ResponseWriter, r *http.Request, path, executionID, intentID string, expectedTxType uint8, request any) {
 	if !validExecutionAccountID(executionID) || !validIntentID(intentID) {
 		writeError(w, http.StatusBadRequest, "execution account or intent is invalid")
 		return
@@ -296,7 +324,7 @@ func (s *signerServer) forwardTransaction(w http.ResponseWriter, r *http.Request
 		writeBridgeError(w, err)
 		return
 	}
-	if err := validateSignedTransaction(response, executionID, intentID); err != nil {
+	if err := validateSignedTransaction(response, executionID, intentID, expectedTxType); err != nil {
 		writeError(w, http.StatusBadGateway, "signing response identity mismatch")
 		return
 	}
@@ -316,10 +344,10 @@ func validIntentID(value string) bool {
 	return true
 }
 
-func validateSignedTransaction(value signedTransaction, executionID, intentID string) error {
+func validateSignedTransaction(value signedTransaction, executionID, intentID string, expectedTxType uint8) error {
 	if value.ExecutionAccountID != executionID || value.IntentID != intentID || value.AccountIndex <= 0 ||
 		value.APIKeyIndex < 4 || value.APIKeyIndex > 254 || value.CredentialVersion <= 0 ||
-		value.TxType == 0 || value.TxHash == "" || !json.Valid(value.TxInfo) {
+		value.TxType != expectedTxType || value.TxHash == "" || !json.Valid(value.TxInfo) {
 		return errors.New("invalid signed transaction identity")
 	}
 	var identity struct {

@@ -29,6 +29,11 @@ req=(
   config/strategies/basis-aapl-v1.route.json
   config/validate-live-policy.mjs
   config/validate-live-policy.test.mjs
+  config/engineering-canary-evidence.json
+  scripts/migrate-execution.sh
+  scripts/migrate-robinhood-signer.sh
+  scripts/validate-engineering-canary.mjs
+  scripts/validate-engineering-canary.test.mjs
   scripts/validate-mainnet-release.sh
   docs/production-audit-mainnet-live-execution.md
   liveexec/scripts/validate.sh
@@ -37,6 +42,12 @@ req=(
   ops/mainnet-live/promotion-ledger/ledger.mjs
   ops/mainnet-live/promotion-ledger/ledger.test.mjs
   publisher/cmd/account-publisher/main.go
+  runtime/exit-quote-publisher/cmd/exit-quote-publisher/main.go
+  runtime/live-evaluation/cmd/live-evaluation/main.go
+  runtime/live-evaluation/migrations/0001_live_evaluation.sql
+  runtime/live-scheduler/cmd/live-scheduler/main.go
+  runtime/sequencer-publisher/cmd/aapl-relay/main.go
+  runtime/sequencer-publisher/cmd/sequencer-publisher/main.go
   provisioner/lighter/main.go
   provisioner/robinhood/main.go
   signer/lighter/main.go

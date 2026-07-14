@@ -231,6 +231,8 @@ pub struct ExecutionBindingRecord {
     pub robinhood_spot_adapter_address: Option<String>,
     pub robinhood_deployment_block: Option<i64>,
     pub robinhood_deployment_action: Option<Value>,
+    pub robinhood_authorization_transaction_hash: Option<String>,
+    pub robinhood_authorization_block: Option<i64>,
     pub public_identifier: Option<String>,
     pub public_key: Option<String>,
     pub association_payload: Option<String>,
@@ -301,8 +303,6 @@ impl AgentReadiness {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LighterLinkRequestInput {
     pub owner_address: String,
-    pub account_index: i64,
-    pub nonce: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -470,13 +470,27 @@ mod agent_tests {
 
     #[test]
     fn lighter_link_request_rejects_secret_fields() {
+        let input = serde_json::from_value::<LighterLinkRequestInput>(serde_json::json!({
+            "ownerAddress": "0x1111111111111111111111111111111111111111"
+        }))
+        .unwrap();
+        assert_eq!(
+            input.owner_address,
+            "0x1111111111111111111111111111111111111111"
+        );
         let payload = serde_json::json!({
             "ownerAddress": "0x1111111111111111111111111111111111111111",
-            "accountIndex": 7,
-            "nonce": 0,
             "ethereumPrivateKey": "never-accepted"
         });
         assert!(serde_json::from_value::<LighterLinkRequestInput>(payload).is_err());
+
+        for field in ["accountIndex", "nonce"] {
+            let mut payload = serde_json::json!({
+                "ownerAddress": "0x1111111111111111111111111111111111111111"
+            });
+            payload[field] = serde_json::json!(7);
+            assert!(serde_json::from_value::<LighterLinkRequestInput>(payload).is_err());
+        }
     }
 
     #[test]
@@ -486,6 +500,9 @@ mod agent_tests {
         }))
         .unwrap();
         assert_eq!(input.strategy_version, LIVE_STRATEGY_VERSION);
+        assert!(serde_json::from_slice::<AgentCreateInput>(b"").is_err());
+        assert!(serde_json::from_slice::<AgentCreateInput>(b"{}").is_err());
+        assert!(serde_json::from_slice::<AgentCreateInput>(b"not-json").is_err());
         assert!(
             serde_json::from_value::<AgentCreateInput>(serde_json::json!({
                 "strategyVersion": "basis-aapl-v1",

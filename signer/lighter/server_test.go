@@ -62,7 +62,7 @@ func TestSignerSurfaceHasNoAssetMovementRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/v1/sign/withdraw", "/v1/sign/transfer", "/v1/sign/update-leverage", "/v1/auth-token"} {
+	for _, path := range []string{"/v1/sign/withdraw", "/v1/sign/transfer", "/v1/sign/modify-order", "/v1/sign/update-leverage", "/v1/auth-token"} {
 		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
 		response := httptest.NewRecorder()
 		server.routes().ServeHTTP(response, request)
@@ -83,8 +83,24 @@ func TestReservedAPIKeyIndexIsRejected(t *testing.T) {
 		TxHash:             "0x01",
 		TxInfo:             json.RawMessage(`{"AccountIndex":7,"ApiKeyIndex":3}`),
 	}
-	if validateSignedTransaction(transaction, transaction.ExecutionAccountID, transaction.IntentID) == nil {
+	if validateSignedTransaction(transaction, transaction.ExecutionAccountID, transaction.IntentID, txTypeCreateOrder) == nil {
 		t.Fatal("reserved API key index was accepted")
+	}
+}
+
+func TestSignedTransactionCannotSubstituteAssetMovementType(t *testing.T) {
+	transaction := signedTransaction{
+		ExecutionAccountID: "account-canary-1",
+		AccountIndex:       7,
+		APIKeyIndex:        4,
+		CredentialVersion:  1,
+		IntentID:           "intent-1",
+		TxType:             13,
+		TxHash:             "0x01",
+		TxInfo:             json.RawMessage(`{"AccountIndex":7,"ApiKeyIndex":4}`),
+	}
+	if validateSignedTransaction(transaction, transaction.ExecutionAccountID, transaction.IntentID, txTypeCreateOrder) == nil {
+		t.Fatal("withdrawal transaction type was accepted as an order")
 	}
 }
 
@@ -297,6 +313,9 @@ func TestLoadConfigRequiresHMACAuthentication(t *testing.T) {
 	t.Setenv("LIGHTER_PROVISIONER_URL", "https://provisioner.invalid")
 	t.Setenv("LIGHTER_SIGNER_BRIDGE_HMAC_KEY", strings.Repeat("62", 32))
 	t.Setenv("LIGHTER_SIGNER_BRIDGE_CALLER_ID", "lighter-signer")
+	t.Setenv("LIGHTER_AAPL_MARKET_INDEX", "1")
+	t.Setenv("LIGHTER_AAPL_BASE_DECIMALS", "0")
+	t.Setenv("LIGHTER_AAPL_PRICE_DECIMALS", "0")
 	value, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
@@ -318,6 +337,9 @@ func authTestServer(now time.Time) *signerServer {
 		callerID:              "execution-coordinator",
 		maxRequestsPerMinute:  60,
 		maxConcurrentRequests: 1,
+		marketIndex:           1,
+		baseDecimals:          0,
+		priceDecimals:         0,
 	}
 	return &signerServer{
 		config: value,
@@ -339,6 +361,52 @@ func authTestServer(now time.Time) *signerServer {
 		now:    func() time.Time { return now },
 		slots:  make(chan struct{}, value.maxConcurrentRequests),
 		nonces: authNonces{expires: make(map[string]time.Time)},
+	}
+}
+
+func TestCreateOrderPolicyPinsMarketShapeAndCap(t *testing.T) {
+	valid := createOrderRequest{
+		MarketIndex: 101, ClientOrderID: 1, BaseAmount: 10_000, Price: 2_500,
+		IsAsk: true, OrderType: 0, TimeInForce: 0,
+	}
+	if err := validateCreateOrderPolicy(valid, 101, 4, 2); err != nil {
+		t.Fatal(err)
+	}
+	unwind := valid
+	unwind.IsAsk = false
+	unwind.ReduceOnly = true
+	unwind.Price++
+	if err := validateCreateOrderPolicy(unwind, 101, 4, 2); err != nil {
+		t.Fatalf("appreciated reduce-only unwind was rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*createOrderRequest){
+		"market substitution": func(value *createOrderRequest) { value.MarketIndex++ },
+		"oversize":            func(value *createOrderRequest) { value.BaseAmount++ },
+		"non-IOC":             func(value *createOrderRequest) { value.TimeInForce = 1 },
+		"trigger":             func(value *createOrderRequest) { value.TriggerPrice = 1 },
+		"expiry":              func(value *createOrderRequest) { value.OrderExpiryMS = 1 },
+		"long entry":          func(value *createOrderRequest) { value.IsAsk = false },
+		"base encoding":       func(value *createOrderRequest) { value.BaseAmount = maximumLighterOrderValue + 1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := valid
+			mutate(&request)
+			if err := validateCreateOrderPolicy(request, 101, 4, 2); err == nil {
+				t.Fatal("invalid order policy was accepted")
+			}
+		})
+	}
+	maximumEntry := valid
+	maximumEntry.BaseAmount = maximumLighterOrderValue
+	maximumEntry.Price = ^uint32(0)
+	if err := validateCreateOrderPolicy(maximumEntry, 101, 0, 0); err == nil {
+		t.Fatal("overflow-sized order was accepted")
+	}
+	maximumUnwind := maximumEntry
+	maximumUnwind.IsAsk = false
+	maximumUnwind.ReduceOnly = true
+	if err := validateCreateOrderPolicy(maximumUnwind, 101, 0, 0); err != nil {
+		t.Fatalf("protocol-valid reduce-only unwind was rejected: %v", err)
 	}
 }
 

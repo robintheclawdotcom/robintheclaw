@@ -19,9 +19,13 @@ const (
 	StrategyVersion        = "basis-aapl-v1"
 	StrategyManifestSHA256 = "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a"
 	SourceConfigSHA256     = "b701b39cbce20ccef48527811299732812d14297750fc3eee2a3c4a4a3f29edd"
+	RouteSHA256            = routeSHA256
+	OraclePolicySHA256     = oraclePolicySHA256
+	RiskPolicySHA256       = riskPolicySHA256
 	ActionEntry            = "entry"
+	ActionUnwind           = "unwind"
 	maxEvidenceAge         = 5 * time.Second
-	quoteSchemaVersion     = uint8(2)
+	quoteSchemaVersion     = uint8(3)
 	routeSHA256            = "23559b51e5512cfa0ab21ceeb3fbf97fc0edf3993528ae7b68d40affec6df5c8"
 	oraclePolicySHA256     = "b6f928e078847713aaca6c308769a774f367ec89f5f02d7332e1989095e53578"
 	riskPolicySHA256       = "b6a73ad263d6b61fabda029282410dc8200e700c956d2804508b354bbfeb94f6"
@@ -30,6 +34,7 @@ const (
 var (
 	hashPattern    = regexp.MustCompile(`^0x[0-9a-f]{64}$`)
 	accountPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{7,63}$`)
+	uuidPattern    = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 )
 
 type SourceEvaluation struct {
@@ -43,6 +48,9 @@ type SourceEvaluation struct {
 	Action                 string `json:"action"`
 	ObservedAtMS           uint64 `json:"observed_at_ms"`
 	EstimatedCostMicros    uint64 `json:"estimated_cost_micros"`
+	SourceEpisodeID        string `json:"source_episode_id"`
+	PaperEvaluationID      string `json:"paper_evaluation_id"`
+	PairIntentID           string `json:"pair_intent_id"`
 }
 
 type Readiness struct {
@@ -109,6 +117,7 @@ type Dispatch struct {
 	QuoteSHA256        string
 	RunnerBody         []byte
 	RunnerSHA256       string
+	OpenEpisode        *OpenEpisode
 }
 
 type QuoteRequest struct {
@@ -116,6 +125,7 @@ type QuoteRequest struct {
 	ExecutionAccountID string `json:"execution_account_id"`
 	SourceEvaluationID string `json:"source_evaluation_id"`
 	MarketManifest     string `json:"market_manifest"`
+	IntentID           string `json:"intent_id,omitempty"`
 	Action             string `json:"action"`
 	RequestedAtMS      uint64 `json:"requested_at_ms"`
 }
@@ -150,6 +160,7 @@ type perpQuote struct {
 	MarketIndex   uint32 `json:"market_index"`
 	Side          string `json:"side"`
 	ReduceOnly    bool   `json:"reduce_only"`
+	Phase         string `json:"phase,omitempty"`
 	BaseAmount    uint64 `json:"base_amount"`
 	BaseDecimals  uint8  `json:"base_decimals"`
 	PriceDecimals uint8  `json:"price_decimals"`
@@ -158,11 +169,34 @@ type perpQuote struct {
 	ObservedAtMS  uint64 `json:"observed_at_ms"`
 }
 
+type spotQuote struct {
+	Venue                string `json:"venue"`
+	Side                 string `json:"side"`
+	StockAmount          string `json:"stock_amount"`
+	MinimumAmountOut     string `json:"minimum_amount_out"`
+	ExpectedUIMultiplier string `json:"expected_ui_multiplier"`
+	MinOracleRoundID     string `json:"min_oracle_round_id"`
+}
+
+type exitQuoteAuthority struct {
+	ExecutionAccountID string `json:"execution_account_id"`
+	IntentID           string `json:"intent_id"`
+}
+
+type OpenEpisode struct {
+	PairIntentID               string `json:"pair_intent_id"`
+	SpotUnwindIntentID         string `json:"spot_unwind_intent_id"`
+	SpotAmount                 string `json:"spot_amount"`
+	MinimumSettlementAmountOut string `json:"minimum_settlement_amount_out"`
+	PerpBaseAmount             uint64 `json:"perp_base_amount"`
+}
+
 type RunRequest struct {
 	Evaluation   SourceEvaluation `json:"evaluation"`
 	Readiness    Readiness        `json:"readiness"`
 	AccountState AccountState     `json:"account_state"`
 	Quotes       json.RawMessage  `json:"quotes"`
+	OpenEpisode  *OpenEpisode     `json:"open_episode,omitempty"`
 }
 
 type runOutput struct {
@@ -188,6 +222,23 @@ type intentPersistence struct {
 	CoordinatorVersion uint64 `json:"coordinator_version"`
 }
 
+type exitPersistence struct {
+	Status             string `json:"status"`
+	RequestID          string `json:"request_id"`
+	IntentID           string `json:"intent_id"`
+	CoordinatorState   string `json:"coordinator_state"`
+	CoordinatorVersion uint64 `json:"coordinator_version"`
+}
+
+type unwindIdentity struct {
+	ID                     string `json:"id"`
+	PairIntentID           string `json:"pair_intent_id"`
+	ExecutionAccountID     string `json:"execution_account_id"`
+	AgentID                string `json:"agent_id"`
+	SourceEvaluationID     string `json:"source_evaluation_id"`
+	StrategyManifestSHA256 string `json:"strategy_manifest_sha256"`
+}
+
 func decodeStrict(data []byte, value any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -208,8 +259,15 @@ func (d Dispatch) validate(now time.Time) error {
 		return errors.New("evaluation identity mismatch")
 	}
 	if d.Evaluation.StrategyVersion != StrategyVersion || d.Evaluation.StrategyManifestSHA256 != StrategyManifestSHA256 ||
-		d.Evaluation.SourceConfigSHA256 != SourceConfigSHA256 || d.Evaluation.Status != "approved" || d.Evaluation.Action != ActionEntry {
+		d.Evaluation.SourceConfigSHA256 != SourceConfigSHA256 || d.Evaluation.Status != "approved" ||
+		(d.Evaluation.Action != ActionEntry && d.Evaluation.Action != ActionUnwind) {
 		return errors.New("evaluation policy mismatch")
+	}
+	if !uuidPattern.MatchString(d.Evaluation.SourceEpisodeID) || !uuidPattern.MatchString(d.Evaluation.PaperEvaluationID) ||
+		(d.Evaluation.Action == ActionEntry && d.Evaluation.PairIntentID != "") ||
+		(d.Evaluation.Action == ActionUnwind && (!hashPattern.MatchString(d.Evaluation.PairIntentID) || d.OpenEpisode == nil ||
+			d.OpenEpisode.PairIntentID != d.Evaluation.PairIntentID)) {
+		return errors.New("evaluation episode binding mismatch")
 	}
 	if !hashPattern.MatchString(d.Evaluation.DatasetManifest) || !hashPattern.MatchString(d.Evaluation.MarketManifest) {
 		return errors.New("evaluation evidence is invalid")
@@ -221,8 +279,8 @@ func (d Dispatch) validate(now time.Time) error {
 		d.Readiness.StrategyVersion != StrategyVersion || d.Readiness.StrategyManifestSHA256 != StrategyManifestSHA256 {
 		return errors.New("readiness identity mismatch")
 	}
-	if d.Readiness.Lifecycle != "running" || d.Readiness.GlobalControl != "ACTIVE" ||
-		d.Readiness.StrategyControl != "ACTIVE" || d.Readiness.AccountControl != "ACTIVE" ||
+	if d.Readiness.Lifecycle != "running" || !controlAllows(d.Readiness.GlobalControl, d.Evaluation.Action) ||
+		!controlAllows(d.Readiness.StrategyControl, d.Evaluation.Action) || !controlAllows(d.Readiness.AccountControl, d.Evaluation.Action) ||
 		!d.Readiness.FullyVerified || !d.Readiness.VaultWired || !d.Readiness.VaultFunded ||
 		!d.Readiness.ExecutionSignerFunded || !d.Readiness.LighterLinked || !d.Readiness.LighterFunded ||
 		!d.Readiness.RouteHealthy || !d.Readiness.OracleHealthy || !d.Readiness.SequencerHealthy ||
@@ -236,10 +294,17 @@ func (d Dispatch) validate(now time.Time) error {
 		return errors.New("account state identity mismatch")
 	}
 	if !state.LighterNonceAligned || !state.RobinhoodNonceAligned || state.UnknownLighterOrders ||
-		state.UnknownLighterPositions || state.UnknownRobinhoodPosition || state.ActiveEpisodes != 0 || !state.Flat {
+		state.UnknownLighterPositions || state.UnknownRobinhoodPosition {
+		return errors.New("account state is not reconciled")
+	}
+	if d.Evaluation.Action == ActionEntry && (state.ActiveEpisodes != 0 || !state.Flat) {
 		return errors.New("account state is not entry-safe")
 	}
-	if state.MaintenanceMarginMicros == 0 || state.CollateralMicros < 2*state.MaintenanceMarginMicros {
+	if d.Evaluation.Action == ActionUnwind && (state.ActiveEpisodes != 1 || state.Flat || !validOpenEpisode(*d.OpenEpisode)) {
+		return errors.New("account state is not unwind-safe")
+	}
+	if d.Evaluation.Action == ActionEntry && (state.CollateralMicros == 0 ||
+		(state.MaintenanceMarginMicros > 0 && state.CollateralMicros/2 < state.MaintenanceMarginMicros)) {
 		return errors.New("margin coverage is insufficient")
 	}
 	material, err := approvalMaterial(d)
@@ -250,6 +315,27 @@ func (d Dispatch) validate(now time.Time) error {
 		return errors.New("approval digest mismatch")
 	}
 	return nil
+}
+
+func controlAllows(mode, action string) bool {
+	return mode == "ACTIVE" || action == ActionUnwind && mode == "REDUCE_ONLY"
+}
+
+func validOpenEpisode(episode OpenEpisode) bool {
+	return hashPattern.MatchString(episode.PairIntentID) && hashPattern.MatchString(episode.SpotUnwindIntentID) &&
+		positiveDecimal(episode.SpotAmount) && positiveDecimal(episode.MinimumSettlementAmountOut) && episode.PerpBaseAmount > 0
+}
+
+func positiveDecimal(value string) bool {
+	if value == "" || value == "0" {
+		return false
+	}
+	for index, char := range value {
+		if char < '0' || char > '9' || index == 0 && char == '0' {
+			return false
+		}
+	}
+	return true
 }
 
 func stale(observed uint64, now time.Time) bool {
@@ -268,12 +354,37 @@ func approvalMaterial(d Dispatch) ([]byte, error) {
 	}{d.ExecutionAccountID, d.AgentID, d.Evaluation, d.Readiness, d.AccountState, d.ExpiresAt.UnixMilli()})
 }
 
-func requestID(evaluationID, executionAccountID string) string {
+func ApprovalSHA256(
+	executionAccountID, agentID string,
+	evaluation SourceEvaluation,
+	readiness Readiness,
+	accountState AccountState,
+	expiresAt time.Time,
+) (string, error) {
+	material, err := approvalMaterial(Dispatch{
+		ExecutionAccountID: executionAccountID,
+		AgentID:            agentID,
+		Evaluation:         evaluation,
+		Readiness:          readiness,
+		AccountState:       accountState,
+		ExpiresAt:          expiresAt,
+	})
+	if err != nil {
+		return "", err
+	}
+	return digest(material), nil
+}
+
+func requestID(evaluationID, executionAccountID, action, intentID string) string {
 	h := sha256.New()
-	h.Write([]byte("robin.live.scheduler.quote-request.v1\x00"))
+	h.Write([]byte("robin.live.scheduler.quote-request.v2\x00"))
 	h.Write([]byte(evaluationID))
 	h.Write([]byte{0})
 	h.Write([]byte(executionAccountID))
+	h.Write([]byte{0})
+	h.Write([]byte(action))
+	h.Write([]byte{0})
+	h.Write([]byte(intentID))
 	return "0x" + hex.EncodeToString(h.Sum(nil))
 }
 
@@ -287,23 +398,39 @@ func validateRunnerOutput(body []byte, dispatch Dispatch) error {
 	if err := decodeStrict(body, &output); err != nil {
 		return fmt.Errorf("decode runner output: %w", err)
 	}
-	if output.Kind != ActionEntry || len(output.PairIntent) == 0 || len(output.Unwind) != 0 || len(output.ExitPersistence) != 0 {
-		return errors.New("runner output kind mismatch")
+	if dispatch.Evaluation.Action == ActionEntry {
+		if output.Kind != ActionEntry || len(output.PairIntent) == 0 || len(output.Unwind) != 0 || len(output.ExitPersistence) != 0 {
+			return errors.New("runner output kind mismatch")
+		}
+		var intent pairIdentity
+		if err := json.Unmarshal(output.PairIntent, &intent); err != nil {
+			return errors.New("invalid runner intent")
+		}
+		if intent.ID == "" || intent.ExecutionAccountID != dispatch.ExecutionAccountID || intent.AgentID != dispatch.AgentID ||
+			intent.SourceEvaluationID != dispatch.EvaluationID || intent.StrategyManifestSHA256 != StrategyManifestSHA256 {
+			return errors.New("runner intent identity mismatch")
+		}
+		var persistence intentPersistence
+		if err := decodeStrict(output.Persistence, &persistence); err != nil || persistence.Status != "persisted" ||
+			persistence.IntentID != intent.ID || persistence.CoordinatorVersion == 0 {
+			return errors.New("runner persistence mismatch")
+		}
+		return nil
 	}
-	var intent pairIdentity
-	if err := json.Unmarshal(output.PairIntent, &intent); err != nil {
-		return errors.New("invalid runner intent")
+	if output.Kind != ActionUnwind || len(output.Unwind) == 0 || len(output.PairIntent) != 0 || len(output.Persistence) != 0 {
+		return errors.New("runner unwind output kind mismatch")
 	}
-	if intent.ID == "" || intent.ExecutionAccountID != dispatch.ExecutionAccountID || intent.AgentID != dispatch.AgentID ||
-		intent.SourceEvaluationID != dispatch.EvaluationID || intent.StrategyManifestSHA256 != StrategyManifestSHA256 {
-		return errors.New("runner intent identity mismatch")
+	var unwind unwindIdentity
+	if err := json.Unmarshal(output.Unwind, &unwind); err != nil || !hashPattern.MatchString(unwind.ID) ||
+		unwind.PairIntentID != dispatch.Evaluation.PairIntentID || unwind.ExecutionAccountID != dispatch.ExecutionAccountID ||
+		unwind.AgentID != dispatch.AgentID || unwind.SourceEvaluationID != dispatch.EvaluationID ||
+		unwind.StrategyManifestSHA256 != StrategyManifestSHA256 {
+		return errors.New("runner unwind identity mismatch")
 	}
-	var persistence intentPersistence
-	if err := decodeStrict(output.Persistence, &persistence); err != nil {
-		return errors.New("invalid runner persistence")
-	}
-	if persistence.Status != "persisted" || persistence.IntentID != intent.ID || persistence.CoordinatorVersion == 0 {
-		return errors.New("runner persistence mismatch")
+	var persistence exitPersistence
+	if err := decodeStrict(output.ExitPersistence, &persistence); err != nil || persistence.Status != "persisted" ||
+		persistence.RequestID != unwind.ID || persistence.IntentID != unwind.PairIntentID || persistence.CoordinatorVersion == 0 {
+		return errors.New("runner exit persistence mismatch")
 	}
 	return nil
 }
@@ -337,8 +464,7 @@ func validateQuote(body []byte, request QuoteRequest, publicKey ed25519.PublicKe
 		quote.MarketManifest != request.MarketManifest || quote.Action != request.Action ||
 		quote.StrategyVersion != StrategyVersion || quote.StrategyManifestSHA256 != StrategyManifestSHA256 ||
 		quote.SourceConfigSHA256 != SourceConfigSHA256 || quote.RouteSHA256 != routeSHA256 ||
-		quote.OraclePolicySHA256 != oraclePolicySHA256 || quote.RiskPolicySHA256 != riskPolicySHA256 ||
-		len(quote.ExitAuthority) != 0 {
+		quote.OraclePolicySHA256 != oraclePolicySHA256 || quote.RiskPolicySHA256 != riskPolicySHA256 {
 		return quote, errors.New("quote identity or policy mismatch")
 	}
 	nowMS := uint64(now.UnixMilli())
@@ -346,10 +472,30 @@ func validateQuote(body []byte, request QuoteRequest, publicKey ed25519.PublicKe
 		quote.ExpiresAtMS-quote.ObservedAtMS > uint64(maxEvidenceAge/time.Millisecond) || len(quote.Source) == 0 || len(quote.Spot) == 0 || len(quote.Perp) == 0 {
 		return quote, errors.New("quote is stale or incomplete")
 	}
+	var spot spotQuote
 	var perp perpQuote
-	if err := decodeStrict(quote.Perp, &perp); err != nil || perp.Venue != "lighter-mainnet" || perp.Symbol != "AAPL" ||
-		perp.MarketIndex != lighterMarket || perp.Side != "short" || perp.ReduceOnly || perp.ObservedAtMS != quote.ObservedAtMS {
+	if err := json.Unmarshal(quote.Spot, &spot); err != nil || json.Unmarshal(quote.Perp, &perp) != nil ||
+		perp.Venue != "lighter-mainnet" || perp.Symbol != "AAPL" || perp.MarketIndex != lighterMarket ||
+		perp.ObservedAtMS != quote.ObservedAtMS || spot.Venue != "robinhood-chain-mainnet" ||
+		!positiveDecimal(spot.StockAmount) || !positiveDecimal(spot.MinimumAmountOut) ||
+		!positiveDecimal(spot.ExpectedUIMultiplier) || !positiveDecimal(spot.MinOracleRoundID) {
 		return quote, errors.New("quote Lighter market identity mismatch")
+	}
+	if request.Action == ActionEntry {
+		if request.IntentID != "" || len(quote.ExitAuthority) != 0 || spot.Side != "buy" || perp.Side != "short" || perp.ReduceOnly || perp.Phase != "" {
+			return quote, errors.New("entry quote shape mismatch")
+		}
+		return quote, nil
+	}
+	var authority exitQuoteAuthority
+	if err := json.Unmarshal(quote.ExitAuthority, &authority); err != nil {
+		return quote, errors.New("unwind quote binding mismatch")
+	}
+	if !hashPattern.MatchString(request.IntentID) ||
+		authority.ExecutionAccountID != request.ExecutionAccountID || authority.IntentID != request.IntentID ||
+		spot.Side != "sell" || perp.Side != "long" || !perp.ReduceOnly ||
+		(perp.Phase != "perp_and_spot" && perp.Phase != "spot_only") {
+		return quote, errors.New("unwind quote binding mismatch")
 	}
 	return quote, nil
 }

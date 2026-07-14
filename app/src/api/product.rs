@@ -1,7 +1,7 @@
 use crate::api::error::ApiError;
 use crate::auth::require_user;
 use crate::evm::abi;
-use crate::lighter_provisioner::{ConfirmLink, PrepareLink};
+use crate::lighter_provisioner::{ConfirmLink, LighterProvisionerError, PrepareLink};
 use crate::product::{
     ActivityPage, AgentCommandInput, AgentCreateInput, AgentStatusInput, Amount, ConfirmVaultInput,
     ConfirmedVault, DashboardSnapshot, LighterConfirmInput, LighterLinkRequestInput, MetricInput,
@@ -294,7 +294,7 @@ pub async fn dashboard(
         .collect();
 
     Ok(HttpResponse::Ok().json(DashboardSnapshot {
-        environment: "robinhood-testnet".to_string(),
+        environment: "robinhood-mainnet".to_string(),
         as_of: chrono::Utc::now(),
         infrastructure_ready: ready,
         agent,
@@ -318,26 +318,18 @@ pub async fn launch_agent(
 ) -> Result<HttpResponse, ApiError> {
     let auth = require_user(&req, &state)?;
     ensure_database(&state)?;
-    let agent = if body.is_empty() {
-        state
-            .product_store
-            .launch_paper_agent(&auth.did, &state.config.agent_strategy_version)
-            .await
-            .map_err(|error| ApiError::BadRequest(error.to_string()))?
-    } else {
-        let input: AgentCreateInput = serde_json::from_slice(&body)
-            .map_err(|_| ApiError::BadRequest("Invalid agent request.".to_string()))?;
-        if input.strategy_version != LIVE_STRATEGY_VERSION {
-            return Err(ApiError::BadRequest(
-                "Only basis-aapl-v1 is available for live execution.".to_string(),
-            ));
-        }
-        state
-            .product_store
-            .create_live_agent(&auth.did, &input.strategy_version)
-            .await
-            .map_err(|error| ApiError::Conflict(error.to_string()))?
-    };
+    let input: AgentCreateInput = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::BadRequest("Invalid live agent request.".to_string()))?;
+    if input.strategy_version != LIVE_STRATEGY_VERSION {
+        return Err(ApiError::BadRequest(
+            "Only basis-aapl-v1 is available for live execution.".to_string(),
+        ));
+    }
+    let agent = state
+        .product_store
+        .create_live_agent(&auth.did, &input.strategy_version)
+        .await
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
     Ok(HttpResponse::Created().json(agent))
 }
 
@@ -390,11 +382,6 @@ pub async fn lighter_link_request(
             "Lighter provisioning is not enabled.".to_string(),
         ));
     }
-    if input.account_index <= 0 || input.nonce < 0 {
-        return Err(ApiError::BadRequest(
-            "Lighter account index or nonce is invalid.".to_string(),
-        ));
-    }
     let agent_id = path.into_inner();
     let binding = state
         .product_store
@@ -420,12 +407,10 @@ pub async fn lighter_link_request(
         .prepare(&PrepareLink {
             execution_account_id: account.id,
             owner_address: &binding.owner_address,
-            account_index: input.account_index,
             api_key_index,
-            nonce: input.nonce,
         })
         .await
-        .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
+        .map_err(lighter_provisioner_error)?;
     let binding = state
         .product_store
         .apply_lighter_link(&auth.did, agent_id, binding.request_id, &link)
@@ -471,7 +456,7 @@ pub async fn lighter_confirm(
             l1_signature: &input.l1_signature,
         })
         .await
-        .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
+        .map_err(lighter_provisioner_error)?;
     let binding = state
         .product_store
         .apply_lighter_link(&auth.did, agent_id, input.request_id, &link)
@@ -481,6 +466,16 @@ pub async fn lighter_confirm(
         Ok(HttpResponse::Ok().json(binding))
     } else {
         Ok(HttpResponse::Accepted().json(binding))
+    }
+}
+
+fn lighter_provisioner_error(error: anyhow::Error) -> ApiError {
+    match error.downcast_ref::<LighterProvisionerError>() {
+        Some(LighterProvisionerError::Rejected(message)) => ApiError::BadRequest(message.clone()),
+        Some(LighterProvisionerError::Conflict(message)) => ApiError::Conflict(message.clone()),
+        Some(LighterProvisionerError::Unavailable) | None => {
+            ApiError::ServiceUnavailable(error.to_string())
+        }
     }
 }
 
@@ -573,7 +568,7 @@ pub async fn robinhood_confirm(
         .robinhood_provisioner
         .confirm(&ConfirmGraph {
             execution_account_id: account.id,
-            deployment_transaction_hash: &input.transaction_hash,
+            transaction_hash: &input.transaction_hash,
         })
         .await
         .map_err(|error| ApiError::ServiceUnavailable(error.to_string()))?;
@@ -647,6 +642,8 @@ pub async fn create_agent_command(
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     if command.status == "rejected" {
         Ok(HttpResponse::Conflict().json(command))
+    } else if command.status == "completed" {
+        Ok(HttpResponse::Ok().json(command))
     } else {
         Ok(HttpResponse::Accepted().json(command))
     }

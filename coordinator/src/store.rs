@@ -186,11 +186,14 @@ pub struct NewAccountSnapshot {
 struct LighterAccountSnapshot {
     account_index: u64,
     api_key_index: u8,
+    market_index: u16,
     nonce_aligned: bool,
     no_unknown_orders: bool,
     no_unknown_positions: bool,
     collateral_ready: bool,
     maintenance_margin_ratio_micros: u64,
+    collateral_micros: u64,
+    maintenance_margin_micros: u64,
     #[serde(default)]
     flat: Option<bool>,
 }
@@ -211,8 +214,16 @@ struct RobinhoodAccountSnapshot {
     agent_enabled: Option<bool>,
     #[serde(default)]
     risk_mode: Option<String>,
-    #[serde(default)]
-    settlement_balance_raw: Option<String>,
+    settlement_balance_raw: String,
+    nonce_aligned: bool,
+    spot_config_version: u64,
+    stock_decimals: u8,
+    ui_multiplier_e18: String,
+    new_ui_multiplier_e18: String,
+    oracle_paused: bool,
+    oracle_healthy: bool,
+    sequencer_healthy: bool,
+    signer_gas_ready: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -237,6 +248,7 @@ struct ExecutionAccountAdmission {
     exit_authority_ready: bool,
     alerting_ready: bool,
     safe_rotation_ready: bool,
+    readiness_fresh: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,12 +265,17 @@ pub struct NewMarketQuote {
     pub lighter_market_index: Option<u32>,
     pub quote_block_hash: String,
     pub mark_price: u32,
+    pub expected_ui_multiplier: String,
+    pub min_oracle_round_id: String,
     pub publisher_at_ms: i64,
     pub received_at_ms: i64,
     pub expires_at_ms: i64,
     pub intent_id: Option<String>,
     pub spot_unwind_amount_in: Option<String>,
     pub spot_unwind_expected_amount_out: Option<String>,
+    pub unwind_phase: Option<String>,
+    pub perp_unwind_base_amount: Option<u64>,
+    pub perp_unwind_limit_price: Option<u32>,
     pub submission_deadline_ms: Option<i64>,
     pub reconciliation_deadline_ms: Option<i64>,
 }
@@ -275,6 +292,18 @@ pub struct MarketQuoteReceipt {
 pub struct MarketQuoteOutcome {
     pub created: bool,
     pub receipt: MarketQuoteReceipt,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OpenEpisode {
+    pub schema_version: u8,
+    pub execution_account_id: String,
+    pub intent_id: String,
+    pub phase: String,
+    pub spot_amount: String,
+    pub perp_base_amount: u64,
+    pub observed_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -516,6 +545,8 @@ struct ExitAuthority {
     perp_unwind_price: u32,
     spot_amount_in: String,
     minimum_unwind_settlement_out: String,
+    expected_ui_multiplier: String,
+    min_oracle_round_id: String,
     submission_deadline_ms: u64,
     reconciliation_deadline_ms: u64,
 }
@@ -526,6 +557,11 @@ struct ExitQuoteRow {
     mark_price: u32,
     spot_amount_in: u128,
     expected_amount_out: u128,
+    expected_ui_multiplier: String,
+    min_oracle_round_id: String,
+    unwind_phase: String,
+    perp_base_amount: u64,
+    perp_limit_price: u32,
     received_at_ms: u64,
     expires_at_ms: u64,
     submission_deadline_ms: u64,
@@ -666,6 +702,12 @@ pub enum StoreError {
     AccountRegistrationConflict,
     #[error("execution account registration does not exist")]
     AccountRegistrationMissing,
+    #[error("open execution episode does not exist")]
+    OpenEpisodeMissing,
+    #[error("open execution episode is ambiguous")]
+    OpenEpisodeAmbiguous,
+    #[error("open execution episode is not reconciled for quoting")]
+    OpenEpisodeUnavailable,
 }
 
 impl Store {
@@ -680,6 +722,259 @@ impl Store {
 
     pub fn from_pool(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    pub async fn open_episode(
+        &self,
+        execution_account_id: &str,
+        intent_id: &str,
+        now_ms: u64,
+    ) -> Result<OpenEpisode, StoreError> {
+        if !valid_control_id(execution_account_id) || !valid_hash(intent_id) {
+            return Err(StoreError::InvalidAction);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let rows = sqlx::query_as::<_, (String, Value, i64, String)>(
+            r#"
+            SELECT intent.id, intent.saga, intent.saga_version, account.status
+            FROM execution_intents intent
+            JOIN execution_accounts account USING (execution_account_id)
+            WHERE intent.execution_account_id = $1 AND intent.active
+            ORDER BY intent.id
+            FOR SHARE OF intent, account
+            "#,
+        )
+        .bind(execution_account_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if rows.is_empty() {
+            transaction.commit().await?;
+            return Err(StoreError::OpenEpisodeMissing);
+        }
+        if rows.len() != 1 {
+            transaction.commit().await?;
+            return Err(StoreError::OpenEpisodeAmbiguous);
+        }
+        if rows[0].0 != intent_id {
+            transaction.commit().await?;
+            return Err(StoreError::OpenEpisodeMissing);
+        }
+        let (stored_intent_id, saga, saga_version, account_status) = rows
+            .into_iter()
+            .next()
+            .ok_or(StoreError::OpenEpisodeMissing)?;
+        let saga: ExecutionSaga =
+            serde_json::from_value(saga).map_err(|_| StoreError::OpenEpisodeUnavailable)?;
+        if account_status != "active"
+            || saga.intent_id != stored_intent_id
+            || u64::try_from(saga_version).ok() != Some(saga.version)
+            || !matches!(
+                saga.state,
+                ExecutionState::Hedged | ExecutionState::Unwinding | ExecutionState::Unhedged
+            )
+            || saga.spot_received_raw == 0
+            || saga.perp_unwound_base > saga.perp_filled_base
+        {
+            transaction.commit().await?;
+            return Err(StoreError::OpenEpisodeUnavailable);
+        }
+        let actions = sqlx::query_as::<_, (String, String, Value, Option<Value>)>(
+            r#"
+            SELECT kind, status, payload, result
+            FROM execution_actions
+            WHERE intent_id = $1 AND status IN ('pending', 'leased')
+            ORDER BY created_at, id
+            FOR SHARE
+            "#,
+        )
+        .bind(intent_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if actions.len() > 1 {
+            transaction.commit().await?;
+            return Err(StoreError::OpenEpisodeAmbiguous);
+        }
+        let now = i64::try_from(now_ms).map_err(|_| StoreError::OpenEpisodeUnavailable)?;
+        let remaining = saga.perp_filled_base.saturating_sub(saga.perp_unwound_base);
+        let phase = if let Some((kind, _, payload, result)) = actions.into_iter().next() {
+            if result.as_ref().is_some_and(|result| {
+                result.get("send_authorized").is_some()
+                    || result.get("signed").is_some()
+                    || result.get("request").is_some()
+                    || result.get("submission").is_some()
+            }) || payload.get("exit_reason").and_then(Value::as_str) != Some("operator_exit")
+            {
+                transaction.commit().await?;
+                return Err(StoreError::OpenEpisodeUnavailable);
+            }
+            let command_id = payload
+                .get("control_command_id")
+                .and_then(Value::as_str)
+                .filter(|value| valid_control_id(value))
+                .ok_or(StoreError::OpenEpisodeUnavailable)?;
+            let command_matches = sqlx::query_scalar::<_, bool>(
+                r#"
+				SELECT EXISTS (
+					SELECT 1 FROM execution_account_commands
+					WHERE command_id = $1 AND execution_account_id = $2
+					  AND command IN ('pause', 'close') AND status = 'reducing'
+				)
+				"#,
+            )
+            .bind(command_id)
+            .bind(execution_account_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if !command_matches {
+                transaction.commit().await?;
+                return Err(StoreError::OpenEpisodeUnavailable);
+            }
+            match kind.as_str() {
+                "unwind_perp"
+                    if remaining > 0
+                        && payload.get("filled_base").and_then(Value::as_u64)
+                            == Some(remaining)
+                        && payload.get("unwound_before").and_then(Value::as_u64)
+                            == Some(saga.perp_unwound_base) =>
+                {
+                    "perp_and_spot"
+                }
+                "unwind_spot"
+                    if remaining == 0
+                        && payload
+                            .get("spot_amount")
+                            .and_then(Value::as_str)
+                            .and_then(parse_u128_string)
+                            == Some(saga.spot_received_raw) =>
+                {
+                    "spot_only"
+                }
+                _ => {
+                    transaction.commit().await?;
+                    return Err(StoreError::OpenEpisodeUnavailable);
+                }
+            }
+        } else {
+            let approvals = sqlx::query_scalar::<_, String>(
+				r#"
+				SELECT approval.evaluation_id
+				FROM live_strategy_exit_bindings exit_binding
+				JOIN live_execution_episode_bindings episode_binding
+				  ON episode_binding.execution_account_id = exit_binding.execution_account_id
+				 AND episode_binding.source_episode_id = exit_binding.source_episode_id
+				 AND episode_binding.intent_id = exit_binding.intent_id
+				JOIN live_scheduler_approvals approval
+				  ON approval.evaluation_id = exit_binding.exit_evaluation_id
+				 AND approval.execution_account_id = exit_binding.execution_account_id
+				JOIN live_scheduler_work work
+				  ON work.evaluation_id = approval.evaluation_id
+				 AND work.execution_account_id = approval.execution_account_id
+				WHERE exit_binding.execution_account_id = $1
+				  AND exit_binding.intent_id = $2
+				  AND approval.agent_id = episode_binding.agent_id
+				  AND approval.approval_version = 2
+				  AND approval.evaluation->>'action' = 'unwind'
+				  AND approval.evaluation->>'pair_intent_id' = $2
+				  AND approval.evaluation->>'source_episode_id' = exit_binding.source_episode_id::text
+				  AND approval.evaluation->>'paper_evaluation_id' = exit_binding.source_close_evaluation_id::text
+				  AND approval.readiness->>'lifecycle' = 'running'
+				  AND approval.account_state->>'active_episodes' = '1'
+				  AND approval.account_state->>'flat' = 'false'
+				  AND approval.approved_at <= TIMESTAMPTZ 'epoch' + $3 * interval '1 millisecond'
+				  AND approval.expires_at > TIMESTAMPTZ 'epoch' + $3 * interval '1 millisecond'
+				  AND work.state = 'running'
+				  AND work.lease_owner IS NOT NULL
+				  AND work.lease_until > TIMESTAMPTZ 'epoch' + $3 * interval '1 millisecond'
+				ORDER BY approval.evaluation_id
+				FOR SHARE OF exit_binding, episode_binding, approval, work
+				"#,
+			)
+			.bind(execution_account_id)
+			.bind(intent_id)
+			.bind(now)
+			.fetch_all(&mut *transaction)
+			.await?;
+            if approvals.len() != 1 || saga.state != ExecutionState::Hedged || remaining == 0 {
+                transaction.commit().await?;
+                return Err(if approvals.len() > 1 {
+                    StoreError::OpenEpisodeAmbiguous
+                } else {
+                    StoreError::OpenEpisodeUnavailable
+                });
+            }
+            "perp_and_spot"
+        };
+        let snapshots = sqlx::query_as::<_, (String, Value, i64, i64, i64)>(
+            r#"
+            SELECT DISTINCT ON (source) source, payload,
+                   (EXTRACT(EPOCH FROM observed_at) * 1000)::bigint,
+                   (EXTRACT(EPOCH FROM received_at) * 1000)::bigint,
+                   (EXTRACT(EPOCH FROM expires_at) * 1000)::bigint
+            FROM execution_account_snapshots
+            WHERE execution_account_id = $1
+              AND observed_at <= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+              AND received_at <= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+              AND expires_at >= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+            ORDER BY source, received_at DESC, id DESC
+            "#,
+        )
+        .bind(execution_account_id)
+        .bind(now)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if snapshots.len() != 2 {
+            transaction.commit().await?;
+            return Err(StoreError::OpenEpisodeUnavailable);
+        }
+        let mut lighter_reconciled = false;
+        let mut robinhood_reconciled = false;
+        let mut observed_at_ms = now_ms;
+        for (source, payload, observed_at, received_at, expires_at) in snapshots {
+            let fresh = observed_at <= now
+                && received_at <= now
+                && expires_at >= now
+                && now.saturating_sub(observed_at) <= 5_000;
+            if !fresh {
+                transaction.commit().await?;
+                return Err(StoreError::OpenEpisodeUnavailable);
+            }
+            observed_at_ms = observed_at_ms
+                .min(u64::try_from(observed_at).map_err(|_| StoreError::OpenEpisodeUnavailable)?);
+            match source.as_str() {
+                "lighter-auth" => {
+                    let snapshot: LighterAccountSnapshot = serde_json::from_value(payload)
+                        .map_err(|_| StoreError::OpenEpisodeUnavailable)?;
+                    let expected_flat = phase == "spot_only";
+                    lighter_reconciled = snapshot.flat == Some(expected_flat)
+                        && snapshot.nonce_aligned
+                        && snapshot.no_unknown_orders
+                        && snapshot.no_unknown_positions;
+                }
+                "robinhood-chain" => {
+                    let snapshot: RobinhoodAccountSnapshot = serde_json::from_value(payload)
+                        .map_err(|_| StoreError::OpenEpisodeUnavailable)?;
+                    robinhood_reconciled = snapshot.flat == Some(false)
+                        && snapshot.wiring_verified
+                        && snapshot.finality_healthy;
+                }
+                _ => return Err(StoreError::OpenEpisodeUnavailable),
+            }
+        }
+        if !lighter_reconciled || !robinhood_reconciled {
+            transaction.commit().await?;
+            return Err(StoreError::OpenEpisodeUnavailable);
+        }
+        let response = OpenEpisode {
+            schema_version: 1,
+            execution_account_id: execution_account_id.to_owned(),
+            intent_id: intent_id.to_owned(),
+            phase: phase.to_owned(),
+            spot_amount: saga.spot_received_raw.to_string(),
+            perp_base_amount: remaining,
+            observed_at_ms,
+        };
+        transaction.commit().await?;
+        Ok(response)
     }
 
     pub async fn ready(&self) -> bool {
@@ -708,6 +1003,7 @@ impl Store {
             "public.execution_accounts",
             "public.execution_account_control",
             "public.execution_account_readiness",
+            "public.execution_rollout_readiness",
             "public.execution_account_snapshots",
             "public.execution_account_daily_turnover",
             "public.execution_strategy_control",
@@ -715,6 +1011,10 @@ impl Store {
             "public.execution_account_command_events",
             "public.execution_account_registrations",
             "public.execution_account_registration_addresses",
+            "public.live_scheduler_approvals",
+            "public.live_scheduler_work",
+            "public.live_execution_episode_bindings",
+            "public.live_strategy_exit_bindings",
         ] {
             let exists = sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass($1)::text")
                 .bind(table)
@@ -735,7 +1035,7 @@ impl Store {
             return false;
         }
         sqlx::query(
-            "SELECT execution_account_id, route_sha256, lighter_market_index, submission_deadline_ms FROM execution_market_quotes LIMIT 0",
+			"SELECT execution_account_id, route_sha256, lighter_market_index, expected_ui_multiplier, min_oracle_round_id, submission_deadline_ms FROM execution_market_quotes LIMIT 0",
         )
         .execute(&self.pool)
         .await
@@ -748,6 +1048,97 @@ impl Store {
         }
         let mut transaction = self.pool.begin().await?;
         halt_execution(&mut transaction, reason).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn block_action_account(
+        &self,
+        action_id: &str,
+        worker: &str,
+        lease_token: &str,
+        reason: &str,
+        details: Value,
+    ) -> Result<(), StoreError> {
+        self.record_action_escalation(action_id, worker, lease_token, reason, details, false)
+            .await
+    }
+
+    pub async fn escalate_reconciliation(
+        &self,
+        action_id: &str,
+        worker: &str,
+        lease_token: &str,
+        reason: &str,
+        details: Value,
+    ) -> Result<(), StoreError> {
+        self.record_action_escalation(action_id, worker, lease_token, reason, details, true)
+            .await
+    }
+
+    async fn record_action_escalation(
+        &self,
+        action_id: &str,
+        worker: &str,
+        lease_token: &str,
+        reason: &str,
+        mut details: Value,
+        global: bool,
+    ) -> Result<(), StoreError> {
+        if reason.is_empty() || reason.len() > 128 {
+            return Err(StoreError::InvalidAction);
+        }
+        details
+            .as_object_mut()
+            .ok_or(StoreError::InvalidAction)?
+            .insert("action_id".into(), Value::String(action_id.into()));
+        let mut transaction = self.pool.begin().await?;
+        let intent_id = lock_action(&mut transaction, action_id, worker, lease_token).await?;
+        let execution_account_id = sqlx::query_scalar::<_, String>(
+            "SELECT execution_account_id FROM execution_intents WHERE id = $1 FOR SHARE",
+        )
+        .bind(&intent_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO execution_incidents
+                (intent_id, execution_account_id, severity, kind, details)
+            SELECT $1, $2, $3, $4, $5
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM execution_incidents
+                WHERE intent_id = $1 AND execution_account_id = $2 AND kind = $4
+                  AND details ->> 'action_id' = $6 AND resolved_at IS NULL
+            )
+            "#,
+        )
+        .bind(&intent_id)
+        .bind(&execution_account_id)
+        .bind(if global { "critical" } else { "warning" })
+        .bind(reason)
+        .bind(Json(&details))
+        .bind(action_id)
+        .execute(&mut *transaction)
+        .await?;
+        halt_account(&mut transaction, &execution_account_id, reason).await?;
+        if global {
+            halt_execution(&mut transaction, reason).await?;
+        }
+        if inserted.rows_affected() == 1 {
+            append_action_event(
+                &mut transaction,
+                action_id,
+                &intent_id,
+                if global {
+                    "reconciliation_escalated"
+                } else {
+                    "account_blocked"
+                },
+                details,
+            )
+            .await?;
+        }
         transaction.commit().await?;
         Ok(())
     }
@@ -940,7 +1331,7 @@ impl Store {
         sqlx::query(
             r#"
             INSERT INTO execution_account_control (execution_account_id, mode, reason)
-            VALUES ($1, 'HALTED', 'registration requires verified readiness and activation')
+            VALUES ($1, 'REDUCE_ONLY', 'awaiting fresh derived readiness')
             "#,
         )
         .bind(&request.execution_account_id)
@@ -954,7 +1345,17 @@ impl Store {
             r#"
             INSERT INTO execution_strategy_control
                 (strategy_version, strategy_manifest_sha256, mode, reason)
-            VALUES ($1, $2, 'HALTED', 'strategy activation requires explicit approval')
+            SELECT $1, $2,
+                   CASE WHEN (
+                       SELECT to_state FROM execution_promotion_events
+                       WHERE strategy_version = $1 ORDER BY id DESC LIMIT 1
+                   ) = 'canary_eligible' THEN 'ACTIVE' ELSE 'HALTED' END,
+                   CASE WHEN (
+                       SELECT to_state FROM execution_promotion_events
+                       WHERE strategy_version = $1 ORDER BY id DESC LIMIT 1
+                   ) = 'canary_eligible'
+                       THEN 'promoted canary strategy'
+                       ELSE 'strategy activation requires explicit approval' END
             ON CONFLICT (strategy_version) DO NOTHING
             "#,
         )
@@ -965,7 +1366,23 @@ impl Store {
         sqlx::query(
             r#"
             INSERT INTO execution_control (singleton, mode, reason)
-            VALUES (TRUE, 'HALTED', 'initial deployment')
+            SELECT TRUE,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM execution_promotion_events event
+                       WHERE event.to_state = 'canary_eligible'
+                         AND event.id = (
+                             SELECT max(latest.id) FROM execution_promotion_events latest
+                             WHERE latest.strategy_version = event.strategy_version
+                         )
+                   ) THEN 'ACTIVE' ELSE 'HALTED' END,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM execution_promotion_events event
+                       WHERE event.to_state = 'canary_eligible'
+                         AND event.id = (
+                             SELECT max(latest.id) FROM execution_promotion_events latest
+                             WHERE latest.strategy_version = event.strategy_version
+                         )
+                   ) THEN 'promoted canary execution' ELSE 'initial deployment' END
             ON CONFLICT (singleton) DO NOTHING
             "#,
         )
@@ -1216,6 +1633,12 @@ impl Store {
         .execute(&mut *transaction)
         .await?;
         if inserted.rows_affected() == 1 {
+            refresh_account_readiness(
+                &mut transaction,
+                &snapshot.execution_account_id,
+                snapshot.received_at_ms,
+            )
+            .await?;
             transaction.commit().await?;
             return Ok(true);
         }
@@ -1276,6 +1699,13 @@ impl Store {
         &self,
         quote: &NewMarketQuote,
     ) -> Result<MarketQuoteOutcome, StoreError> {
+        if !valid_decimal_bound(
+            &quote.expected_ui_multiplier,
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        ) || !valid_decimal_bound(&quote.min_oracle_round_id, "1208925819614629174706175")
+        {
+            return Err(StoreError::InvalidAction);
+        }
         let exit_quote = if let Some(intent_id) = quote.intent_id.as_deref() {
             let (
                 Some(execution_account_id),
@@ -1284,6 +1714,9 @@ impl Store {
                 Some(lighter_market_index),
                 Some(amount_in),
                 Some(amount_out),
+                Some(unwind_phase),
+                Some(perp_base_amount),
+                Some(perp_limit_price),
                 Some(submission_deadline_ms),
                 Some(reconciliation_deadline_ms),
             ) = (
@@ -1293,6 +1726,9 @@ impl Store {
                 quote.lighter_market_index,
                 quote.spot_unwind_amount_in.as_deref(),
                 quote.spot_unwind_expected_amount_out.as_deref(),
+                quote.unwind_phase.as_deref(),
+                quote.perp_unwind_base_amount,
+                quote.perp_unwind_limit_price,
                 quote.submission_deadline_ms,
                 quote.reconciliation_deadline_ms,
             )
@@ -1307,6 +1743,10 @@ impl Store {
                 || lighter_market_index > 32767
                 || parse_u128_string(amount_in).is_none()
                 || parse_u128_string(amount_out).is_none()
+                || !matches!(unwind_phase, "perp_and_spot" | "spot_only")
+                || (unwind_phase == "perp_and_spot" && perp_base_amount == 0)
+                || (unwind_phase == "spot_only" && perp_base_amount != 0)
+                || perp_limit_price == 0
                 || submission_deadline_ms != quote.expires_at_ms
                 || reconciliation_deadline_ms <= submission_deadline_ms
                 || reconciliation_deadline_ms.saturating_sub(submission_deadline_ms)
@@ -1323,6 +1763,9 @@ impl Store {
                 || quote.lighter_market_index.is_some()
                 || quote.spot_unwind_amount_in.is_some()
                 || quote.spot_unwind_expected_amount_out.is_some()
+                || quote.unwind_phase.is_some()
+                || quote.perp_unwind_base_amount.is_some()
+                || quote.perp_unwind_limit_price.is_some()
                 || quote.submission_deadline_ms.is_some()
                 || quote.reconciliation_deadline_ms.is_some()
             {
@@ -1347,6 +1790,11 @@ impl Store {
         }
         let payload = serde_json::to_vec(quote).map_err(|_| StoreError::InvalidAction)?;
         let payload_sha256 = hex::encode(Sha256::digest(payload));
+        let perp_unwind_base_amount = quote
+            .perp_unwind_base_amount
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| StoreError::InvalidAction)?;
         let mut transaction = self.pool.begin().await?;
         if exit_quote {
             let binding = sqlx::query_as::<_, (String, Option<String>, Json<PairIntent>, i32)>(
@@ -1380,14 +1828,16 @@ impl Store {
             INSERT INTO execution_market_quotes
                 (source, source_session, source_event_id, source_sequence, execution_account_id,
                  market_manifest, strategy_manifest_sha256, route_sha256, quote_block_hash,
-                 lighter_market_index, mark_price, payload_sha256, publisher_at, received_at, expires_at, intent_id,
+                 lighter_market_index, mark_price, expected_ui_multiplier, min_oracle_round_id,
+                 payload_sha256, publisher_at, received_at, expires_at, intent_id,
                  spot_unwind_amount_in, spot_unwind_expected_amount_out, submission_deadline_ms,
-                 reconciliation_deadline_ms, exit_binding_version)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                    TIMESTAMPTZ 'epoch' + $13 * interval '1 millisecond',
-                    TIMESTAMPTZ 'epoch' + $14 * interval '1 millisecond',
-                    TIMESTAMPTZ 'epoch' + $15 * interval '1 millisecond', $16, $17, $18,
-                    $19, $20, $21)
+                 reconciliation_deadline_ms, exit_binding_version, unwind_phase,
+                 perp_unwind_base_amount, perp_unwind_limit_price)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                    TIMESTAMPTZ 'epoch' + $15 * interval '1 millisecond',
+                    TIMESTAMPTZ 'epoch' + $16 * interval '1 millisecond',
+                    TIMESTAMPTZ 'epoch' + $17 * interval '1 millisecond', $18, $19, $20,
+                    $21, $22, $23, $24, $25, $26)
             ON CONFLICT DO NOTHING
             "#,
         )
@@ -1402,6 +1852,8 @@ impl Store {
         .bind(&quote.quote_block_hash)
         .bind(quote.lighter_market_index.map(i64::from))
         .bind(i64::from(quote.mark_price))
+        .bind(&quote.expected_ui_multiplier)
+        .bind(&quote.min_oracle_round_id)
         .bind(&payload_sha256)
         .bind(quote.publisher_at_ms)
         .bind(quote.received_at_ms)
@@ -1411,7 +1863,10 @@ impl Store {
         .bind(&quote.spot_unwind_expected_amount_out)
         .bind(quote.submission_deadline_ms)
         .bind(quote.reconciliation_deadline_ms)
-        .bind(if exit_quote { 1_i16 } else { 0_i16 })
+        .bind(if exit_quote { 3_i16 } else { 0_i16 })
+        .bind(&quote.unwind_phase)
+        .bind(perp_unwind_base_amount)
+        .bind(quote.perp_unwind_limit_price.map(i64::from))
         .execute(&mut *transaction)
         .await?;
         if inserted.rows_affected() == 1 {
@@ -2029,12 +2484,22 @@ impl Store {
         .bind(&request.intent_id)
         .fetch_optional(&mut *transaction)
         .await?;
+        let remaining = current
+            .perp_filled_base
+            .saturating_sub(current.perp_unwound_base);
+        let unwind_phase = if remaining > 0 {
+            "perp_and_spot"
+        } else {
+            "spot_only"
+        };
         let quote = load_exit_quote(
             &mut transaction,
             &request.intent_id,
             &intent,
             now_ms,
             current.spot_received_raw,
+            unwind_phase,
+            remaining,
             Some((
                 &request.quote_source_session,
                 &request.quote_source_event_id,
@@ -2058,9 +2523,6 @@ impl Store {
         let authority = serde_json::to_value(authority).map_err(|_| StoreError::InvalidAction)?;
 
         if let Some((action_id, action_kind, action_payload)) = live_exit_action {
-            let remaining = current
-                .perp_filled_base
-                .saturating_sub(current.perp_unwound_base);
             let expected_kind = if remaining > 0 {
                 ActionKind::UnwindPerp.as_str()
             } else {
@@ -2379,15 +2841,29 @@ impl Store {
         if row.1 != "unwind_perp" && row.1 != "unwind_spot" {
             return Err(StoreError::InvalidAction);
         }
-        let existing_payload = sqlx::query_scalar::<_, Value>(
-            "SELECT payload FROM execution_actions WHERE id = $1 FOR UPDATE",
+        let (existing_payload, result) = sqlx::query_as::<_, (Value, Option<Value>)>(
+            "SELECT payload, result FROM execution_actions WHERE id = $1 FOR UPDATE",
         )
         .bind(action_id)
         .fetch_one(&mut *transaction)
         .await?;
-        if existing_payload.get("exit_authority").is_some() {
+        let existing_authority = existing_payload
+            .get("exit_authority")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<ExitAuthority>(value).ok());
+        if existing_authority.as_ref().is_some_and(|authority| {
+            authority.quote_expires_at_ms >= now_ms && authority.submission_deadline_ms >= now_ms
+        }) {
             transaction.commit().await?;
             return Ok(true);
+        }
+        if result.as_ref().is_some_and(|result| {
+            result.get("send_authorized").is_some()
+                || result.get("signed").is_some()
+                || result.get("request").is_some()
+                || result.get("submission").is_some()
+        }) {
+            return Err(StoreError::MarketAuthorityUnavailable);
         }
         let intent: PairIntent =
             serde_json::from_value(row.2).map_err(|_| StoreError::InvalidAction)?;
@@ -2399,6 +2875,16 @@ impl Store {
             &intent,
             now_ms,
             saga.spot_received_raw,
+            if row.1 == "unwind_perp" {
+                "perp_and_spot"
+            } else {
+                "spot_only"
+            },
+            if row.1 == "unwind_perp" {
+                saga.perp_filled_base.saturating_sub(saga.perp_unwound_base)
+            } else {
+                0
+            },
             None,
         )
         .await?
@@ -2430,7 +2916,11 @@ impl Store {
             &mut transaction,
             action_id,
             &row.0,
-            "exit_authority_bound",
+            if existing_authority.is_some() {
+                "exit_authority_refreshed"
+            } else {
+                "exit_authority_bound"
+            },
             authority,
         )
         .await?;
@@ -3970,12 +4460,15 @@ async fn insert_exit_request(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn load_exit_quote(
     transaction: &mut Transaction<'_, Postgres>,
     intent_id: &str,
     intent: &PairIntent,
     now_ms: u64,
     spot_amount_in: u128,
+    unwind_phase: &str,
+    perp_base_amount: u64,
     reference: Option<(&str, &str, &str)>,
 ) -> Result<Option<ExitQuoteRow>, StoreError> {
     type ExitQuoteDbRow = (
@@ -3984,6 +4477,11 @@ async fn load_exit_quote(
         i64,
         String,
         String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
         i64,
         i64,
         i64,
@@ -4000,6 +4498,9 @@ async fn load_exit_quote(
         r#"
         SELECT quote.source_session, quote.source_event_id, quote.mark_price,
                quote.spot_unwind_amount_in, quote.spot_unwind_expected_amount_out,
+			   quote.expected_ui_multiplier, quote.min_oracle_round_id,
+               quote.unwind_phase, quote.perp_unwind_base_amount,
+               quote.perp_unwind_limit_price,
                (EXTRACT(EPOCH FROM quote.received_at) * 1000)::bigint,
                (EXTRACT(EPOCH FROM quote.expires_at) * 1000)::bigint,
                quote.submission_deadline_ms, quote.reconciliation_deadline_ms,
@@ -4014,10 +4515,12 @@ async fn load_exit_quote(
           AND quote.route_sha256 = $9
           AND quote.lighter_market_index = $11
           AND config.lighter_market_index = $11
-          AND quote.exit_binding_version = 1
+		  AND quote.exit_binding_version = 3
           AND quote.spot_unwind_amount_in IS NOT NULL
           AND quote.spot_unwind_expected_amount_out IS NOT NULL
           AND quote.spot_unwind_amount_in = $6
+          AND quote.unwind_phase = $12
+          AND quote.perp_unwind_base_amount = $13
           AND quote.expires_at > TIMESTAMPTZ 'epoch' + $3 * interval '1 millisecond'
           AND quote.received_at <= TIMESTAMPTZ 'epoch' + $3 * interval '1 millisecond'
           AND config.valid_from <= TIMESTAMPTZ 'epoch' + $3 * interval '1 millisecond'
@@ -4041,6 +4544,8 @@ async fn load_exit_quote(
     .bind(BASIS_AAPL_V1_ROUTE_SHA256)
     .bind(payload_sha256)
     .bind(i32::try_from(intent.lighter_market_index).map_err(|_| StoreError::InvalidAction)?)
+    .bind(unwind_phase)
+    .bind(i64::try_from(perp_base_amount).map_err(|_| StoreError::InvalidAction)?)
     .fetch_optional(&mut **transaction)
     .await?;
     row.map(|row| {
@@ -4051,15 +4556,23 @@ async fn load_exit_quote(
             spot_amount_in: parse_u128_string(&row.3).ok_or(StoreError::MarketEvidenceMismatch)?,
             expected_amount_out: parse_u128_string(&row.4)
                 .ok_or(StoreError::MarketEvidenceMismatch)?,
-            received_at_ms: u64::try_from(row.5).map_err(|_| StoreError::MarketEvidenceMismatch)?,
-            expires_at_ms: u64::try_from(row.6).map_err(|_| StoreError::MarketEvidenceMismatch)?,
-            submission_deadline_ms: u64::try_from(row.7)
+            expected_ui_multiplier: row.5,
+            min_oracle_round_id: row.6,
+            unwind_phase: row.7,
+            perp_base_amount: u64::try_from(row.8)
                 .map_err(|_| StoreError::MarketEvidenceMismatch)?,
-            reconciliation_deadline_ms: u64::try_from(row.8)
+            perp_limit_price: u32::try_from(row.9)
                 .map_err(|_| StoreError::MarketEvidenceMismatch)?,
-            max_unwind_price_deviation_bps: u32::try_from(row.9)
+            received_at_ms: u64::try_from(row.10)
                 .map_err(|_| StoreError::MarketEvidenceMismatch)?,
-            max_spot_slippage_bps: u32::try_from(row.10)
+            expires_at_ms: u64::try_from(row.11).map_err(|_| StoreError::MarketEvidenceMismatch)?,
+            submission_deadline_ms: u64::try_from(row.12)
+                .map_err(|_| StoreError::MarketEvidenceMismatch)?,
+            reconciliation_deadline_ms: u64::try_from(row.13)
+                .map_err(|_| StoreError::MarketEvidenceMismatch)?,
+            max_unwind_price_deviation_bps: u32::try_from(row.14)
+                .map_err(|_| StoreError::MarketEvidenceMismatch)?,
+            max_spot_slippage_bps: u32::try_from(row.15)
                 .map_err(|_| StoreError::MarketEvidenceMismatch)?,
         })
     })
@@ -4087,6 +4600,11 @@ fn build_exit_authority(
             > submission_deadline_ms.checked_add(MAX_EXIT_RECONCILIATION_WINDOW_MS)?
         || quote.spot_amount_in != saga.spot_received_raw
         || (quote.spot_amount_in == 0) != (quote.expected_amount_out == 0)
+        || !valid_decimal_bound(
+            &quote.expected_ui_multiplier,
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        )
+        || !valid_decimal_bound(&quote.min_oracle_round_id, "1208925819614629174706175")
     {
         return None;
     }
@@ -4094,7 +4612,19 @@ fn build_exit_authority(
         10_000u32.checked_add(quote.max_unwind_price_deviation_bps)?,
     ))?;
     let max_price = u32::try_from(max_price_numerator.div_ceil(10_000)).ok()?;
-    let perp_unwind_price = requested_perp_price.unwrap_or(max_price);
+    let remaining = saga.perp_filled_base.checked_sub(saga.perp_unwound_base)?;
+    let expected_phase = if remaining > 0 {
+        "perp_and_spot"
+    } else {
+        "spot_only"
+    };
+    if quote.unwind_phase != expected_phase
+        || quote.perp_base_amount != remaining
+        || requested_perp_price.is_some_and(|price| price != quote.perp_limit_price)
+    {
+        return None;
+    }
+    let perp_unwind_price = quote.perp_limit_price;
     if perp_unwind_price < quote.mark_price || perp_unwind_price > max_price {
         return None;
     }
@@ -4118,6 +4648,8 @@ fn build_exit_authority(
         perp_unwind_price,
         spot_amount_in: quote.spot_amount_in.to_string(),
         minimum_unwind_settlement_out: minimum_unwind_settlement_out.to_string(),
+        expected_ui_multiplier: quote.expected_ui_multiplier,
+        min_oracle_round_id: quote.min_oracle_round_id,
         submission_deadline_ms,
         reconciliation_deadline_ms,
     })
@@ -4601,17 +5133,20 @@ async fn advance_account_command(
     match command.as_str() {
         "launch" | "resume" => {
             let evidence = activation_evidence(transaction, &execution_account_id, now_ms).await?;
-            sqlx::query(
+            let activated = sqlx::query(
                 r#"
                 UPDATE execution_account_control
                 SET mode = 'ACTIVE', reason = $2, version = version + 1, updated_at = now()
-                WHERE execution_account_id = $1 AND mode <> 'HALTED'
+				WHERE execution_account_id = $1 AND mode = 'REDUCE_ONLY'
                 "#,
             )
             .bind(&execution_account_id)
             .bind(format!("{command} command {command_id}"))
             .execute(&mut **transaction)
             .await?;
+            if activated.rows_affected() != 1 {
+                return Err(StoreError::AccountCommandBlocked);
+            }
             set_account_command_status(
                 transaction,
                 command_id,
@@ -4726,11 +5261,7 @@ async fn advance_account_command(
             {
                 return Err(StoreError::AccountCommandBlocked);
             }
-            let balance = evidence
-                .robinhood
-                .settlement_balance_raw
-                .as_deref()
-                .and_then(parse_u128_string)
+            let balance = parse_u128_string(&evidence.robinhood.settlement_balance_raw)
                 .ok_or(StoreError::AccountReadinessUnavailable)?;
             if balance == 0 {
                 set_account_command_status(
@@ -4801,6 +5332,7 @@ async fn activation_evidence(
         bool,
         bool,
         bool,
+        bool,
     );
     let row = sqlx::query_as::<_, ActivationRow>(
         r#"
@@ -4809,18 +5341,21 @@ async fn activation_evidence(
                account.owner_address, account_control.mode,
                readiness.venue_approved, readiness.oracle_healthy,
                readiness.sequencer_healthy, readiness.reconciliation_ready,
-               readiness.exit_authority_ready, readiness.alerting_ready,
-               readiness.safe_rotation_ready
+		       readiness.exit_authority_ready, rollout.alerting_ready,
+		       rollout.safe_rotation_ready,
+		       readiness.updated_at >= TIMESTAMPTZ 'epoch' + ($2::bigint - 5000) * interval '1 millisecond'
         FROM execution_accounts account
         JOIN execution_account_control account_control USING (execution_account_id)
         JOIN execution_account_readiness readiness USING (execution_account_id)
         JOIN execution_strategy_control strategy USING (strategy_version)
         CROSS JOIN execution_control global
-        WHERE account.execution_account_id = $1 AND global.singleton
-        FOR SHARE OF account, account_control, readiness, strategy, global
+		CROSS JOIN execution_rollout_readiness rollout
+        WHERE account.execution_account_id = $1 AND global.singleton AND rollout.singleton
+        FOR SHARE OF account, account_control, readiness, strategy, global, rollout
         "#,
     )
     .bind(execution_account_id)
+	.bind(i64::try_from(now_ms).map_err(|_| StoreError::AccountReadinessUnavailable)?)
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(StoreError::ExecutionAccountUnavailable)?;
@@ -4831,6 +5366,7 @@ async fn activation_evidence(
         || row.7 == "HALTED"
         || row.6.is_none()
         || !manifest_matches
+        || !row.15
         || ![row.8, row.9, row.10, row.11, row.12, row.13, row.14]
             .into_iter()
             .all(|ready| ready)
@@ -4915,9 +5451,11 @@ async fn restrict_account(
     sqlx::query(
         r#"
         UPDATE execution_account_control
-        SET mode = CASE WHEN mode = 'HALTED' THEN mode ELSE 'REDUCE_ONLY' END,
+        SET mode = 'REDUCE_ONLY',
             reason = $2, version = version + 1, updated_at = now()
         WHERE execution_account_id = $1
+          AND mode <> 'HALTED'
+          AND (mode <> 'REDUCE_ONLY' OR reason <> $2)
         "#,
     )
     .bind(execution_account_id)
@@ -5183,13 +5721,14 @@ async fn load_account_registration(
                control.mode AS control_mode, readiness.venue_approved,
                readiness.oracle_healthy, readiness.sequencer_healthy,
                readiness.reconciliation_ready, readiness.exit_authority_ready,
-               readiness.alerting_ready, readiness.safe_rotation_ready
+               rollout.alerting_ready, rollout.safe_rotation_ready
         FROM execution_account_registrations registration
         JOIN execution_accounts account USING (execution_account_id)
         JOIN execution_account_control control USING (execution_account_id)
         JOIN execution_account_readiness readiness USING (execution_account_id)
-        WHERE registration.execution_account_id = $1
-        FOR SHARE OF registration, account, control, readiness
+        CROSS JOIN execution_rollout_readiness rollout
+        WHERE registration.execution_account_id = $1 AND rollout.singleton
+        FOR SHARE OF registration, account, control, readiness, rollout
         "#,
     )
     .bind(execution_account_id)
@@ -5273,7 +5812,7 @@ async fn halt_execution(
         r#"
         UPDATE execution_control
         SET mode = 'HALTED', reason = $1, version = version + 1, updated_at = now()
-        WHERE singleton
+        WHERE singleton AND (mode <> 'HALTED' OR reason <> $1)
         "#,
     )
     .bind(reason)
@@ -5292,6 +5831,7 @@ async fn halt_account(
         UPDATE execution_account_control
         SET mode = 'HALTED', reason = $2, version = version + 1, updated_at = now()
         WHERE execution_account_id = $1
+          AND (mode <> 'HALTED' OR reason <> $2)
         "#,
     )
     .bind(execution_account_id)
@@ -5340,16 +5880,168 @@ fn valid_account_snapshot(snapshot: &NewAccountSnapshot) -> bool {
         .is_ok_and(|value| {
             value.account_index > 0
                 && (4..=254).contains(&value.api_key_index)
+                && value.market_index > 0
                 && value.maintenance_margin_ratio_micros > 0
+                && value.collateral_micros > 0
+                && (value.maintenance_margin_micros == 0
+                    || u128::from(value.collateral_micros) * 1_000_000
+                        / u128::from(value.maintenance_margin_micros)
+                        == u128::from(value.maintenance_margin_ratio_micros))
         }),
         "robinhood-chain" => serde_json::from_value::<RobinhoodAccountSnapshot>(
             snapshot.payload.clone(),
         )
         .is_ok_and(|value| {
-            valid_evm_address(&value.vault_address) && valid_evm_address(&value.signer_address)
+            valid_evm_address(&value.vault_address)
+                && valid_evm_address(&value.signer_address)
+                && value.spot_config_version > 0
+                && value.stock_decimals <= 18
+                && parse_u128_string(&value.settlement_balance_raw).is_some()
+                && parse_u128_string(&value.ui_multiplier_e18).is_some_and(|value| value > 0)
+                && parse_u128_string(&value.new_ui_multiplier_e18).is_some_and(|value| value > 0)
         }),
         _ => false,
     }
+}
+
+async fn refresh_account_readiness(
+    transaction: &mut Transaction<'_, Postgres>,
+    execution_account_id: &str,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let snapshots = sqlx::query_as::<_, (String, Value)>(
+        r#"
+        SELECT DISTINCT ON (source) source, payload
+        FROM execution_account_snapshots
+        WHERE execution_account_id = $1
+          AND observed_at <= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+          AND received_at <= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+          AND received_at >= TIMESTAMPTZ 'epoch' + ($2 - 5000) * interval '1 millisecond'
+          AND expires_at > TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+        ORDER BY source, received_at DESC, id DESC
+        "#,
+    )
+    .bind(execution_account_id)
+    .bind(now_ms)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut lighter = None;
+    let mut robinhood = None;
+    for (source, payload) in snapshots {
+        match source.as_str() {
+            "lighter-auth" => {
+                lighter = serde_json::from_value::<LighterAccountSnapshot>(payload).ok()
+            }
+            "robinhood-chain" => {
+                robinhood = serde_json::from_value::<RobinhoodAccountSnapshot>(payload).ok()
+            }
+            _ => {}
+        }
+    }
+
+    let registration = sqlx::query_as::<_, (i64, i16, String, String, String, bool)>(
+        r#"
+        SELECT registration.lighter_account_index, registration.lighter_api_key_index,
+               registration.robinhood_owner, registration.robinhood_vault,
+               registration.robinhood_signer,
+               account.status = 'active'
+                 AND account.agent_id = registration.agent_id
+                 AND account.strategy_version = registration.strategy_version
+                 AND account.risk_version = registration.risk_version
+                 AND account.strategy_manifest_sha256 = registration.strategy_manifest_sha256
+                 AND account.lighter_account_index = registration.lighter_account_index
+                 AND account.lighter_api_key_index = registration.lighter_api_key_index
+                 AND account.owner_address = registration.robinhood_owner
+                 AND account.robinhood_vault = registration.robinhood_vault
+                 AND account.robinhood_signer = registration.robinhood_signer
+                 AND account.binding_sha256 = registration.binding_sha256
+                 AND registration.strategy_version = 'basis-aapl-v1'
+                 AND registration.risk_version = 'basis-aapl-v1'
+                 AND registration.strategy_manifest_sha256 = $2 AS canonical
+        FROM execution_account_registrations registration
+        JOIN execution_accounts account USING (execution_account_id)
+        WHERE registration.execution_account_id = $1
+        "#,
+    )
+    .bind(execution_account_id)
+    .bind(BASIS_AAPL_V1_MANIFEST_SHA256)
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    let markets = sqlx::query_as::<_, (String, i32, i16, i64, String)>(
+        r#"
+        SELECT spot_token, lighter_market_index, spot_decimals,
+               spot_config_version, ui_multiplier_e18
+        FROM execution_market_configs
+        WHERE symbol = 'AAPL'
+          AND valid_from <= TIMESTAMPTZ 'epoch' + $1 * interval '1 millisecond'
+          AND valid_until > TIMESTAMPTZ 'epoch' + $1 * interval '1 millisecond'
+        ORDER BY manifest_id
+        "#,
+    )
+    .bind(now_ms)
+    .fetch_all(&mut **transaction)
+    .await?;
+
+    let mut venue_bound = false;
+    let mut oracle_healthy = false;
+    let mut sequencer_healthy = false;
+    let mut reconciliation_ready = false;
+    let mut exit_authority_ready = false;
+    if let (Some(lighter), Some(robinhood), Some(registration)) = (lighter, robinhood, registration)
+    {
+        venue_bound = registration.5
+            && u64::try_from(registration.0).ok() == Some(lighter.account_index)
+            && u8::try_from(registration.1).ok() == Some(lighter.api_key_index)
+            && robinhood.owner_address.as_deref() == Some(registration.2.as_str())
+            && robinhood.vault_address == registration.3
+            && robinhood.signer_address == registration.4;
+        let market_matches = markets.as_slice()
+            == [(
+                "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9".to_string(),
+                i32::from(lighter.market_index),
+                i16::from(robinhood.stock_decimals),
+                i64::try_from(robinhood.spot_config_version).unwrap_or(-1),
+                robinhood.ui_multiplier_e18.clone(),
+            )];
+        oracle_healthy = venue_bound
+            && market_matches
+            && robinhood.oracle_healthy
+            && !robinhood.oracle_paused
+            && robinhood.ui_multiplier_e18 == robinhood.new_ui_multiplier_e18;
+        sequencer_healthy = venue_bound && robinhood.sequencer_healthy;
+        reconciliation_ready = venue_bound
+            && lighter.nonce_aligned
+            && lighter.no_unknown_orders
+            && lighter.no_unknown_positions
+            && robinhood.nonce_aligned
+            && robinhood.wiring_verified
+            && robinhood.finality_healthy;
+        exit_authority_ready = venue_bound
+            && market_matches
+            && robinhood.signer_gas_ready
+            && robinhood.finality_healthy
+            && oracle_healthy
+            && sequencer_healthy;
+    }
+    sqlx::query(
+        r#"
+        UPDATE execution_account_readiness
+        SET venue_approved = $2, oracle_healthy = $3, sequencer_healthy = $4,
+            reconciliation_ready = $5, exit_authority_ready = $6,
+            version = version + 1, updated_at = now()
+        WHERE execution_account_id = $1
+        "#,
+    )
+    .bind(execution_account_id)
+    .bind(venue_bound)
+    .bind(oracle_healthy)
+    .bind(sequencer_healthy)
+    .bind(reconciliation_ready)
+    .bind(exit_authority_ready)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 fn valid_evm_address(value: &str) -> bool {
@@ -5465,6 +6157,17 @@ fn parse_unsigned_string(value: &str) -> Option<&str> {
         && value.trim() == value
         && (value == "0" || !value.starts_with('0')))
     .then_some(value)
+}
+
+fn valid_decimal_bound(value: &str, maximum: &str) -> bool {
+    if value.is_empty()
+        || value == "0"
+        || value.starts_with('0')
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    value.len() < maximum.len() || value.len() == maximum.len() && value <= maximum
 }
 
 fn classify_insert_error(error: sqlx::Error) -> StoreError {
@@ -5607,17 +6310,20 @@ async fn verify_execution_account(
                account.owner_address,
                readiness.venue_approved, readiness.oracle_healthy,
                readiness.sequencer_healthy, readiness.reconciliation_ready,
-               readiness.exit_authority_ready, readiness.alerting_ready,
-               readiness.safe_rotation_ready
+		       readiness.exit_authority_ready, rollout.alerting_ready,
+		       rollout.safe_rotation_ready,
+		       readiness.updated_at >= TIMESTAMPTZ 'epoch' + ($2::bigint - 5000) * interval '1 millisecond'
         FROM execution_accounts account
         JOIN execution_account_control control USING (execution_account_id)
         JOIN execution_account_readiness readiness USING (execution_account_id)
         JOIN execution_strategy_control strategy USING (strategy_version)
-        WHERE account.execution_account_id = $1
-        FOR SHARE OF account, control, readiness, strategy
+		CROSS JOIN execution_rollout_readiness rollout
+		WHERE account.execution_account_id = $1 AND rollout.singleton
+		FOR SHARE OF account, control, readiness, strategy, rollout
         "#,
     )
     .bind(&intent.execution_account_id)
+	.bind(i64::try_from(now_ms).map_err(|_| StoreError::AccountReadinessUnavailable)?)
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(StoreError::ExecutionAccountUnavailable)?;
@@ -5638,6 +6344,7 @@ async fn verify_execution_account(
         || account.account_manifest_sha256 != account.strategy_manifest_sha256
         || account.strategy_mode != "ACTIVE"
         || account.owner_address.is_none()
+        || !account.readiness_fresh
     {
         return Err(StoreError::ExecutionAccountUnavailable);
     }
@@ -5661,7 +6368,9 @@ async fn verify_execution_account(
         SELECT DISTINCT ON (source) source, payload
         FROM execution_account_snapshots
         WHERE execution_account_id = $1
+		  AND observed_at <= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
           AND received_at <= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
+		  AND received_at >= TIMESTAMPTZ 'epoch' + ($2 - 5000) * interval '1 millisecond'
           AND expires_at >= TIMESTAMPTZ 'epoch' + $2 * interval '1 millisecond'
         ORDER BY source, received_at DESC, id DESC
         "#,
@@ -5910,5 +6619,83 @@ mod tests {
         registration.strategy_version = CANARY_RISK_VERSION.into();
         registration.robinhood_signer = registration.robinhood_vault.clone();
         assert!(!valid_account_registration(&registration));
+    }
+
+    #[test]
+    fn exit_authority_binds_exact_executable_phase_size_and_price() {
+        let mut saga = ExecutionSaga::new("intent-exit").unwrap();
+        for event in [
+            ExecutionEvent::PrecheckPassed,
+            ExecutionEvent::PerpSubmitted,
+            ExecutionEvent::PerpFilled { filled_base: 100 },
+            ExecutionEvent::SpotSubmitted,
+            ExecutionEvent::SpotConfirmed { received_raw: 200 },
+            ExecutionEvent::ExitStarted,
+            ExecutionEvent::UnwindStarted,
+        ] {
+            saga.apply(event).unwrap();
+        }
+        let quote = |phase: &str, base, limit| ExitQuoteRow {
+            source_session: "exit-session".into(),
+            source_event_id: "exit-event".into(),
+            mark_price: 25_000,
+            spot_amount_in: 200,
+            expected_amount_out: 25_000_000,
+            expected_ui_multiplier: "1000000000000000000".into(),
+            min_oracle_round_id: "7".into(),
+            unwind_phase: phase.into(),
+            perp_base_amount: base,
+            perp_limit_price: limit,
+            received_at_ms: 900,
+            expires_at_ms: 5_000,
+            submission_deadline_ms: 5_000,
+            reconciliation_deadline_ms: 10_000,
+            max_unwind_price_deviation_bps: 2_500,
+            max_spot_slippage_bps: 500,
+        };
+        let exact = build_exit_authority(
+            &saga,
+            quote("perp_and_spot", 100, 26_000),
+            1_000,
+            5_000,
+            10_000,
+            Some(26_000),
+            None,
+        )
+        .unwrap();
+        assert_eq!(exact.perp_unwind_price, 26_000);
+        assert!(build_exit_authority(
+            &saga,
+            quote("perp_and_spot", 100, 26_000),
+            1_000,
+            5_000,
+            10_000,
+            Some(26_001),
+            None,
+        )
+        .is_none());
+        assert!(build_exit_authority(
+            &saga,
+            quote("perp_and_spot", 99, 26_000),
+            1_000,
+            5_000,
+            10_000,
+            None,
+            None,
+        )
+        .is_none());
+
+        saga.apply(ExecutionEvent::PerpUnwindCompleted { unwound_base: 100 })
+            .unwrap();
+        assert!(build_exit_authority(
+            &saga,
+            quote("spot_only", 0, 25_000),
+            1_000,
+            5_000,
+            10_000,
+            None,
+            None,
+        )
+        .is_some());
     }
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -19,6 +20,7 @@ var (
 	errNotFound        = errors.New("link not found")
 	errBindingMismatch = errors.New("execution account binding mismatch")
 	errRotationOpen    = errors.New("credential provisioning already in progress")
+	errAccountBound    = errors.New("Lighter subaccount is already bound to another execution account")
 )
 
 //go:embed migrations/*.sql
@@ -35,6 +37,8 @@ type credentialStore interface {
 	Block(context.Context, credential, string) error
 	Active(context.Context, string) (credential, error)
 	ExpectedNonce(context.Context, credential) (uint64, error)
+	ClaimSigningNonce(context.Context, credential, string, uint64, string) (*signedTransaction, error)
+	CompleteSigningRequest(context.Context, credential, string, uint64, string, signedTransaction) error
 	VerifyActive(context.Context, credential) error
 	ClaimAuthNonce(context.Context, string, string, time.Time) (bool, error)
 	Audit(context.Context, credential, string, map[string]any) error
@@ -108,6 +112,10 @@ func (value *pgStore) Reserve(ctx context.Context, executionID, owner string, ac
 				execution_account_id, owner_address, account_index, api_key_index, status
 			) VALUES ($1, $2, $3, $4, 'pending')`, executionID, owner, accountIndex, apiKeyIndex)
 		if err != nil {
+			var databaseError *pgconn.PgError
+			if errors.As(err, &databaseError) && databaseError.Code == "23505" && databaseError.ConstraintName == "lighter_credential_bindings_account_index_key" {
+				return reservation{}, errAccountBound
+			}
 			return reservation{}, errors.New("create credential binding")
 		}
 		boundOwner, boundAccount, boundKey = owner, accountIndex, apiKeyIndex
@@ -341,21 +349,15 @@ func (value *pgStore) Active(ctx context.Context, executionID string) (credentia
 }
 
 func (value *pgStore) ExpectedNonce(ctx context.Context, record credential) (uint64, error) {
-	if record.ChangeNonce < 0 || record.ChangeNonce == int64(^uint64(0)>>1) {
+	if record.ChangeNonce < 0 || record.ChangeNonce >= maximumLighterNonce {
 		return 0, errors.New("active credential nonce is invalid")
 	}
 	var expected int64
 	err := value.pool.QueryRow(ctx, `
-		SELECT GREATEST(
-			$3::bigint,
-			COALESCE(MAX((audit.details->>'nonce')::bigint) + 1, $3::bigint)
-		)
+		SELECT GREATEST($3::bigint, COALESCE(MAX(request.nonce) + 1, $3::bigint))
 		FROM lighter_credential_bindings AS binding
 		JOIN lighter_credentials AS credential ON credential.id = binding.active_credential_id
-		LEFT JOIN lighter_credential_audit AS audit
-			ON audit.credential_id = credential.id
-			AND audit.event = 'transaction_signed'
-			AND audit.details->>'nonce' ~ '^[0-9]+$'
+		LEFT JOIN lighter_signing_requests AS request ON request.credential_id = credential.id
 		WHERE binding.execution_account_id = $1
 		  AND binding.status = 'linked'
 		  AND credential.id = $2
@@ -364,10 +366,142 @@ func (value *pgStore) ExpectedNonce(ctx context.Context, record credential) (uin
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, errors.New("execution account credential changed during observation")
 	}
-	if err != nil || expected < 0 {
+	if err != nil || expected < 0 || expected > maximumLighterNonce {
 		return 0, errors.New("read expected Lighter nonce")
 	}
 	return uint64(expected), nil
+}
+
+func (value *pgStore) ClaimSigningNonce(ctx context.Context, record credential, intentID string, nonce uint64, requestSHA256 string) (*signedTransaction, error) {
+	if record.ChangeNonce < 0 || record.ChangeNonce >= maximumLighterNonce || nonce > uint64(maximumLighterNonce) {
+		return nil, errors.New("Lighter signing nonce is out of range")
+	}
+	tx, err := value.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return nil, errors.New("begin Lighter nonce claim")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var changeNonce int64
+	if err := tx.QueryRow(ctx, `
+		SELECT credential.change_nonce
+		FROM lighter_credential_bindings AS binding
+		JOIN lighter_credentials AS credential ON credential.id = binding.active_credential_id
+		WHERE binding.execution_account_id = $1
+		  AND binding.status = 'linked'
+		  AND credential.id = $2
+		  AND credential.status = 'linked'
+		FOR UPDATE OF binding, credential`, record.ExecutionAccountID, record.ID).Scan(&changeNonce); err != nil ||
+		changeNonce < 0 || changeNonce >= maximumLighterNonce {
+		return nil, errors.New("execution account credential changed during nonce claim")
+	}
+	var existingIntent, existingDigest, status string
+	var signedJSON []byte
+	err = tx.QueryRow(ctx, `
+		SELECT intent_id, request_sha256, status, COALESCE(signed_transaction, '{}'::jsonb)::text
+		FROM lighter_signing_requests
+		WHERE credential_id = $1 AND nonce = $2
+		FOR UPDATE`, record.ID, nonce).Scan(&existingIntent, &existingDigest, &status, &signedJSON)
+	if err == nil {
+		if existingIntent != intentID || existingDigest != requestSHA256 {
+			return nil, errors.New("Lighter signing nonce is already bound to another request")
+		}
+		if status != "signed" {
+			return nil, errors.New("Lighter signing request is claimed but has no durable result")
+		}
+		var signed signedTransaction
+		if err := json.Unmarshal(signedJSON, &signed); err != nil ||
+			validateSignedResult(record, intentID, signed.TxType, signed) != nil {
+			return nil, errors.New("stored Lighter signing result is invalid")
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, errors.New("commit Lighter signing retry")
+		}
+		return &signed, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, errors.New("read Lighter signing request")
+	}
+	var unresolved bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM lighter_signing_requests
+			WHERE credential_id = $1 AND status = 'claimed'
+		)`, record.ID).Scan(&unresolved); err != nil {
+		return nil, errors.New("check unresolved Lighter signing requests")
+	}
+	if unresolved {
+		return nil, errors.New("Lighter signing request is claimed but has no durable result")
+	}
+	var expected int64
+	if err := tx.QueryRow(ctx, `
+		SELECT GREATEST($2::bigint, COALESCE(MAX(nonce) + 1, $2::bigint))
+		FROM lighter_signing_requests
+		WHERE credential_id = $1`, record.ID, changeNonce+1).Scan(&expected); err != nil {
+		return nil, errors.New("read expected Lighter signing nonce")
+	}
+	if nonce != uint64(expected) {
+		return nil, fmt.Errorf("Lighter signing nonce must equal %d", expected)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO lighter_signing_requests
+			(credential_id, execution_account_id, nonce, intent_id, request_sha256, status)
+		VALUES ($1, $2, $3, $4, $5, 'claimed')`, record.ID, record.ExecutionAccountID, nonce, intentID, requestSHA256); err != nil {
+		return nil, errors.New("store Lighter signing nonce claim")
+	}
+	if err := appendAudit(ctx, tx, record, "transaction_nonce_claimed", map[string]any{
+		"intentId": intentID,
+		"nonce":    nonce,
+	}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, errors.New("commit Lighter signing nonce claim")
+	}
+	return nil, nil
+}
+
+func (value *pgStore) CompleteSigningRequest(ctx context.Context, record credential, intentID string, nonce uint64,
+	requestSHA256 string, signed signedTransaction) error {
+	if validateSignedResult(record, intentID, signed.TxType, signed) != nil {
+		return errors.New("Lighter signing result identity mismatch")
+	}
+	encoded, err := json.Marshal(signed)
+	if err != nil {
+		return errors.New("encode Lighter signing result")
+	}
+	tx, err := value.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return errors.New("begin Lighter signing completion")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var status string
+	var activeID *string
+	if err := tx.QueryRow(ctx, `
+		SELECT status, active_credential_id::text
+		FROM lighter_credential_bindings
+		WHERE execution_account_id = $1
+		FOR SHARE`, record.ExecutionAccountID).Scan(&status, &activeID); err != nil || status != "linked" ||
+		activeID == nil || *activeID != record.ID {
+		return errors.New("execution account credential changed during signing completion")
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE lighter_signing_requests
+		SET status = 'signed', signed_transaction = $6::jsonb, signed_at = now()
+		WHERE credential_id = $1 AND execution_account_id = $2 AND nonce = $3
+		  AND intent_id = $4 AND request_sha256 = $5 AND status = 'claimed'`,
+		record.ID, record.ExecutionAccountID, nonce, intentID, requestSHA256, encoded)
+	if err != nil || command.RowsAffected() != 1 {
+		return errors.New("complete Lighter signing request")
+	}
+	if err := appendAudit(ctx, tx, record, "transaction_signed", map[string]any{
+		"intentId": intentID, "nonce": nonce, "transactionHash": signed.TxHash, "transactionType": signed.TxType,
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return errors.New("commit Lighter signing completion")
+	}
+	return nil
 }
 
 func (value *pgStore) VerifyActive(ctx context.Context, record credential) error {

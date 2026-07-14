@@ -1,4 +1,4 @@
-# External audit scope: typed RWA custody boundary v1
+# Internal audit scope: typed RWA custody boundary v1
 
 ## In scope
 
@@ -53,7 +53,7 @@ execution and key-management review.
    adapter, creates the correct anchor publisher, and starts halted with no market.
 10. Anchors are non-empty, append-only, and strictly ordered.
 
-## Required pre-audit evidence
+## Required audit evidence
 
 - At least 95% overall branch coverage and 100% branch coverage for authorization, modes, caps,
   replay, recovery, approvals, and fund flow.
@@ -66,17 +66,17 @@ execution and key-management review.
 - Recorded runtime code hashes and upstream commits for every external contract ABI.
 - Formal verification of authorization, replay, recipient, mode, cap, and conservation properties.
 
-## Explicit blockers
+## Technical release conditions
 
-- No funding or execution-authority installation until independent audit findings are closed and retested.
-- No capital activation until the separate execution/key review and empirical promotion gates pass.
+- No funding or execution-authority installation while an internal critical or high finding remains open.
+- No capital activation until the execution and key review passes for the exact release.
 - No activation if the deployed Universal Router ABI or runtime code hash differs from the pinned
   fork target.
 - Emergency recovery permanently disables deposits and execution for the affected vault.
 
-## Auditor deliverables
+## Review deliverables
 
-- Exact audited commit, compiler settings, external dependency commits, and runtime code hashes.
+- Exact reviewed commit, compiler settings, external dependency commits, and runtime code hashes.
 - Severity, impact, proof, and remediation guidance for every finding.
 - Review of deployment, Safe batch, role separation, fork evidence, tests, and formal properties.
 - A retest statement for every remediated critical, high, or medium finding.

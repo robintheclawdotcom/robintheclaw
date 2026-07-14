@@ -18,12 +18,12 @@ export default function StrategyPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Strategy" title="Strategy controls" description="Manage your agent, mandate, capital, and positions." action={<AgentButton dashboard={dashboard} />} />
+      <PageHeader eyebrow="Live strategy" title="AAPL execution" description="Connect both venues, verify funding, and operate the basis-aapl-v1 agent." action={<AgentButton dashboard={dashboard} />} />
       <MainnetReadinessPanel dashboard={dashboard} />
       {isLive ? (
         <section className="panel">
-          <div className="panel-heading"><div><span className="eyebrow">Robinhood Chain mainnet</span><h2>Isolated custody setup</h2></div></div>
-          <p>Mainnet funding controls appear only after the canonical user vault is deployed and independently verified. The testnet vault controls are intentionally hidden for live agents.</p>
+          <div className="panel-heading"><div><span className="eyebrow">Fixed live mandate</span><h2>AAPL spot + perpetual</h2></div></div>
+          <p>The agent buys AAPL Stock Token on Robinhood Chain and sells the matching Lighter perpetual. Each account has its own owner-controlled vault, signer, credentials, and nonces.</p>
         </section>
       ) : !vault ? <SetupCard /> : (
         <>

@@ -1,8 +1,9 @@
 # Promotion evidence ledger
 
 This private operator CLI records promotion evidence for the fixed `basis-aapl-v1` release. It does
-not enable execution, change capital limits, or expose a user API. Repository activation remains
-disabled independently by `config/mainnet-live-policy.json` and the service enable flags.
+not send transactions, change capital limits, or expose a user API. Its status is activation-aware:
+`executionEnabled` is true when the signed ledger stage matches the enabled canonical policy and no
+incident is open.
 
 The ledger permits only:
 
@@ -83,5 +84,6 @@ node ops/mainnet-live/promotion-ledger/cli.mjs verify \
   --code-sha256 <64 lowercase hex characters>
 ```
 
-The status output always includes `"executionEnabled":false`. Promotion evidence is necessary but
-never sufficient authorization to enable capital.
+The status output derives `executionEnabled` from the signed stage, the canonical policy, and open
+incidents. The on-chain registry, account readiness, signer bindings, venue state, and executable
+quote checks remain independent runtime controls.

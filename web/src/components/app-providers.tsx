@@ -94,8 +94,8 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
         appId={appId}
         config={{
           loginMethods: ["email", "passkey", "google", "apple", "wallet"],
-          supportedChains: [robinhoodTestnet, robinhoodMainnet],
-          defaultChain: robinhoodTestnet,
+          supportedChains: [robinhoodMainnet, robinhoodTestnet],
+          defaultChain: robinhoodMainnet,
           embeddedWallets: { ethereum: { createOnLogin: "all-users" } },
           appearance: {
             theme: "dark",
@@ -336,21 +336,26 @@ function MockSession({ children }: { children: React.ReactNode }) {
     getAccessToken: async () => "test-access-token",
     signMessage: async () => `0x${"11".repeat(65)}`,
   }), [accounts, authenticated]);
-  const smartWallet = useMemo<SmartWalletContextValue>(() => ({
-    pending: false,
-    gasStatus: { sponsored: false, balance: 1n },
-    refreshGasStatus: async () => ({ sponsored: false, balance: 1n }),
-    executeCalls: async (_calls, _signerAddress, onSubmitted) => {
-      const callId = `0x${"ab".repeat(32)}` as Hex;
-      onSubmitted?.(callId);
-      return callId;
-    },
-    executeMainnetCall: async (_call, _signerAddress, onSubmitted) => {
-      const hash = `0x${"cd".repeat(32)}` as Hex;
-      onSubmitted?.(hash);
-      return hash;
-    },
-  }), []);
+  const smartWallet = useMemo<SmartWalletContextValue>(() => {
+    let mainnetCall = 0;
+    return {
+      pending: false,
+      gasStatus: { sponsored: false, balance: 1n },
+      refreshGasStatus: async () => ({ sponsored: false, balance: 1n }),
+      executeCalls: async (_calls, _signerAddress, onSubmitted) => {
+        const callId = `0x${"ab".repeat(32)}` as Hex;
+        onSubmitted?.(callId);
+        return callId;
+      },
+      executeMainnetCall: async (_call, _signerAddress, onSubmitted) => {
+        const hashes = [`0x${"cd".repeat(32)}`, `0x${"ef".repeat(32)}`] as Hex[];
+        const hash = hashes[Math.min(mainnetCall, hashes.length - 1)];
+        mainnetCall += 1;
+        onSubmitted?.(hash);
+        return hash;
+      },
+    };
+  }, []);
   return <SessionContexts auth={auth} smartWallet={smartWallet}>{children}</SessionContexts>;
 }
 

@@ -28,10 +28,10 @@ const DOMAIN = "robin.promotion-ledger.v1\0";
 const STRATEGY_VERSION = "basis-aapl-v1";
 const STAGES = ["paper", "shadow", "canary", "cohort", "public", "retired"];
 const NEXT_STAGE = new Map([
-  ["paper", "shadow"],
-  ["shadow", "canary"],
-  ["canary", "cohort"],
-  ["cohort", "public"],
+  ["paper", new Set(["shadow", "canary"])],
+  ["shadow", new Set(["canary"])],
+  ["canary", new Set(["cohort"])],
+  ["cohort", new Set(["public"])],
 ]);
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(MODULE_DIR, "..", "..", "..");
@@ -313,7 +313,7 @@ function applyEntry(current, entry) {
         current.stage === null
         || current.stage === "retired"
         || event.fromStage !== current.stage
-        || NEXT_STAGE.get(current.stage) !== event.toStage
+        || !NEXT_STAGE.get(current.stage)?.has(event.toStage)
         || current.cleanObservationStartedAt === null
         || current.openIncidents.size !== 0
       ) {

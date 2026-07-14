@@ -113,11 +113,15 @@ jobs:
             provisioner/robinhood/go.sum
             provisioner/lighter/go.sum
             publisher/go.mod
+            runtime/exit-quote-publisher/go.sum
+            runtime/live-evaluation/go.sum
+            runtime/live-scheduler/go.sum
+            runtime/sequencer-publisher/go.sum
             signer/lighter/go.sum
             signer/robinhood/go.sum
       - name: Verify private service modules
         run: |
-          for module in liveexec publisher provisioner/lighter provisioner/robinhood signer/lighter signer/robinhood; do
+          for module in liveexec publisher provisioner/lighter provisioner/robinhood runtime/exit-quote-publisher runtime/live-evaluation runtime/live-scheduler runtime/sequencer-publisher signer/lighter signer/robinhood; do
             test -z "$(gofmt -l "$module")"
             (cd "$module" && go mod verify)
             (cd "$module" && go vet ./...)
@@ -126,7 +130,7 @@ jobs:
       - name: Scan private service dependencies
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
-          for module in liveexec publisher provisioner/lighter provisioner/robinhood signer/lighter signer/robinhood; do
+          for module in liveexec publisher provisioner/lighter provisioner/robinhood runtime/exit-quote-publisher runtime/live-evaluation runtime/live-scheduler runtime/sequencer-publisher signer/lighter signer/robinhood; do
             (cd "$module" && govulncheck ./...)
           done
 
@@ -248,4 +252,3 @@ jobs:
       - name: On-chain verifier tests
         working-directory: zk/contracts
         run: forge test
-

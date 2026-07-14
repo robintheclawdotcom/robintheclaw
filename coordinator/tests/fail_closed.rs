@@ -22,6 +22,8 @@ fn disabled_config() -> Config {
         control_caller_id: None,
         registration_hmac_key: None,
         registration_caller_id: None,
+        episode_hmac_key: None,
+        episode_caller_id: None,
         lighter_signer_url: None,
         robinhood_signer_url: None,
         signer_caller_id: None,

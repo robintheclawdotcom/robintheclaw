@@ -17,3 +17,15 @@ func TestStaleEvidenceAndExactMarginMath(t *testing.T) {
 		t.Fatal("future evidence must fail")
 	}
 }
+
+func TestDecimalMicrosRequiresExactRepresentation(t *testing.T) {
+	value, err := decimalMicros("50.000001")
+	if err != nil || value != 50_000_001 {
+		t.Fatalf("micros = %d: %v", value, err)
+	}
+	for _, invalid := range []string{"0.0000001", "1e3", "-1"} {
+		if _, err := decimalMicros(invalid); err == nil {
+			t.Fatalf("inexact decimal %q was accepted", invalid)
+		}
+	}
+}

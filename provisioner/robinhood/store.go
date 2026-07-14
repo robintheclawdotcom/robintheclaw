@@ -24,9 +24,42 @@ type bindingStore interface {
 	Create(context.Context, binding) (binding, error)
 	Get(context.Context, string) (binding, error)
 	MarkConfirming(context.Context, binding, string) (binding, error)
-	Activate(context.Context, binding, uint64) (binding, error)
+	MarkDeployed(context.Context, binding, uint64) (binding, error)
+	MarkAuthorized(context.Context, binding, string, uint64) (binding, error)
 	Block(context.Context, binding, string) error
 	ClaimNonce(context.Context, string, string, time.Time) (bool, error)
+}
+
+func (value *pgStore) MarkDeployed(ctx context.Context, record binding, block uint64) (binding, error) {
+	if block == 0 {
+		return binding{}, errBindingConflict
+	}
+	tx, err := value.pool.Begin(ctx)
+	if err != nil {
+		return binding{}, errors.New("begin deployment finalization")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	command, err := tx.Exec(ctx, `
+        UPDATE robinhood_execution_bindings
+        SET deployment_block = $3, updated_at = now()
+        WHERE execution_account_id = $1 AND deployment_tx_hash = $2 AND status = 'confirming'
+          AND (deployment_block IS NULL OR deployment_block = $3)`,
+		record.ExecutionAccountID, record.DeploymentTxHash, block)
+	if err != nil || command.RowsAffected() != 1 {
+		return binding{}, errBindingConflict
+	}
+	if record.DeploymentBlock == 0 {
+		if err := appendAudit(ctx, tx, record, "deployment_finalized", map[string]any{
+			"txHash": record.DeploymentTxHash,
+			"block":  block,
+		}); err != nil {
+			return binding{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return binding{}, errors.New("commit deployment finalization")
+	}
+	return value.Get(ctx, record.ExecutionAccountID)
 }
 
 type pgStore struct {
@@ -130,7 +163,10 @@ func (value *pgStore) MarkConfirming(ctx context.Context, record binding, txHash
 	return value.Get(ctx, record.ExecutionAccountID)
 }
 
-func (value *pgStore) Activate(ctx context.Context, record binding, block uint64) (binding, error) {
+func (value *pgStore) MarkAuthorized(ctx context.Context, record binding, txHash string, block uint64) (binding, error) {
+	if block == 0 || txHash == "" || txHash == record.DeploymentTxHash {
+		return binding{}, errBindingConflict
+	}
 	tx, err := value.pool.Begin(ctx)
 	if err != nil {
 		return binding{}, errors.New("begin binding activation")
@@ -138,14 +174,17 @@ func (value *pgStore) Activate(ctx context.Context, record binding, block uint64
 	defer func() { _ = tx.Rollback(ctx) }()
 	command, err := tx.Exec(ctx, `
 		UPDATE robinhood_execution_bindings
-		SET status = 'active', deployment_block = $3, updated_at = now()
-		WHERE execution_account_id = $1 AND deployment_tx_hash = $2 AND status = 'confirming'`,
-		record.ExecutionAccountID, record.DeploymentTxHash, block)
+		SET status = 'active', authorization_tx_hash = $3, authorization_block = $4, updated_at = now()
+		WHERE execution_account_id = $1 AND deployment_tx_hash = $2 AND status = 'confirming'
+		  AND deployment_block IS NOT NULL
+		  AND (authorization_tx_hash IS NULL OR authorization_tx_hash = $3)
+		  AND (authorization_block IS NULL OR authorization_block = $4)`,
+		record.ExecutionAccountID, record.DeploymentTxHash, txHash, block)
 	if err != nil || command.RowsAffected() != 1 {
 		return binding{}, errBindingConflict
 	}
-	if err := appendAudit(ctx, tx, record, "binding_activated", map[string]any{
-		"txHash": record.DeploymentTxHash,
+	if err := appendAudit(ctx, tx, record, "agent_authorization_finalized", map[string]any{
+		"txHash": txHash,
 		"block":  block,
 	}); err != nil {
 		return binding{}, err
@@ -194,7 +233,8 @@ const bindingSelect = `
 	       factory_code_hash, registry_code_hash, vault_code_hash, risk_manager_code_hash,
 	       spot_adapter_code_hash, vault_address, risk_manager_address,
 	       spot_adapter_address, COALESCE(deployment_tx_hash, ''),
-	       COALESCE(deployment_block, 0), status, created_at, updated_at
+	       COALESCE(deployment_block, 0), COALESCE(authorization_tx_hash, ''),
+	       COALESCE(authorization_block, 0), status, created_at, updated_at
 	FROM robinhood_execution_bindings`
 
 type rowScanner interface{ Scan(...any) error }
@@ -207,7 +247,8 @@ func scanBinding(row rowScanner) (binding, error) {
 		&result.RegistryAddress, &result.PolicyDigest, &result.FactoryCodeHash, &result.RegistryCodeHash,
 		&result.VaultCodeHash, &result.RiskCodeHash, &result.AdapterCodeHash,
 		&result.Graph.Vault, &result.Graph.RiskManager, &result.Graph.SpotAdapter,
-		&result.DeploymentTxHash, &result.DeploymentBlock, &result.Status,
+		&result.DeploymentTxHash, &result.DeploymentBlock,
+		&result.AuthorizationTxHash, &result.AuthorizationBlock, &result.Status,
 		&result.CreatedAt, &result.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {

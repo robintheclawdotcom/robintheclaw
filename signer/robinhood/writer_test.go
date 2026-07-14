@@ -25,6 +25,7 @@ type fakeChain struct {
 	codes           map[common.Address][]byte
 	getters         map[common.Address]map[string]common.Address
 	hashes          map[common.Address]map[string]common.Hash
+	bools           map[common.Address]map[string]bool
 	gas             uint64
 	tip             *big.Int
 	nonce           uint64
@@ -83,6 +84,9 @@ func (chain *fakeChain) CallContract(_ context.Context, message ethereum.CallMsg
 			return method.Outputs.Pack(value)
 		}
 		if value, ok := chain.hashes[*message.To][name]; ok {
+			return method.Outputs.Pack(value)
+		}
+		if value, ok := chain.bools[*message.To][name]; ok {
 			return method.Outputs.Pack(value)
 		}
 		return nil, errors.New("unknown getter")
@@ -181,6 +185,7 @@ func newWriterFixture(t *testing.T) writerFixture {
 			},
 		},
 		hashes:   map[common.Address]map[string]common.Hash{factory: {"policyDigest": policyDigest}},
+		bools:    map[common.Address]map[string]bool{vault: {"agentEnabled": true}},
 		gas:      100_000,
 		tip:      big.NewInt(2),
 		nonce:    7,
@@ -216,6 +221,14 @@ func newWriterFixture(t *testing.T) writerFixture {
 	writer := newWriter(config, chain, chain, signer, journal)
 	writer.ready.Store(true)
 	return writerFixture{config: config, chain: chain, journal: journal, signer: signer, writer: writer}
+}
+
+func TestVerifyRequiresOwnerAuthorizedAgent(t *testing.T) {
+	fixture := newWriterFixture(t)
+	fixture.chain.bools[fixture.config.VaultAddress]["agentEnabled"] = false
+	if _, err := fixture.writer.Verify(context.Background()); err == nil || !strings.Contains(err.Error(), "owner-authorized") {
+		t.Fatalf("unauthorized agent verification returned %v", err)
+	}
 }
 
 func TestSubmitPersistsBeforeBroadcast(t *testing.T) {

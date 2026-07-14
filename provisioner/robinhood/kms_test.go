@@ -13,7 +13,8 @@ import (
 )
 
 type fakeKMS struct {
-	private *ecdsa.PrivateKey
+	private     *ecdsa.PrivateKey
+	executionID string
 }
 
 func (value fakeKMS) DescribeKey(context.Context, *awskms.DescribeKeyInput, ...func(*awskms.Options)) (*awskms.DescribeKeyOutput, error) {
@@ -50,18 +51,39 @@ func (value fakeKMS) GetPublicKey(context.Context, *awskms.GetPublicKeyInput, ..
 	return &awskms.GetPublicKeyOutput{KeySpec: types.KeySpecEccSecgP256k1, KeyUsage: types.KeyUsageTypeSignVerify, PublicKey: encoded}, nil
 }
 
+func (value fakeKMS) ListResourceTags(context.Context, *awskms.ListResourceTagsInput, ...func(*awskms.Options)) (*awskms.ListResourceTagsOutput, error) {
+	return &awskms.ListResourceTagsOutput{Tags: []types.Tag{
+		{TagKey: stringsPtr("service"), TagValue: stringsPtr("robinhood-provisioner")},
+		{TagKey: stringsPtr("executionAccountId"), TagValue: stringsPtr(value.executionID)},
+	}}, nil
+}
+
 func TestExistingKMSKeyMustBeNonExportableSecp256k1(t *testing.T) {
 	private, err := crypto.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	provisioner := keyProvisioner{client: fakeKMS{private: private}, aliasPrefix: "alias/robinhood/execution/"}
+	provisioner := keyProvisioner{client: fakeKMS{private: private, executionID: testExecutionID}, aliasPrefix: "alias/robinhood/execution/"}
 	key, err := provisioner.ensure(context.Background(), testExecutionID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if key.ID != "arn:aws:kms:region:account:key/key-id" || key.Address != crypto.PubkeyToAddress(private.PublicKey) {
 		t.Fatalf("unexpected execution key: %#v", key)
+	}
+}
+
+func TestExistingKMSKeyMustBelongToExecutionAccount(t *testing.T) {
+	private, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisioner := keyProvisioner{
+		client:      fakeKMS{private: private, executionID: "22222222-2222-4222-8222-222222222222"},
+		aliasPrefix: "alias/robinhood/execution/",
+	}
+	if _, err := provisioner.ensure(context.Background(), testExecutionID); err == nil {
+		t.Fatal("expected execution account tag mismatch")
 	}
 }
 

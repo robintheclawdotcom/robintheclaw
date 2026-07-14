@@ -38,6 +38,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
             "/v1/account-registrations/{execution_account_id}",
             get(account_registration),
         )
+        .route(
+            "/v1/open-episodes/{execution_account_id}/{intent_id}",
+            get(open_episode),
+        )
         .route("/v1/market-quotes", post(record_market_quote))
         .layer(axum::extract::DefaultBodyLimit::max(64 << 10))
         .with_state(state)
@@ -105,6 +109,33 @@ async fn account_registration(
         .await
     {
         Ok(response) => (StatusCode::OK, Json(serde_json::json!(response))).into_response(),
+        Err(error) => store_error_response(error),
+    }
+}
+
+async fn open_episode(
+    State(state): State<Arc<AppState>>,
+    Path((execution_account_id, intent_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let path = format!("/v1/open-episodes/{execution_account_id}/{intent_id}");
+    if let Err((status, message)) =
+        authorize_method(&state, AuthScope::OpenEpisode, "GET", &path, &headers, &[]).await
+    {
+        return error(status, message);
+    }
+    let Some(store) = &state.store else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled");
+    };
+    let now_ms = match current_time_ms() {
+        Ok(value) => value,
+        Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "clock unavailable"),
+    };
+    match store
+        .open_episode(&execution_account_id, &intent_id, now_ms)
+        .await
+    {
+        Ok(episode) => (StatusCode::OK, Json(episode)).into_response(),
         Err(error) => store_error_response(error),
     }
 }
@@ -525,6 +556,7 @@ enum AuthScope {
     MarketQuote,
     AccountCommand,
     AccountRegistration,
+    OpenEpisode,
 }
 
 impl AuthScope {
@@ -538,6 +570,7 @@ impl AuthScope {
             Self::MarketQuote => "market_quote",
             Self::AccountCommand => "account_command",
             Self::AccountRegistration => "account_registration",
+            Self::OpenEpisode => "open_episode",
         }
     }
 }
@@ -594,6 +627,10 @@ async fn authorize_method(
         AuthScope::AccountRegistration => (
             state.config.registration_hmac_key.as_ref(),
             state.config.registration_caller_id.as_deref(),
+        ),
+        AuthScope::OpenEpisode => (
+            state.config.episode_hmac_key.as_ref(),
+            state.config.episode_caller_id.as_deref(),
         ),
     };
     let (Some(key), Some(caller)) = (key, caller) else {
@@ -718,6 +755,9 @@ fn store_error_response(error: StoreError) -> axum::response::Response {
         | StoreError::ExitPayloadConflict
         | StoreError::MarketQuoteConflict => StatusCode::CONFLICT,
         StoreError::AccountRegistrationMissing => StatusCode::NOT_FOUND,
+        StoreError::OpenEpisodeMissing => StatusCode::NOT_FOUND,
+        StoreError::OpenEpisodeAmbiguous => StatusCode::CONFLICT,
+        StoreError::OpenEpisodeUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::CONFLICT,
     };
     error_response(status, &error.to_string())

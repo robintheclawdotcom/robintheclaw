@@ -12,6 +12,8 @@ import {
   verifyLedger,
 } from "./ledger.mjs";
 
+const POLICY_PATH = new URL("../../../config/mainnet-live-policy.json", import.meta.url);
+
 const [command, ...rawArguments] = process.argv.slice(2);
 
 try {
@@ -124,6 +126,11 @@ function assertPrivateKeyFile(path) {
 }
 
 function printStatus({ state }) {
+  const policy = JSON.parse(readFileSync(POLICY_PATH, "utf8"));
+  const executionEnabled = policy.executionEnabled === true
+    && policy.capitalActivationAllowed === true
+    && state.stage === policy.rolloutStage
+    && state.openIncidents.size === 0;
   console.log(JSON.stringify({
     strategyVersion: "basis-aapl-v1",
     sequence: state.sequence,
@@ -132,6 +139,6 @@ function printStatus({ state }) {
     cleanObservationStartedAt: state.cleanObservationStartedAt,
     openIncidentCount: state.openIncidents.size,
     verifiedEntries: state.sequence,
-    executionEnabled: false,
+    executionEnabled,
   }));
 }

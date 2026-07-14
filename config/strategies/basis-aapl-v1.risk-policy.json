@@ -9,6 +9,7 @@
   "minimumMaintenanceMarginCoveragePpm": 2000000,
   "maximumAuthenticatedStateAgeMs": 5000,
   "maximumExecutableQuoteAgeMs": 5000,
+  "maxSpotSlippageBps": 200,
   "entryDirection": "long_spot_short_perp",
   "perpFirst": true,
   "ambiguousSendBlocksGlobalEntry": true

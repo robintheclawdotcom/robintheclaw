@@ -57,7 +57,6 @@ func (value *server) handler() http.Handler {
 	mux.Handle("POST /v1/links/status", value.authorize(http.HandlerFunc(value.status)))
 	mux.Handle("POST /v1/links/confirm", value.authorize(http.HandlerFunc(value.confirm)))
 	mux.Handle("POST /v1/signer/create-order", value.authorizeSigner(http.HandlerFunc(value.createOrder)))
-	mux.Handle("POST /v1/signer/modify-order", value.authorizeSigner(http.HandlerFunc(value.modifyOrder)))
 	mux.Handle("POST /v1/signer/cancel-order", value.authorizeSigner(http.HandlerFunc(value.cancelOrder)))
 	mux.Handle("POST /v1/signer/cancel-all", value.authorizeSigner(http.HandlerFunc(value.cancelAll)))
 	mux.Handle("POST /v1/publisher/account-state", value.authorizePublisher(http.HandlerFunc(value.publisherAccountState)))
@@ -248,19 +247,6 @@ func (value *server) createOrder(w http.ResponseWriter, request *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (value *server) modifyOrder(w http.ResponseWriter, request *http.Request) {
-	var body modifyOrderRequest
-	if err := decodeBody(w, request, &body); err != nil {
-		return
-	}
-	result, err := value.service.signModifyOrder(request.Context(), body)
-	if err != nil {
-		writeServiceError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
 func (value *server) cancelOrder(w http.ResponseWriter, request *http.Request) {
 	var body cancelOrderRequest
 	if err := decodeBody(w, request, &body); err != nil {
@@ -307,7 +293,7 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "link not found")
 	case errors.Is(err, errObservationRateLimited):
 		writeError(w, http.StatusTooManyRequests, "Lighter observation rate limited")
-	case errors.Is(err, errBindingMismatch), errors.Is(err, errRotationOpen):
+	case errors.Is(err, errBindingMismatch), errors.Is(err, errRotationOpen), errors.Is(err, errAccountBound):
 		writeError(w, http.StatusConflict, err.Error())
 	default:
 		writeError(w, http.StatusBadRequest, err.Error())

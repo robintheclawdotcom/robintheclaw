@@ -61,6 +61,38 @@ async fn migration_and_promotion_gate_are_enforced() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0011_operator_restrictions.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0012_internal_canary_promotion.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0013_derived_canary_readiness.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0014_open_episode_resolution.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0015_exit_execution_policy.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    for migration in [
+        include_str!("../../runtime/live-scheduler/migrations/0001_live_scheduler.sql"),
+        include_str!("../../runtime/live-scheduler/migrations/0002_natural_strategy_exit.sql"),
+    ] {
+        sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    }
     let legacy = sqlx::query_as::<_, (String, bool, bool)>(
         "SELECT execution_account_id, active, payload_digest_required FROM execution_intents WHERE id = $1",
     )
@@ -106,6 +138,23 @@ async fn migration_and_promotion_gate_are_enforced() {
             strategy_manifest_sha256 = $2,
             binding_sha256 = repeat('a', 64)
         WHERE execution_account_id = 'singleton-mainnet-canary'
+        "#,
+    )
+    .bind(CANARY_RISK_VERSION)
+    .bind(execution::BASIS_AAPL_V1_MANIFEST_SHA256)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_account_registrations
+            (execution_account_id, agent_id, strategy_version, risk_version,
+             strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+             robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256)
+        VALUES ('singleton-mainnet-canary', 'singleton-mainnet-canary', $1, $1, $2, 7, 4,
+                '0x0000000000000000000000000000000000000004',
+                '0x0000000000000000000000000000000000000002',
+                '0x0000000000000000000000000000000000000003', repeat('a', 64))
         "#,
     )
     .bind(CANARY_RISK_VERSION)
@@ -176,12 +225,17 @@ async fn migration_and_promotion_gate_are_enforced() {
         lighter_market_index: None,
         quote_block_hash: intent().evidence.quote_block_hash,
         mark_price: 25_000,
+        expected_ui_multiplier: intent().expected_ui_multiplier.to_string(),
+        min_oracle_round_id: intent().min_oracle_round_id.to_string(),
         publisher_at_ms: 899,
         received_at_ms: 900,
         expires_at_ms: 1_500,
         intent_id: None,
         spot_unwind_amount_in: None,
         spot_unwind_expected_amount_out: None,
+        unwind_phase: None,
+        perp_unwind_base_amount: None,
+        perp_unwind_limit_price: None,
         submission_deadline_ms: None,
         reconciliation_deadline_ms: None,
     };
@@ -558,6 +612,109 @@ async fn migration_and_promotion_gate_are_enforced() {
         .unwrap()
         .unwrap();
     assert_eq!(action.kind, ActionKind::ReconcilePerp);
+    sqlx::query("UPDATE execution_control SET mode = 'ACTIVE', reason = 'tenant isolation test' WHERE singleton")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE execution_account_control SET mode = 'ACTIVE', reason = 'tenant isolation test' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_accounts SET status = 'active' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        store
+            .block_action_account(
+                &action.id,
+                "worker-1",
+                &action.lease_token,
+                "tenant_repair_test",
+                serde_json::json!({"stage": "spot_repair"}),
+            )
+            .await
+            .unwrap();
+    }
+    let tenant_modes = sqlx::query_as::<_, (String, String, String)>(
+        r#"
+        SELECT global.mode, account_control.mode, account.status
+        FROM execution_account_control account_control
+        JOIN execution_accounts account USING (execution_account_id)
+        CROSS JOIN execution_control global
+        WHERE global.singleton
+          AND account.execution_account_id = 'singleton-mainnet-canary'
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        tenant_modes,
+        ("ACTIVE".into(), "HALTED".into(), "blocked".into())
+    );
+    let tenant_incidents = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM execution_incidents WHERE intent_id = $1 AND kind = 'tenant_repair_test'",
+    )
+    .bind(&intent().id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(tenant_incidents, 1);
+
+    sqlx::query(
+        "UPDATE execution_account_control SET mode = 'ACTIVE', reason = 'ambiguity test' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_accounts SET status = 'active' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        store
+            .escalate_reconciliation(
+                &action.id,
+                "worker-1",
+                &action.lease_token,
+                "reconciliation_overdue_test",
+                serde_json::json!({"deadline_ms": 1_000, "observed_at_ms": 2_000}),
+            )
+            .await
+            .unwrap();
+    }
+    let ambiguity_modes = sqlx::query_as::<_, (String, String, String)>(
+        r#"
+        SELECT global.mode, account_control.mode, account.status
+        FROM execution_account_control account_control
+        JOIN execution_accounts account USING (execution_account_id)
+        CROSS JOIN execution_control global
+        WHERE global.singleton
+          AND account.execution_account_id = 'singleton-mainnet-canary'
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        ambiguity_modes,
+        ("HALTED".into(), "HALTED".into(), "blocked".into())
+    );
+    let ambiguity_incidents = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM execution_incidents WHERE intent_id = $1 AND kind = 'reconciliation_overdue_test'",
+    )
+    .bind(&intent().id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ambiguity_incidents, 1);
     let routed = store.next_venue_event(&action).await.unwrap().unwrap();
     assert_eq!(routed.payload["transaction_hash"], expected_tx_hash);
     let redelivered = store.next_venue_event(&action).await.unwrap().unwrap();
@@ -781,12 +938,17 @@ async fn migration_and_promotion_gate_are_enforced() {
         quote_block_hash: "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
             .into(),
         mark_price: 25_000,
+        expected_ui_multiplier: intent().expected_ui_multiplier.to_string(),
+        min_oracle_round_id: intent().min_oracle_round_id.to_string(),
         publisher_at_ms: 1_099,
         received_at_ms: 1_100,
         expires_at_ms: 30_000,
         intent_id: Some(intent().id),
         spot_unwind_amount_in: Some("2000000".into()),
         spot_unwind_expected_amount_out: Some("25000000".into()),
+        unwind_phase: Some("perp_and_spot".into()),
+        perp_unwind_base_amount: Some(1_000_000),
+        perp_unwind_limit_price: Some(30_000),
         submission_deadline_ms: Some(30_000),
         reconciliation_deadline_ms: Some(90_000),
     };
@@ -927,12 +1089,17 @@ async fn migration_and_promotion_gate_are_enforced() {
         quote_block_hash: "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
             .into(),
         mark_price: 25_000,
+        expected_ui_multiplier: intent().expected_ui_multiplier.to_string(),
+        min_oracle_round_id: intent().min_oracle_round_id.to_string(),
         publisher_at_ms: 1_499,
         received_at_ms: 1_500,
         expires_at_ms: 31_500,
         intent_id: Some(intent().id),
         spot_unwind_amount_in: Some("0".into()),
         spot_unwind_expected_amount_out: Some("0".into()),
+        unwind_phase: Some("perp_and_spot".into()),
+        perp_unwind_base_amount: Some(1_000_000),
+        perp_unwind_limit_price: Some(30_000),
         submission_deadline_ms: Some(31_500),
         reconciliation_deadline_ms: Some(91_500),
     };
@@ -1432,7 +1599,7 @@ async fn insert_transition(
 }
 
 fn approved_evidence() -> PromotionEvidence {
-    PromotionEvidence {
+    PromotionEvidence::Research {
         hypothesis_registered: true,
         testing_family_registered: true,
         frozen_dataset_verified: true,
@@ -1442,12 +1609,9 @@ fn approved_evidence() -> PromotionEvidence {
         bootstrap_net_return_lower_bound_ppm: 1,
         canary_capacity_micros: 25_000_000,
         capacity_curve_bounded: true,
-        capture_days: 180,
-        continuous_shadow_days: 60,
-        contract_audit_approved: true,
+        internal_audit_approved: true,
         executor_review_approved: true,
         key_review_approved: true,
-        legal_approved: true,
         restore_drill_approved: true,
     }
 }
@@ -1468,7 +1632,7 @@ fn intent() -> PairIntent {
         robinhood_vault: "0x0000000000000000000000000000000000000002".into(),
         robinhood_signer: "0x0000000000000000000000000000000000000003".into(),
         symbol: "AAPL".into(),
-        spot_token: "0x0000000000000000000000000000000000000001".into(),
+        spot_token: "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9".into(),
         lighter_market_index: 101,
         spot_side: SpotSide::Buy,
         perp_side: PerpSide::Short,
@@ -1479,6 +1643,8 @@ fn intent() -> PairIntent {
         settlement_amount_in: 25_000_000,
         minimum_spot_amount_out: 1_990_000,
         minimum_unwind_settlement_out: 24_000_000,
+        expected_ui_multiplier: 500_000_000_000_000_000,
+        min_oracle_round_id: 1,
         spot_decimals: 6,
         spot_config_version: 1,
         perp_base_amount: 1_000_000,
@@ -1540,11 +1706,14 @@ fn account_snapshots_for(
             payload: serde_json::json!({
                 "account_index": account_index,
                 "api_key_index": 4,
+                "market_index": 101,
                 "nonce_aligned": true,
                 "no_unknown_orders": true,
                 "no_unknown_positions": true,
                 "collateral_ready": true,
                 "maintenance_margin_ratio_micros": 2_000_000,
+                "collateral_micros": 50_000_000,
+                "maintenance_margin_micros": 25_000_000,
                 "flat": true,
             }),
             observed_at_ms: 1_198,
@@ -1567,6 +1736,15 @@ fn account_snapshots_for(
                 "agent_enabled": true,
                 "risk_mode": "ACTIVE",
                 "settlement_balance_raw": "25000000",
+                "nonce_aligned": true,
+                "spot_config_version": 1,
+                "stock_decimals": 6,
+                "ui_multiplier_e18": "500000000000000000",
+                "new_ui_multiplier_e18": "500000000000000000",
+                "oracle_paused": false,
+                "oracle_healthy": true,
+                "sequencer_healthy": true,
+                "signer_gas_ready": true,
             }),
             observed_at_ms: 1_198,
             received_at_ms: 1_199,
@@ -1584,14 +1762,21 @@ async fn register_account(
     signer: &str,
     owner: &str,
 ) {
+    let canonical = registration(
+        execution_account_id,
+        agent_id,
+        lighter_account_index,
+        owner,
+        vault,
+        signer,
+    );
     sqlx::query(
         r#"
         INSERT INTO execution_accounts
             (execution_account_id, agent_id, strategy_version, risk_version, status,
              lighter_account_index, lighter_api_key_index, robinhood_vault,
              robinhood_signer, owner_address, strategy_manifest_sha256, binding_sha256)
-        VALUES ($1, $2, $3, $3, 'active', $4, 4, $5, $6, $7,
-                $8, repeat('b', 64))
+		VALUES ($1, $2, $3, $3, 'active', $4, 4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(execution_account_id)
@@ -1602,6 +1787,28 @@ async fn register_account(
     .bind(signer)
     .bind(owner)
     .bind(execution::BASIS_AAPL_V1_MANIFEST_SHA256)
+    .bind(&canonical.binding_sha256)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+		INSERT INTO execution_account_registrations
+		    (execution_account_id, agent_id, strategy_version, risk_version,
+		     strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+		     robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256)
+		VALUES ($1, $2, $3, $3, $4, $5, 4, $6, $7, $8, $9)
+		"#,
+    )
+    .bind(execution_account_id)
+    .bind(agent_id)
+    .bind(CANARY_RISK_VERSION)
+    .bind(execution::BASIS_AAPL_V1_MANIFEST_SHA256)
+    .bind(lighter_account_index)
+    .bind(owner)
+    .bind(vault)
+    .bind(signer)
+    .bind(&canonical.binding_sha256)
     .execute(pool)
     .await
     .unwrap();

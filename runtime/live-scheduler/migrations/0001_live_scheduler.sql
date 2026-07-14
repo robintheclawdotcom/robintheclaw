@@ -33,11 +33,20 @@ CREATE TABLE live_scheduler_approvals (
     CHECK (evaluation->>'strategy_manifest_sha256' = '4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a'),
     CHECK (evaluation->>'source_config_sha256' = 'b701b39cbce20ccef48527811299732812d14297750fc3eee2a3c4a4a3f29edd'),
     CHECK (evaluation->>'status' = 'approved'),
-    CHECK (evaluation->>'action' = 'entry'),
+	CHECK (
+		(evaluation->>'action' = 'entry'
+		 AND evaluation->>'pair_intent_id' = '')
+		OR
+		(evaluation->>'action' = 'unwind'
+		 AND evaluation->>'pair_intent_id' ~ '^0x[0-9a-f]{64}$')
+	),
+	CHECK (evaluation->>'source_episode_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
+	CHECK (evaluation->>'paper_evaluation_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'),
     CHECK (live_scheduler_exact_keys(evaluation, ARRAY[
         'id', 'strategy_version', 'strategy_manifest_sha256', 'source_config_sha256',
         'dataset_manifest', 'market_manifest', 'status', 'action', 'observed_at_ms',
-        'estimated_cost_micros'
+		'estimated_cost_micros', 'source_episode_id', 'paper_evaluation_id',
+		'pair_intent_id'
     ])),
     CHECK (live_scheduler_exact_keys(readiness, ARRAY[
         'execution_account_id', 'agent_id', 'strategy_version', 'strategy_manifest_sha256',

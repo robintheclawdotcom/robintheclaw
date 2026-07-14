@@ -60,13 +60,21 @@ type coordinatorPolicyState struct {
 	exitReady        sql.NullBool
 	alertingReady    sql.NullBool
 	rotationReady    sql.NullBool
+	readinessFresh   sql.NullBool
 	lighterMarketID  sql.NullInt64
+}
+
+type signerJournalState struct {
+	signer string
+	vault  string
+	next   int64
+	ready  bool
 }
 
 func (value coordinatorPolicyState) Active(expectedManifest string, expectedMarketID uint16) bool {
 	return value.globalMode.Valid && value.globalMode.String == "ACTIVE" &&
 		value.strategyMode.Valid && value.strategyMode.String == "ACTIVE" &&
-		value.accountMode.Valid && value.accountMode.String == "ACTIVE" &&
+		value.accountMode.Valid && (value.accountMode.String == "ACTIVE" || value.accountMode.String == "REDUCE_ONLY") &&
 		value.strategyManifest.Valid && value.strategyManifest.String == expectedManifest &&
 		value.accountManifest.Valid && value.accountManifest.String == expectedManifest &&
 		value.venueApproved.Valid && value.venueApproved.Bool &&
@@ -76,6 +84,7 @@ func (value coordinatorPolicyState) Active(expectedManifest string, expectedMark
 		value.exitReady.Valid && value.exitReady.Bool &&
 		value.alertingReady.Valid && value.alertingReady.Bool &&
 		value.rotationReady.Valid && value.rotationReady.Bool &&
+		value.readinessFresh.Valid && value.readinessFresh.Bool &&
 		value.lighterMarketID.Valid && value.lighterMarketID.Int64 == int64(expectedMarketID)
 }
 
@@ -167,6 +176,9 @@ func (value *PGAccountSource) List(ctx context.Context) (AccountDiscovery, error
 	if err := value.receipts(ctx, registered, bindings); err != nil {
 		return AccountDiscovery{}, err
 	}
+	if err := value.signerState(ctx, registered, bindings); err != nil {
+		return AccountDiscovery{}, err
+	}
 	result := AccountDiscovery{Accounts: make([]AccountBinding, 0, len(registered))}
 	for _, account := range registered {
 		binding, exists := bindings[account.id]
@@ -210,14 +222,17 @@ func (value *PGAccountSource) registered(ctx context.Context) ([]registeredAccou
 		       strategy.strategy_manifest_sha256, account.strategy_manifest_sha256,
 		       readiness.venue_approved, readiness.oracle_healthy,
 		       readiness.sequencer_healthy, readiness.reconciliation_ready,
-		       readiness.exit_authority_ready, readiness.alerting_ready,
-		       readiness.safe_rotation_ready, market.lighter_market_index
+		       readiness.exit_authority_ready, rollout.alerting_ready,
+		       rollout.safe_rotation_ready,
+		       readiness.updated_at > now() - interval '5 seconds',
+		       market.lighter_market_index
 		FROM execution_account_registrations AS registration
 		JOIN execution_accounts AS account USING (execution_account_id)
 		LEFT JOIN execution_account_control AS account_control USING (execution_account_id)
 		LEFT JOIN execution_account_readiness AS readiness USING (execution_account_id)
 		LEFT JOIN execution_strategy_control AS strategy USING (strategy_version)
 		LEFT JOIN execution_control AS global ON global.singleton
+		LEFT JOIN execution_rollout_readiness AS rollout ON rollout.singleton
 		LEFT JOIN (
 			SELECT MIN(lighter_market_index) AS lighter_market_index
 			FROM execution_market_configs
@@ -240,7 +255,8 @@ func (value *PGAccountSource) registered(ctx context.Context) ([]registeredAccou
 			&account.strategyVersion, &manifest, &policy.globalMode, &policy.strategyMode, &policy.accountMode,
 			&policy.strategyManifest, &policy.accountManifest, &policy.venueApproved,
 			&policy.oracleHealthy, &policy.sequencerHealthy, &policy.reconciled,
-			&policy.exitReady, &policy.alertingReady, &policy.rotationReady, &policy.lighterMarketID,
+			&policy.exitReady, &policy.alertingReady, &policy.rotationReady, &policy.readinessFresh,
+			&policy.lighterMarketID,
 		); err != nil {
 			return nil, errors.New("read active execution account")
 		}
@@ -343,4 +359,99 @@ func (value *PGAccountSource) receipts(ctx context.Context, accounts []registere
 		return errors.New("read Robinhood signer receipts")
 	}
 	return nil
+}
+
+func (value *PGAccountSource) signerState(ctx context.Context, accounts []registeredAccount, bindings map[string]RobinhoodBinding) error {
+	signers := make([]string, 0, len(accounts))
+	byIdentity := make(map[string]string, len(accounts))
+	for _, account := range accounts {
+		binding, exists := bindings[account.id]
+		if !exists {
+			continue
+		}
+		signer := strings.ToLower(binding.Signer)
+		vault := strings.ToLower(binding.Vault)
+		signers = append(signers, signer)
+		byIdentity[signer+":"+vault] = account.id
+	}
+	rows, err := value.journal.Query(ctx, `
+		SELECT lower(deployment.signer_address), lower(deployment.vault_address),
+		       coalesce(nonce.next_nonce, 0),
+		       NOT EXISTS (
+		           SELECT 1 FROM robinhood_signer_transactions AS transaction
+		           WHERE transaction.deployment_id = deployment.deployment_id
+		             AND transaction.status IN (
+		                 'signed', 'submitted', 'soft_confirmed', 'l1_posted',
+		                 'ambiguous', 'replaced', 'quarantined'
+		             )
+		       ) AS ready
+		FROM robinhood_signer_deployments AS deployment
+		LEFT JOIN robinhood_signer_nonces AS nonce
+		  ON nonce.chain_id = deployment.chain_id
+		 AND lower(nonce.signer_address) = lower(deployment.signer_address)
+		WHERE deployment.chain_id = $1
+		  AND lower(deployment.signer_address) = ANY($2::text[])
+		ORDER BY deployment.signer_address, deployment.deployment_id`, mainnetChainID, signers)
+	if err != nil {
+		return errors.New("query Robinhood signer nonce state")
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{}, len(accounts))
+	for rows.Next() {
+		var state signerJournalState
+		if err := rows.Scan(&state.signer, &state.vault, &state.next, &state.ready); err != nil {
+			return errors.New("read Robinhood signer nonce state")
+		}
+		if err := applySignerJournalState(bindings, byIdentity, seen, state); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("read Robinhood signer nonce state")
+	}
+	bootstrapSignerJournals(accounts, bindings, seen)
+	return nil
+}
+
+func applySignerJournalState(
+	bindings map[string]RobinhoodBinding,
+	byIdentity map[string]string,
+	seen map[string]struct{},
+	state signerJournalState,
+) error {
+	if state.next < 0 {
+		return errors.New("read Robinhood signer nonce state")
+	}
+	id, exists := byIdentity[state.signer+":"+state.vault]
+	if !exists {
+		return errors.New("Robinhood signer nonce identity mismatch")
+	}
+	if _, duplicate := seen[id]; duplicate {
+		return errors.New("duplicate Robinhood signer nonce state")
+	}
+	seen[id] = struct{}{}
+	binding := bindings[id]
+	binding.ExpectedSignerNonce = uint64(state.next)
+	binding.SignerJournalReady = state.ready
+	bindings[id] = binding
+	return nil
+}
+
+func bootstrapSignerJournals(
+	accounts []registeredAccount,
+	bindings map[string]RobinhoodBinding,
+	seen map[string]struct{},
+) {
+	for _, account := range accounts {
+		if _, exists := seen[account.id]; exists {
+			continue
+		}
+		binding, exists := bindings[account.id]
+		if !exists {
+			continue
+		}
+		binding.ExpectedSignerNonce = 0
+		binding.SignerJournalReady = true
+		bindings[account.id] = binding
+	}
 }

@@ -2,13 +2,20 @@
 
 ## Operating state
 
-These artifacts define the observability and drill contract for a disabled mainnet execution
-foundation. They do not show that a metric producer, Prometheus, Grafana, paging receiver, or
-incident controller is deployed. They are not authorization to enable a service or place capital.
+These artifacts define the observability and drill contract for the active mainnet canary.
+The repository policy authorizes one capped account at $25 per leg and $25 aggregate per venue. This
+configuration does not prove that a metric producer, Prometheus, Grafana, paging receiver, or
+incident controller is deployed.
 
-No execution flag may be enabled from this runbook. Keep all accounts unfunded and all controls
-`HALTED` until the repository's activation policy, independent reviews, and account readiness gates
-pass. An empty dashboard is missing evidence, not a healthy system.
+All live services are enabled by the Blueprint. Entry remains fail-closed until the exact account is
+`ACTIVE`, both venues publish fresh reconciled state, route and oracle health pass, the execution
+signer has gas, and every enabled service passes its readiness endpoint. An empty dashboard is
+missing evidence, not a healthy system.
+
+Render uses liveness endpoints during deployment because account-scoped readiness cannot pass before
+the first account is provisioned. Before launch, verify `/readyz` on the coordinator, publisher,
+provisioners, and signers, plus `/health` on the quote authority and strategy runner. A successful
+bootstrap health check never substitutes for those readiness results.
 
 The versioned metric contract is
 [`ops/mainnet-live/metrics/contract.v1.json`](../ops/mainnet-live/metrics/contract.v1.json).

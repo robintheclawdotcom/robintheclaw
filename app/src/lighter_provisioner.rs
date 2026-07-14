@@ -21,9 +21,7 @@ pub struct LighterProvisioner {
 pub struct PrepareLink<'a> {
     pub execution_account_id: Uuid,
     pub owner_address: &'a str,
-    pub account_index: i64,
     pub api_key_index: u8,
-    pub nonce: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,12 +160,23 @@ struct ServiceError {
     error: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum LighterProvisionerError {
+    #[error("{0}")]
+    Rejected(String),
+    #[error("{0}")]
+    Conflict(String),
+    #[error("Lighter provisioner is unavailable")]
+    Unavailable,
+}
+
 fn service_error(status: StatusCode, message: &str) -> anyhow::Error {
     match status {
-        StatusCode::CONFLICT | StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND => {
-            anyhow!("Lighter association rejected: {message}")
+        StatusCode::CONFLICT => LighterProvisionerError::Conflict(message.to_string()).into(),
+        StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND => {
+            LighterProvisionerError::Rejected(message.to_string()).into()
         }
-        _ => anyhow!("Lighter provisioner is unavailable"),
+        _ => LighterProvisionerError::Unavailable.into(),
     }
 }
 

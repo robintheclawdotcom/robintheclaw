@@ -37,8 +37,9 @@ func (value *recordingLighterCollector) Collect(_ context.Context, executionID s
 	value.calls = append(value.calls, executionID)
 	value.mu.Unlock()
 	return LighterObservation{
-		AccountIndex: binding.AccountIndex, APIKeyIndex: binding.APIKeyIndex,
+		AccountIndex: binding.AccountIndex, APIKeyIndex: binding.APIKeyIndex, MarketID: binding.MarketID,
 		Nonce: 9, ExpectedNonce: 9, CollateralRaw: "100", MaintenanceRequirementRaw: "25",
+		CollateralMicros: 100_000_000, MaintenanceMarginMicros: 25_000_000,
 		MaintenanceMarginRatioMicros: 4_000_000, NoUnknownOrders: true, NoUnknownPositions: true,
 		CollateralReady: true, Flat: true, RESTReconstructed: true,
 		StateDigest: "lighter", ObservedAt: time.Now().UTC(),
@@ -53,7 +54,9 @@ func (*healthyRobinhoodCollector) Collect(_ context.Context, binding RobinhoodBi
 		SettlementBalanceRaw: "50000000", OwnerGasRaw: "1", SignerGasRaw: "1",
 		AgentEnabled: true, Flat: true, WiringVerified: true, FinalityHealthy: true,
 		FundingReady: true, OwnerGasReady: true, SignerGasReady: true,
-		RiskMode: "ACTIVE", ObservedAt: time.Now().UTC(),
+		SignerNonceAligned: true, SpotConfigVersion: 1, StockDecimals: 18,
+		UIMultiplierE18: "1000000000000000000", NewUIMultiplierE18: "1000000000000000000",
+		OracleHealthy: true, SequencerHealthy: true, RiskMode: "ACTIVE", ObservedAt: time.Now().UTC(),
 	}, nil
 }
 
@@ -105,32 +108,38 @@ func TestRunOnceDiscoversAndRemovesAccountsWithoutRestart(t *testing.T) {
 	assertPolicyEvidence(t, application.bodies[2], true)
 }
 
-func TestReadinessRequiresBothVenuesFlat(t *testing.T) {
+func TestReadinessTracksKnownStateWhilePositionIsOpen(t *testing.T) {
 	application := &recordingSnapshotClient{}
 	service := &Service{application: application}
 	lighter := LighterObservation{
 		Nonce: 9, ExpectedNonce: 9, NoUnknownOrders: true, NoUnknownPositions: true,
 		Flat: false, RESTReconstructed: true,
 	}
-	robinhood := RobinhoodObservation{Flat: true, WiringVerified: true, FinalityHealthy: true}
+	robinhood := RobinhoodObservation{Flat: true, WiringVerified: true, FinalityHealthy: true, SignerNonceAligned: true}
 
 	if err := service.publishReadiness(context.Background(), "account-00000001", true, lighter, robinhood); err != nil {
 		t.Fatal(err)
 	}
-	assertReadinessEvidence(t, application.bodies[0], "reconciled", false)
+	assertReadinessEvidence(t, application.bodies[0], "reconciled", true)
 
 	lighter.Flat = true
 	robinhood.Flat = false
 	if err := service.publishReadiness(context.Background(), "account-00000001", true, lighter, robinhood); err != nil {
 		t.Fatal(err)
 	}
-	assertReadinessEvidence(t, application.bodies[1], "reconciled", false)
+	assertReadinessEvidence(t, application.bodies[1], "reconciled", true)
 
 	robinhood.Flat = true
 	if err := service.publishReadiness(context.Background(), "account-00000001", true, lighter, robinhood); err != nil {
 		t.Fatal(err)
 	}
 	assertReadinessEvidence(t, application.bodies[2], "reconciled", true)
+
+	lighter.NoUnknownPositions = false
+	if err := service.publishReadiness(context.Background(), "account-00000001", true, lighter, robinhood); err != nil {
+		t.Fatal(err)
+	}
+	assertReadinessEvidence(t, application.bodies[3], "reconciled", false)
 }
 
 func assertPolicyEvidence(t *testing.T, body []byte, expected bool) {

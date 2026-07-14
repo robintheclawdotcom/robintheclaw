@@ -9,20 +9,20 @@ import (
 )
 
 type service struct {
-	store             credentialStore
-	envelope          *envelope
-	lighter           lighterClient
-	ttl               time.Duration
-	now               func() time.Time
-	publisherMarketID uint16
+	store               credentialStore
+	envelope            *envelope
+	lighter             lighterClient
+	ttl                 time.Duration
+	now                 func() time.Time
+	publisherMarketID   uint16
+	marketBaseDecimals  uint8
+	marketPriceDecimals uint8
 }
 
 type prepareRequest struct {
 	ExecutionAccountID string `json:"executionAccountId"`
 	OwnerAddress       string `json:"ownerAddress"`
-	AccountIndex       int64  `json:"accountIndex"`
 	APIKeyIndex        uint8  `json:"apiKeyIndex"`
-	Nonce              int64  `json:"nonce"`
 }
 
 type statusRequest struct {
@@ -43,14 +43,32 @@ func (value *service) prepare(ctx context.Context, request prepareRequest) (publ
 	if err != nil {
 		return publicLink{}, err
 	}
-	if err := validateAccount(request.AccountIndex, request.APIKeyIndex); err != nil {
-		return publicLink{}, err
-	}
-	if request.Nonce < 0 {
-		return publicLink{}, errors.New("nonce must not be negative")
+	if request.APIKeyIndex < 4 || request.APIKeyIndex > 254 {
+		return publicLink{}, errors.New("apiKeyIndex must be between 4 and 254")
 	}
 	request.ExecutionAccountID = strings.ToLower(request.ExecutionAccountID)
-	reserved, err := value.store.Reserve(ctx, request.ExecutionAccountID, owner, request.AccountIndex, request.APIKeyIndex, request.Nonce)
+	existing, err := value.store.Latest(ctx, request.ExecutionAccountID)
+	if err == nil && (existing.Status == statusGenerating || existing.Status == statusPending || existing.Status == statusVerifying) {
+		if existing.OwnerAddress != owner || existing.APIKeyIndex != request.APIKeyIndex {
+			return publicLink{}, errBindingMismatch
+		}
+		if existing.Status == statusGenerating {
+			return publicLink{}, errRotationOpen
+		}
+		return existing.public(), nil
+	}
+	if err != nil && !errors.Is(err, errNotFound) {
+		return publicLink{}, err
+	}
+	accountIndex, err := value.lighter.DiscoverEmptySubaccount(ctx, owner)
+	if err != nil {
+		return publicLink{}, err
+	}
+	nonce, err := value.lighter.NextNonce(ctx, accountIndex, request.APIKeyIndex)
+	if err != nil {
+		return publicLink{}, err
+	}
+	reserved, err := value.store.Reserve(ctx, request.ExecutionAccountID, owner, accountIndex, request.APIKeyIndex, nonce)
 	if err != nil {
 		return publicLink{}, err
 	}
@@ -72,7 +90,7 @@ func (value *service) prepare(ctx context.Context, request prepareRequest) (publ
 	secretBytes := []byte(secret)
 	defer zero(secretBytes)
 	record.PublicKey = publicKey
-	record.ChangeNonce = request.Nonce
+	record.ChangeNonce = nonce
 	record.ExpiresAtMS = value.now().Add(value.ttl).UnixMilli()
 	association, err := value.lighter.BuildAssociation(
 		secret,

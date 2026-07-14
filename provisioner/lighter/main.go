@@ -45,12 +45,14 @@ func run() error {
 		}
 		state.store = store
 		state.service = &service{
-			store:             store,
-			envelope:          newEnvelope(awskms.NewFromConfig(aws), value.KMSKeyID),
-			lighter:           newLiveLighterClient(value.APIURL, value.ChainID),
-			ttl:               value.AssociationTTL,
-			now:               time.Now,
-			publisherMarketID: value.PublisherMarketID,
+			store:               store,
+			envelope:            newEnvelope(awskms.NewFromConfig(aws), value.KMSKeyID),
+			lighter:             newLiveLighterClient(value.APIURL, value.ChainID),
+			ttl:                 value.AssociationTTL,
+			now:                 time.Now,
+			publisherMarketID:   value.PublisherMarketID,
+			marketBaseDecimals:  value.MarketBaseDecimals,
+			marketPriceDecimals: value.MarketPriceDecimals,
 		}
 		state.signingSlots = make(chan struct{}, value.SigningMaxConcurrent)
 		state.publisherSlots = make(chan struct{}, value.PublisherMaxConcurrent)

@@ -28,6 +28,8 @@ func TestEnabledProvisionerUsesPrivateDatabaseConfiguration(t *testing.T) {
 	t.Setenv("AWS_KMS_KEY_ID", "alias/lighter")
 	t.Setenv("LIGHTER_CHAIN_ID", "300")
 	t.Setenv("LIGHTER_PUBLISHER_MARKET_ID", "5")
+	t.Setenv("LIGHTER_AAPL_BASE_DECIMALS", "4")
+	t.Setenv("LIGHTER_AAPL_PRICE_DECIMALS", "2")
 	value, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)

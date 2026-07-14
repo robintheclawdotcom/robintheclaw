@@ -10,22 +10,33 @@ import (
 	"time"
 
 	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/elliottech/lighter-go/types/txtypes"
 )
 
 type memoryStore struct {
-	mu       sync.Mutex
-	bindings map[string]binding
-	records  map[string]credential
-	versions map[string][]string
-	nonces   map[string]time.Time
+	mu         sync.Mutex
+	bindings   map[string]binding
+	records    map[string]credential
+	versions   map[string][]string
+	nonces     map[string]time.Time
+	nextNonces map[string]uint64
+	signing    map[string]memorySigningRequest
+}
+
+type memorySigningRequest struct {
+	intentID string
+	digest   string
+	result   *signedTransaction
 }
 
 func newMemoryStore() *memoryStore {
 	return &memoryStore{
-		bindings: make(map[string]binding),
-		records:  make(map[string]credential),
-		versions: make(map[string][]string),
-		nonces:   make(map[string]time.Time),
+		bindings:   make(map[string]binding),
+		records:    make(map[string]credential),
+		versions:   make(map[string][]string),
+		nonces:     make(map[string]time.Time),
+		nextNonces: make(map[string]uint64),
+		signing:    make(map[string]memorySigningRequest),
 	}
 }
 
@@ -35,6 +46,11 @@ func (value *memoryStore) Reserve(_ context.Context, executionID, owner string, 
 	bound, exists := value.bindings[executionID]
 	if exists && (bound.OwnerAddress != owner || bound.AccountIndex != accountIndex || bound.APIKeyIndex != apiKeyIndex) {
 		return reservation{}, errBindingMismatch
+	}
+	for otherExecutionID, other := range value.bindings {
+		if otherExecutionID != executionID && other.AccountIndex == accountIndex {
+			return reservation{}, errAccountBound
+		}
 	}
 	for _, id := range value.versions[executionID] {
 		record := value.records[id]
@@ -196,7 +212,63 @@ func (value *memoryStore) ExpectedNonce(_ context.Context, record credential) (u
 	if !exists || bound.Status != "linked" || bound.ActiveCredentialID != record.ID || record.ChangeNonce < 0 {
 		return 0, errors.New("execution account credential changed during observation")
 	}
+	if next, exists := value.nextNonces[record.ID]; exists {
+		return next, nil
+	}
 	return uint64(record.ChangeNonce) + 1, nil
+}
+
+func (value *memoryStore) ClaimSigningNonce(_ context.Context, record credential, intentID string, nonce uint64, digest string) (*signedTransaction, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	bound, exists := value.bindings[record.ExecutionAccountID]
+	if !exists || bound.Status != "linked" || bound.ActiveCredentialID != record.ID || record.ChangeNonce < 0 {
+		return nil, errors.New("execution account credential changed during nonce claim")
+	}
+	key := fmt.Sprintf("%s:%d", record.ID, nonce)
+	if existing, exists := value.signing[key]; exists {
+		if existing.intentID != intentID || existing.digest != digest {
+			return nil, errors.New("Lighter signing nonce is already bound to another request")
+		}
+		if existing.result == nil {
+			return nil, errors.New("Lighter signing request is claimed but has no durable result")
+		}
+		copy := *existing.result
+		copy.TxInfo = append([]byte(nil), existing.result.TxInfo...)
+		return &copy, nil
+	}
+	for existingKey, existing := range value.signing {
+		if strings.HasPrefix(existingKey, record.ID+":") && existing.result == nil {
+			return nil, errors.New("Lighter signing request is claimed but has no durable result")
+		}
+	}
+	expected, exists := value.nextNonces[record.ID]
+	if !exists {
+		expected = uint64(record.ChangeNonce) + 1
+	}
+	if nonce != expected {
+		return nil, fmt.Errorf("Lighter signing nonce must equal %d", expected)
+	}
+	value.signing[key] = memorySigningRequest{intentID: intentID, digest: digest}
+	value.nextNonces[record.ID] = expected + 1
+	return nil, nil
+}
+
+func (value *memoryStore) CompleteSigningRequest(_ context.Context, record credential, intentID string, nonce uint64,
+	digest string, signed signedTransaction) error {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	key := fmt.Sprintf("%s:%d", record.ID, nonce)
+	request, exists := value.signing[key]
+	if !exists || request.intentID != intentID || request.digest != digest || request.result != nil ||
+		validateSignedResult(record, intentID, signed.TxType, signed) != nil {
+		return errors.New("complete Lighter signing request")
+	}
+	copy := signed
+	copy.TxInfo = append([]byte(nil), signed.TxInfo...)
+	request.result = &copy
+	value.signing[key] = request
+	return nil
 }
 
 func (value *memoryStore) VerifyActive(_ context.Context, record credential) error {
@@ -279,12 +351,44 @@ func copyStringMap(source map[string]string) map[string]string {
 type fakeLighter struct {
 	mu                   sync.Mutex
 	generated            int
+	discoveredAccount    int64
+	discoveryErr         error
+	discoveryCalls       int
+	nextNonce            int64
+	nonceErr             error
+	nonceCalls           int
 	recoveredOwner       string
 	registered           string
 	broadcastErr         error
 	broadcasts           int
 	observedAccountIndex int64
 	observeErr           error
+}
+
+func (value *fakeLighter) DiscoverEmptySubaccount(_ context.Context, _ string) (int64, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	value.discoveryCalls++
+	if value.discoveryErr != nil {
+		return 0, value.discoveryErr
+	}
+	if value.discoveredAccount == 0 {
+		return 42, nil
+	}
+	return value.discoveredAccount, nil
+}
+
+func (value *fakeLighter) NextNonce(_ context.Context, _ int64, _ uint8) (int64, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	value.nonceCalls++
+	if value.nonceErr != nil {
+		return 0, value.nonceErr
+	}
+	if value.nextNonce == 0 {
+		return 7, nil
+	}
+	return value.nextNonce, nil
 }
 
 func (value *fakeLighter) GenerateKey() (string, string, error) {
@@ -346,24 +450,20 @@ func (value *fakeLighter) ObserveAccount(_ context.Context, _ string, accountInd
 }
 
 func (*fakeLighter) SignCreateOrder(_ string, accountIndex int64, apiKeyIndex uint8, request createOrderRequest) (signedTransaction, error) {
-	return fakeSignedTransaction(accountIndex, apiKeyIndex, request.TransactOptions.Nonce), nil
-}
-
-func (*fakeLighter) SignModifyOrder(_ string, accountIndex int64, apiKeyIndex uint8, request modifyOrderRequest) (signedTransaction, error) {
-	return fakeSignedTransaction(accountIndex, apiKeyIndex, request.TransactOptions.Nonce), nil
+	return fakeSignedTransaction(accountIndex, apiKeyIndex, request.TransactOptions.Nonce, txtypes.TxTypeL2CreateOrder), nil
 }
 
 func (*fakeLighter) SignCancelOrder(_ string, accountIndex int64, apiKeyIndex uint8, request cancelOrderRequest) (signedTransaction, error) {
-	return fakeSignedTransaction(accountIndex, apiKeyIndex, request.TransactOptions.Nonce), nil
+	return fakeSignedTransaction(accountIndex, apiKeyIndex, request.TransactOptions.Nonce, txtypes.TxTypeL2CancelOrder), nil
 }
 
 func (*fakeLighter) SignCancelAll(_ string, accountIndex int64, apiKeyIndex uint8, request cancelAllRequest) (signedTransaction, error) {
-	return fakeSignedTransaction(accountIndex, apiKeyIndex, request.TransactOptions.Nonce), nil
+	return fakeSignedTransaction(accountIndex, apiKeyIndex, request.TransactOptions.Nonce, txtypes.TxTypeL2CancelAllOrders), nil
 }
 
-func fakeSignedTransaction(accountIndex int64, apiKeyIndex uint8, nonce int64) signedTransaction {
+func fakeSignedTransaction(accountIndex int64, apiKeyIndex uint8, nonce int64, txType uint8) signedTransaction {
 	return signedTransaction{
-		TxType: 14,
+		TxType: txType,
 		TxHash: fmt.Sprintf("0x%064x", nonce),
 		TxInfo: []byte(fmt.Sprintf(`{"AccountIndex":%d,"ApiKeyIndex":%d,"Nonce":%d}`, accountIndex, apiKeyIndex, nonce)),
 	}

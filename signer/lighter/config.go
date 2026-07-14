@@ -21,6 +21,9 @@ type config struct {
 	provisionerURL        string
 	bridgeHMACKey         []byte
 	bridgeCallerID        string
+	marketIndex           int16
+	baseDecimals          uint8
+	priceDecimals         uint8
 }
 
 func loadConfig() (config, error) {
@@ -58,6 +61,21 @@ func loadConfig() (config, error) {
 	if bytes.Equal(value.apiHMACKey, value.bridgeHMACKey) {
 		return config{}, errors.New("coordinator and provisioner bridge HMAC keys must be distinct")
 	}
+	market, err := strconv.ParseUint(os.Getenv("LIGHTER_AAPL_MARKET_INDEX"), 10, 15)
+	if err != nil || market == 0 {
+		return config{}, errors.New("LIGHTER_AAPL_MARKET_INDEX must pin the verified AAPL perpetual")
+	}
+	value.marketIndex = int16(market)
+	baseDecimals, err := strconv.ParseUint(os.Getenv("LIGHTER_AAPL_BASE_DECIMALS"), 10, 8)
+	if err != nil || baseDecimals > 18 {
+		return config{}, errors.New("LIGHTER_AAPL_BASE_DECIMALS must be between 0 and 18")
+	}
+	value.baseDecimals = uint8(baseDecimals)
+	priceDecimals, err := strconv.ParseUint(os.Getenv("LIGHTER_AAPL_PRICE_DECIMALS"), 10, 8)
+	if err != nil || priceDecimals > 18 {
+		return config{}, errors.New("LIGHTER_AAPL_PRICE_DECIMALS must be between 0 and 18")
+	}
+	value.priceDecimals = uint8(priceDecimals)
 	if raw := os.Getenv("SIGNER_MAX_REQUESTS_PER_MINUTE"); raw != "" {
 		parsed, err := strconv.ParseUint(raw, 10, 16)
 		if err != nil || parsed == 0 || parsed > 600 {
