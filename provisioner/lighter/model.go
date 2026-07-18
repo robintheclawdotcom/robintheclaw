@@ -17,6 +17,10 @@ const (
 	statusLinked     = "linked"
 	statusSuperseded = "superseded"
 	statusBlocked    = "blocked"
+	statusRevoked    = "revoked"
+
+	purposeAssociation = "association"
+	purposeRevocation  = "revocation"
 )
 
 var (
@@ -36,34 +40,43 @@ type binding struct {
 }
 
 type credential struct {
-	ID                 string
-	ExecutionAccountID string
-	OwnerAddress       string
-	AccountIndex       int64
-	APIKeyIndex        uint8
-	Version            int64
-	PublicKey          string
-	EncryptedDataKey   []byte
-	CipherNonce        []byte
-	Ciphertext         []byte
-	AADDigest          []byte
-	KMSKeyID           string
-	ChangeNonce        int64
-	ExpiresAtMS        int64
-	TxType             uint8
-	TxHash             string
-	TxInfo             []byte
-	MessageToSign      string
-	L1Signature        string
-	Status             string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	ID                   string
+	ExecutionAccountID   string
+	OwnerAddress         string
+	AccountIndex         int64
+	APIKeyIndex          uint8
+	Version              int64
+	Purpose              string
+	ReplacesCredentialID string
+	PublicKey            string
+	EncryptedDataKey     []byte
+	CipherNonce          []byte
+	Ciphertext           []byte
+	AADDigest            []byte
+	KMSKeyID             string
+	ChangeNonce          int64
+	ExpiresAtMS          int64
+	TxType               uint8
+	TxHash               string
+	TxInfo               []byte
+	MessageToSign        string
+	L1Signature          string
+	RegisteredPublicKey  string
+	Status               string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 type reservation struct {
 	Credential credential
 	Rotation   bool
 	Existing   bool
+}
+
+type revocationReservation struct {
+	Active    credential
+	Tombstone credential
+	Existing  bool
 }
 
 type sealedSecret struct {
@@ -79,6 +92,41 @@ type association struct {
 	TxHash        string
 	TxInfo        []byte
 	MessageToSign string
+}
+
+type publicRevocation struct {
+	RevocationID        string `json:"revocationId"`
+	ExecutionAccountID  string `json:"executionAccountId"`
+	OwnerAddress        string `json:"ownerAddress"`
+	AccountIndex        int64  `json:"accountIndex"`
+	APIKeyIndex         uint8  `json:"apiKeyIndex"`
+	TombstonePublicKey  string `json:"tombstonePublicKey,omitempty"`
+	Status              string `json:"status"`
+	MessageToSign       string `json:"messageToSign,omitempty"`
+	TransactionHash     string `json:"transactionHash,omitempty"`
+	RegisteredPublicKey string `json:"registeredPublicKey,omitempty"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
+}
+
+func (value credential) revocationPublic() publicRevocation {
+	result := publicRevocation{
+		RevocationID:        value.ID,
+		ExecutionAccountID:  value.ExecutionAccountID,
+		OwnerAddress:        value.OwnerAddress,
+		AccountIndex:        value.AccountIndex,
+		APIKeyIndex:         value.APIKeyIndex,
+		TombstonePublicKey:  value.PublicKey,
+		Status:              value.Status,
+		TransactionHash:     value.TxHash,
+		RegisteredPublicKey: value.RegisteredPublicKey,
+		CreatedAt:           value.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:           value.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if value.Status == statusPending || value.Status == statusGenerating {
+		result.MessageToSign = value.MessageToSign
+	}
+	return result
 }
 
 type publicLink struct {
@@ -145,6 +193,16 @@ func validateAccount(accountIndex int64, apiKeyIndex uint8) error {
 }
 
 func aadFor(value credential) []byte {
+	if value.Purpose == purposeRevocation {
+		return []byte(fmt.Sprintf(
+			"lighter-credential-revocation/v1\n%s\n%d\n%d\n%d\n%s",
+			strings.ToLower(value.ExecutionAccountID),
+			value.AccountIndex,
+			value.APIKeyIndex,
+			value.Version,
+			strings.ToLower(value.ReplacesCredentialID),
+		))
+	}
 	return []byte(fmt.Sprintf(
 		"lighter-credential/v1\n%s\n%d\n%d\n%d",
 		strings.ToLower(value.ExecutionAccountID),
@@ -155,11 +213,16 @@ func aadFor(value credential) []byte {
 }
 
 func encryptionContext(value credential) map[string]string {
-	return map[string]string{
+	result := map[string]string{
 		"service":            "lighter-provisioner",
 		"executionAccountId": strings.ToLower(value.ExecutionAccountID),
 		"accountIndex":       fmt.Sprintf("%d", value.AccountIndex),
 		"apiKeyIndex":        fmt.Sprintf("%d", value.APIKeyIndex),
 		"credentialVersion":  fmt.Sprintf("%d", value.Version),
 	}
+	if value.Purpose == purposeRevocation {
+		result["purpose"] = purposeRevocation
+		result["replacesCredentialId"] = strings.ToLower(value.ReplacesCredentialID)
+	}
+	return result
 }

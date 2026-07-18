@@ -67,7 +67,8 @@ func TestServicePinsEntryPolicyAndSignsExecutableQuotes(t *testing.T) {
 		adapter.seen.RequestID != request.RequestID || adapter.seen.MarketManifest != request.MarketManifest {
 		t.Fatal("adapter did not receive fixed account-scoped request")
 	}
-	if quote.StrategyManifestSHA256 != protocol.StrategyManifestSHA256 || quote.Spot.StockToken != protocol.StockToken {
+	if quote.StrategyManifestSHA256 != protocol.StrategyManifestSHA256 ||
+		quote.TargetStrategyManifestSHA256 != "" || quote.Spot.StockToken != protocol.StockToken {
 		t.Fatal("quote did not pin canonical strategy and route")
 	}
 	if len(publisher.quotes) != 1 || publisher.quotes[0].Source != "lighter-auth" ||
@@ -82,7 +83,12 @@ func TestServicePinsEntryPolicyAndSignsExecutableQuotes(t *testing.T) {
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"unwind_phase", "perp_unwind_base_amount", "perp_unwind_limit_price"} {
+	for _, field := range []string{
+		"target_strategy_manifest_sha256",
+		"unwind_phase",
+		"perp_unwind_base_amount",
+		"perp_unwind_limit_price",
+	} {
 		if _, exists := fields[field]; exists {
 			t.Fatalf("entry publication included exit-only field %q", field)
 		}
@@ -106,25 +112,33 @@ func TestServicePersistsExitAuthorityBeforeSigning(t *testing.T) {
 	request := protocol.QuoteRequest{
 		RequestID: testHash("exit-request"), ExecutionAccountID: "account-canary-1",
 		SourceEvaluationID: testHash("exit-evaluation"), MarketManifest: testHash("market"),
-		IntentID: testHash("open-intent"), Action: protocol.ActionUnwind, RequestedAtMS: 99_500,
+		IntentID:                     testHash("open-intent"),
+		TargetStrategyManifestSHA256: protocol.PreviousStrategyManifestSHA256,
+		Action:                       protocol.ActionUnwind, RequestedAtMS: 99_500,
 	}
 	quote, err := service.Quote(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(publisher.quotes) != 1 || adapter.seen.IntentID != request.IntentID {
+	if len(publisher.quotes) != 1 || adapter.seen.IntentID != request.IntentID ||
+		adapter.seen.TargetStrategyManifestSHA256 != request.TargetStrategyManifestSHA256 {
 		t.Fatal("exit quote was signed without exact coordinator publication")
 	}
 	persisted := publisher.quotes[0]
 	if persisted.ExecutionAccountID != request.ExecutionAccountID || persisted.IntentID != request.IntentID ||
+		persisted.StrategyManifestSHA256 != protocol.StrategyManifestSHA256 ||
+		persisted.TargetStrategyManifestSHA256 != request.TargetStrategyManifestSHA256 ||
 		persisted.RouteSHA256 != protocol.RouteSHA256 || persisted.MarketManifest != request.MarketManifest || persisted.LighterMarketIndex != 101 ||
 		persisted.SpotUnwindAmountIn != result.Spot.StockAmount || persisted.SpotUnwindExpectedAmountOut != result.Spot.SettlementAmount ||
-		persisted.UnwindPhase != result.Perp.Phase || persisted.PerpUnwindBaseAmount != result.Perp.BaseAmount ||
+		persisted.UnwindPhase != result.Perp.Phase || persisted.PerpUnwindBaseAmount == nil ||
+		*persisted.PerpUnwindBaseAmount != result.Perp.BaseAmount ||
 		persisted.PerpUnwindLimitPrice != result.Perp.LimitPrice ||
 		persisted.ExpectedUIMultiplier != result.Spot.ExpectedUIMultiplier ||
 		persisted.MinOracleRoundID != result.Spot.MinOracleRoundID ||
 		persisted.SubmissionDeadlineMS != int64(result.ExpiresAtMS) || quote.ExitAuthority == nil ||
-		quote.ExitAuthority.PayloadSHA256 == "" || quote.Perp.BaseAmount != 250_000 {
+		quote.ExitAuthority.PayloadSHA256 == "" || quote.Perp.BaseAmount != 250_000 ||
+		quote.StrategyManifestSHA256 != protocol.StrategyManifestSHA256 ||
+		quote.TargetStrategyManifestSHA256 != request.TargetStrategyManifestSHA256 {
 		t.Fatal("persisted exit authority omitted a bound field")
 	}
 	if err := quote.Verify(publicKey, 101, 100_000); err != nil {
@@ -140,10 +154,90 @@ func TestServiceNeverSignsUnpersistedExit(t *testing.T) {
 	_, err := service.Quote(context.Background(), protocol.QuoteRequest{
 		RequestID: testHash("exit-request"), ExecutionAccountID: "account-canary-1",
 		SourceEvaluationID: testHash("exit-evaluation"), MarketManifest: testHash("market"),
-		IntentID: testHash("open-intent"), Action: protocol.ActionUnwind, RequestedAtMS: 99_500,
+		IntentID: testHash("open-intent"), TargetStrategyManifestSHA256: protocol.StrategyManifestSHA256,
+		Action: protocol.ActionUnwind, RequestedAtMS: 99_500,
 	})
 	if !errors.Is(err, ErrMarketQuoteAmbiguous) {
 		t.Fatalf("unpersisted exit quote was not rejected: %v", err)
+	}
+}
+
+func TestServiceSerializesSpotOnlyZeroPerpBase(t *testing.T) {
+	_, privateKey, _ := ed25519.GenerateKey(nil)
+	result := adapterResult(protocol.ActionUnwind)
+	result.Perp.Phase = "spot_only"
+	result.Perp.BaseAmount = 0
+	publisher := &fakePublisher{}
+	service, _ := NewService(&fakeAdapter{result: result}, publisher, privateKey, 101)
+	service.now = func() time.Time { return time.UnixMilli(100_000) }
+	_, err := service.Quote(context.Background(), protocol.QuoteRequest{
+		RequestID: testHash("spot-only-request"), ExecutionAccountID: "account-canary-1",
+		SourceEvaluationID: testHash("spot-only-evaluation"), MarketManifest: testHash("market"),
+		IntentID: testHash("open-intent"), TargetStrategyManifestSHA256: protocol.StrategyManifestSHA256,
+		Action: protocol.ActionUnwind, RequestedAtMS: 99_500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(publisher.quotes[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if string(fields["perp_unwind_base_amount"]) != "0" {
+		t.Fatalf("spot-only publication omitted explicit zero perp base: %s", encoded)
+	}
+}
+
+func TestServiceRejectsSpotOnlyNonzeroPerpBase(t *testing.T) {
+	_, privateKey, _ := ed25519.GenerateKey(nil)
+	result := adapterResult(protocol.ActionUnwind)
+	result.Perp.Phase = "spot_only"
+	result.Perp.BaseAmount = 1
+	service, _ := NewService(&fakeAdapter{result: result}, &fakePublisher{}, privateKey, 101)
+	service.now = func() time.Time { return time.UnixMilli(100_000) }
+	_, err := service.Quote(context.Background(), protocol.QuoteRequest{
+		RequestID: testHash("invalid-spot-only-request"), ExecutionAccountID: "account-canary-1",
+		SourceEvaluationID: testHash("invalid-spot-only-evaluation"), MarketManifest: testHash("market"),
+		IntentID: testHash("open-intent"), TargetStrategyManifestSHA256: protocol.StrategyManifestSHA256,
+		Action: protocol.ActionUnwind, RequestedAtMS: 99_500,
+	})
+	if err == nil {
+		t.Fatal("spot-only adapter result accepted a nonzero perp base")
+	}
+}
+
+func TestServiceRejectsInvalidTargetManifestBindings(t *testing.T) {
+	_, privateKey, _ := ed25519.GenerateKey(nil)
+	service, _ := NewService(
+		&fakeAdapter{result: adapterResult(protocol.ActionUnwind)},
+		&fakePublisher{},
+		privateKey,
+		101,
+	)
+	service.now = func() time.Time { return time.UnixMilli(100_000) }
+	base := protocol.QuoteRequest{
+		RequestID: testHash("target-request"), ExecutionAccountID: "account-canary-1",
+		SourceEvaluationID: testHash("target-evaluation"), MarketManifest: testHash("market"),
+		IntentID: testHash("open-intent"), Action: protocol.ActionUnwind, RequestedAtMS: 99_500,
+	}
+	for _, target := range []string{"", testHash("unknown-target")[2:]} {
+		request := base
+		request.TargetStrategyManifestSHA256 = target
+		if _, err := service.Quote(context.Background(), request); err == nil {
+			t.Fatalf("invalid unwind target %q was accepted", target)
+		}
+	}
+
+	entry := base
+	entry.IntentID = ""
+	entry.TargetStrategyManifestSHA256 = protocol.PreviousStrategyManifestSHA256
+	entry.Action = protocol.ActionEntry
+	if _, err := service.Quote(context.Background(), entry); err == nil {
+		t.Fatal("entry request accepted an unwind target")
 	}
 }
 

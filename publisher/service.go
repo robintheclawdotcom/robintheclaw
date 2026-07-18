@@ -124,8 +124,13 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	}
 	s.metrics.BeginCycle(discovery.Accounts)
 	if len(discovery.Accounts) == 0 {
-		s.ready.Store(false)
-		return errors.New("no active execution accounts")
+		if len(discovery.RejectedIDs) != 0 {
+			s.ready.Store(false)
+			return errors.New("execution account discovery rejected bindings")
+		}
+		s.ready.Store(true)
+		s.lastSuccess.Store(time.Now().Unix())
+		return nil
 	}
 	allSucceeded := len(discovery.RejectedIDs) == 0
 	for _, account := range discovery.Accounts {
@@ -198,7 +203,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 
 func (s *Service) publishAccount(ctx context.Context, account AccountBinding, lighter LighterObservation, robinhood RobinhoodObservation) error {
 	now := time.Now().UTC()
-	if !fresh(lighter.ObservedAt, now) || !fresh(robinhood.ObservedAt, now) {
+	if !fresh(lighter.ObservedAt, now) || !robinhood.sourceBound() || !fresh(robinhood.ObservedAt, now) {
 		return errors.New("upstream evidence expired before publication")
 	}
 	lighterSnapshot := CoordinatorSnapshot{
@@ -212,7 +217,8 @@ func (s *Service) publishAccount(ctx context.Context, account AccountBinding, li
 			CollateralMicros:             lighter.CollateralMicros, MaintenanceMarginMicros: lighter.MaintenanceMarginMicros,
 			Flat: lighter.Flat,
 		},
-		ObservedAtMS: lighter.ObservedAt.UnixMilli(), ReceivedAtMS: now.UnixMilli(), ExpiresAtMS: now.Add(5 * time.Second).UnixMilli(),
+		ObservedAtMS: lighter.ObservedAt.UnixMilli(), ReceivedAtMS: now.UnixMilli(),
+		ExpiresAtMS: lighter.ObservedAt.Add(maxEvidenceAge).UnixMilli(),
 	}
 	robinhoodSnapshot := CoordinatorSnapshot{
 		ExecutionAccountID: account.ExecutionAccountID, Source: "robinhood-chain", SourceSession: s.session,
@@ -221,16 +227,25 @@ func (s *Service) publishAccount(ctx context.Context, account AccountBinding, li
 			VaultAddress: robinhood.Vault, SignerAddress: robinhood.Signer, FundingReady: robinhood.FundingReady,
 			WiringVerified: robinhood.WiringVerified, FinalityHealthy: robinhood.FinalityHealthy,
 			Flat: robinhood.Flat, OwnerAddress: robinhood.Owner, AgentEnabled: robinhood.AgentEnabled,
-			RiskMode: robinhood.RiskMode, SettlementBalanceRaw: robinhood.SettlementBalanceRaw,
-			NonceAligned: robinhood.SignerNonceAligned, SpotConfigVersion: robinhood.SpotConfigVersion,
+			FinalizedAgentAddress: robinhood.FinalizedAgentAddress,
+			FinalizedAgentEnabled: robinhood.FinalizedAgentEnabled,
+			FinalizedAgentRevoked: robinhood.FinalizedAgentRevoked,
+			GlobalMode:            robinhood.GlobalMode, FinalizedGlobalMode: robinhood.FinalizedGlobalMode,
+			RiskMode: robinhood.RiskMode, FinalizedRiskMode: robinhood.FinalizedRiskMode,
+			SettlementBalanceRaw: robinhood.SettlementBalanceRaw,
+			NonceAligned:         robinhood.SignerNonceAligned, SpotConfigVersion: robinhood.SpotConfigVersion,
 			StockDecimals: robinhood.StockDecimals, UIMultiplierE18: robinhood.UIMultiplierE18,
 			NewUIMultiplierE18: robinhood.NewUIMultiplierE18, OraclePaused: robinhood.OraclePaused,
 			OracleHealthy: robinhood.OracleHealthy, SequencerHealthy: robinhood.SequencerHealthy,
-			SignerGasReady: robinhood.SignerGasReady,
+			SignerGasReady:  robinhood.SignerGasReady,
+			FinalizedNumber: robinhood.FinalizedNumber, FinalizedHash: robinhood.FinalizedHash,
+			FinalizedTimestamp: robinhood.FinalizedTimestamp, SourceBlockNumber: robinhood.SourceBlockNumber,
+			SourceBlockHash: robinhood.SourceBlockHash, SourceBlockTimestamp: robinhood.SourceBlockTimestamp,
 		},
-		ObservedAtMS: robinhood.ObservedAt.UnixMilli(), ReceivedAtMS: now.UnixMilli(), ExpiresAtMS: now.Add(5 * time.Second).UnixMilli(),
+		ObservedAtMS: robinhood.ObservedAt.UnixMilli(), ReceivedAtMS: now.UnixMilli(),
+		ExpiresAtMS: robinhood.ObservedAt.Add(maxEvidenceAge).UnixMilli(),
 	}
-	for _, snapshot := range []CoordinatorSnapshot{lighterSnapshot, robinhoodSnapshot} {
+	for _, snapshot := range []CoordinatorSnapshot{robinhoodSnapshot, lighterSnapshot} {
 		body, err := json.Marshal(snapshot)
 		if err != nil {
 			return err
@@ -251,21 +266,23 @@ func (s *Service) publishReadiness(ctx context.Context, accountID string, policy
 		Lighter   LighterObservation
 		Robinhood RobinhoodObservation
 	}{lighter, robinhood})
+	reconciledAt := earlierTime(lighter.ObservedAt, robinhood.ObservedAt)
 	reconciled := lighter.RESTReconstructed && lighter.Nonce == lighter.ExpectedNonce &&
 		lighter.NoUnknownOrders && lighter.NoUnknownPositions &&
 		robinhood.WiringVerified && robinhood.FinalityHealthy && robinhood.SignerNonceAligned
+	entryAuthorized := robinhood.entryAuthorized()
 	checks := []ReadinessEvidence{
-		readiness("execution_gas_ready", robinhood.SignerGasReady, "robinhood-dual-rpc", digest, now),
-		readiness("lighter_funded", lighter.CollateralReady, "lighter-auth-rest", digest, now),
-		readiness("lighter_linked", lighter.RESTReconstructed && lighter.Nonce == lighter.ExpectedNonce, "lighter-auth-rest", digest, now),
-		readiness("policy_active", policyActive, "coordinator-account-policy", EvidenceDigest(struct {
+		readiness("execution_gas_ready", robinhood.SignerGasReady, "robinhood-dual-rpc", digest, robinhood.ObservedAt),
+		readiness("lighter_funded", lighter.CollateralReady, "lighter-auth-rest", digest, lighter.ObservedAt),
+		readiness("lighter_linked", lighter.RESTReconstructed && lighter.Nonce == lighter.ExpectedNonce, "lighter-auth-rest", digest, lighter.ObservedAt),
+		readiness("policy_active", policyActive && entryAuthorized, "coordinator-account-policy", EvidenceDigest(struct {
 			ExecutionAccountID string
 			Active             bool
-		}{accountID, policyActive}), now),
-		readiness("reconciled", reconciled, "account-state-reconciler", digest, now),
-		readiness("robinhood_deployed", robinhood.WiringVerified && robinhood.FinalityHealthy, "robinhood-dual-rpc", digest, now),
-		readiness("robinhood_funded", robinhood.FundingReady, "robinhood-dual-rpc", digest, now),
-		readiness("user_gas_ready", robinhood.OwnerGasReady, "robinhood-dual-rpc", digest, now),
+		}{accountID, policyActive && entryAuthorized}), now),
+		readiness("reconciled", reconciled, "account-state-reconciler", digest, reconciledAt),
+		readiness("robinhood_deployed", robinhood.WiringVerified && robinhood.FinalityHealthy && entryAuthorized, "robinhood-dual-rpc", digest, robinhood.ObservedAt),
+		readiness("robinhood_funded", robinhood.FundingReady, "robinhood-dual-rpc", digest, robinhood.ObservedAt),
+		readiness("user_gas_ready", robinhood.OwnerGasReady, "robinhood-dual-rpc", digest, robinhood.ObservedAt),
 	}
 	body, err := json.Marshal(ReadinessSnapshot{ExecutionAccountID: accountID, Evidence: checks})
 	if err != nil {
@@ -291,8 +308,18 @@ func (s *Service) publishBlockedReadiness(ctx context.Context, accountID, source
 	return s.application.Post(ctx, "/internal/v1/readiness", body)
 }
 
-func readiness(name string, ready bool, source, digest string, now time.Time) ReadinessEvidence {
-	return ReadinessEvidence{CheckName: name, Ready: ready, Source: source, EvidenceDigest: digest, ObservedAt: now, ExpiresAt: now.Add(5 * time.Second)}
+func readiness(name string, ready bool, source, digest string, observedAt time.Time) ReadinessEvidence {
+	return ReadinessEvidence{
+		CheckName: name, Ready: ready, Source: source, EvidenceDigest: digest,
+		ObservedAt: observedAt, ExpiresAt: observedAt.Add(maxEvidenceAge),
+	}
+}
+
+func earlierTime(left, right time.Time) time.Time {
+	if left.Before(right) {
+		return left
+	}
+	return right
 }
 
 func (s *Service) nextSequence(key string) int64 {

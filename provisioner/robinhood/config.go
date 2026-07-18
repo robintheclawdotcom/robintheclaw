@@ -17,6 +17,7 @@ import (
 
 type config struct {
 	Enabled              bool
+	RunMigrations        bool
 	ListenAddress        string
 	DatabaseURL          string
 	APIHMACKey           []byte
@@ -36,22 +37,32 @@ type config struct {
 	SpotAdapterCodeHash  common.Hash
 	FinalityBlocks       uint64
 	RequestTimeout       time.Duration
-	KMSAliasPrefix       string
+	KMSControlPlaneARN   string
 	MaxRequestsPerMinute uint16
 }
 
 func loadConfig() (config, error) {
 	value := config{
 		Enabled:              strings.EqualFold(os.Getenv("ROBINHOOD_PROVISIONER_ENABLED"), "true"),
+		RunMigrations:        true,
 		ListenAddress:        envOr("LISTEN_ADDRESS", "127.0.0.1:8080"),
 		ChainID:              big.NewInt(4663),
 		FinalityBlocks:       64,
 		RequestTimeout:       20 * time.Second,
-		KMSAliasPrefix:       "alias/robinhood/execution/",
 		MaxRequestsPerMinute: 60,
 	}
 	if !value.Enabled {
 		return value, nil
+	}
+	if raw := os.Getenv("ROBINHOOD_PROVISIONER_RUN_MIGRATIONS"); raw != "" {
+		switch raw {
+		case "true":
+			value.RunMigrations = true
+		case "false":
+			value.RunMigrations = false
+		default:
+			return config{}, errors.New("ROBINHOOD_PROVISIONER_RUN_MIGRATIONS must be true or false")
+		}
 	}
 	var err error
 	value.APIHMACKey, err = decodeKey("ROBINHOOD_PROVISIONER_HMAC_KEY")
@@ -114,11 +125,9 @@ func loadConfig() (config, error) {
 		}
 		value.FinalityBlocks = parsed
 	}
-	if raw := os.Getenv("ROBINHOOD_KMS_ALIAS_PREFIX"); raw != "" {
-		if !strings.HasPrefix(raw, "alias/") || !strings.HasSuffix(raw, "/") || len(raw) > 128 {
-			return config{}, errors.New("ROBINHOOD_KMS_ALIAS_PREFIX must be an alias path ending in slash")
-		}
-		value.KMSAliasPrefix = raw
+	value.KMSControlPlaneARN = os.Getenv("ROBINHOOD_KMS_PROVISION_FUNCTION_ARN")
+	if !validLambdaVersionARN(value.KMSControlPlaneARN) {
+		return config{}, errors.New("ROBINHOOD_KMS_PROVISION_FUNCTION_ARN must be a published AWS Lambda version ARN")
 	}
 	if raw := os.Getenv("PROVISIONER_MAX_REQUESTS_PER_MINUTE"); raw != "" {
 		parsed, err := strconv.ParseUint(raw, 10, 16)
@@ -128,6 +137,37 @@ func loadConfig() (config, error) {
 		value.MaxRequestsPerMinute = uint16(parsed)
 	}
 	return value, nil
+}
+
+func validLambdaVersionARN(value string) bool {
+	parts := strings.Split(value, ":")
+	if len(parts) != 8 || parts[0] != "arn" || parts[2] != "lambda" || parts[5] != "function" {
+		return false
+	}
+	if parts[1] != "aws" && parts[1] != "aws-cn" && parts[1] != "aws-us-gov" {
+		return false
+	}
+	if len(parts[3]) < 5 || len(parts[4]) != 12 || parts[6] == "" || len(parts[6]) > 64 {
+		return false
+	}
+	for _, character := range parts[3] {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+			return false
+		}
+	}
+	for _, character := range parts[4] {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	for _, character := range parts[6] {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && character != '-' && character != '_' {
+			return false
+		}
+	}
+	version, err := strconv.ParseUint(parts[7], 10, 64)
+	return err == nil && version > 0 && parts[7][0] != '0'
 }
 
 func decodeKey(name string) ([]byte, error) {

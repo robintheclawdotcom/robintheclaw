@@ -116,7 +116,7 @@ func (s *signerServer) routes() http.Handler {
 	mux.Handle("POST /v1/sign/create-order", s.authorize(http.HandlerFunc(s.createOrder)))
 	mux.Handle("POST /v1/sign/cancel-order", s.authorize(http.HandlerFunc(s.cancelOrder)))
 	mux.Handle("POST /v1/sign/cancel-all", s.authorize(http.HandlerFunc(s.cancelAll)))
-	return securityHeaders(mux)
+	return signedResponses(securityHeaders(mux), s.config.callerID, s.config.apiHMACKey)
 }
 
 func (s *signerServer) livez(w http.ResponseWriter, _ *http.Request) {
@@ -245,6 +245,56 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(w, r)
 	})
+}
+
+type bufferedResponse struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (response *bufferedResponse) Header() http.Header {
+	return response.header
+}
+
+func (response *bufferedResponse) WriteHeader(status int) {
+	if response.status == 0 {
+		response.status = status
+	}
+}
+
+func (response *bufferedResponse) Write(body []byte) (int, error) {
+	if response.status == 0 {
+		response.status = http.StatusOK
+	}
+	return response.body.Write(body)
+}
+
+func signedResponses(next http.Handler, caller string, key []byte) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buffered := &bufferedResponse{header: make(http.Header)}
+		next.ServeHTTP(buffered, r)
+		if buffered.status == 0 {
+			buffered.status = http.StatusOK
+		}
+		for name, values := range buffered.header {
+			w.Header()[name] = append([]string(nil), values...)
+		}
+		w.Header().Set(
+			"X-RTC-Response-Signature",
+			signResponse(key, r.URL.Path, caller, r.Header.Get("X-RTC-Nonce"), buffered.status, buffered.body.Bytes()),
+		)
+		w.WriteHeader(buffered.status)
+		_, _ = w.Write(buffered.body.Bytes())
+	})
+}
+
+func signResponse(key []byte, path, caller, nonce string, status int, body []byte) string {
+	digest := sha256.Sum256(body)
+	canonical := fmt.Sprintf("RESPONSE\n%s\n%s\n%s\n%d\n%x", path, caller, nonce, status, digest)
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(canonical))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func (s *signerServer) createOrder(w http.ResponseWriter, r *http.Request) {

@@ -82,7 +82,7 @@ export function validateEngineeringCanary({ evidence, audit, migration, policy }
     throw new Error("canary migration is not bound to the canonical evidence and audit");
   }
   if (!migration.includes("'approval_type', 'engineering_canary'")
-      || !migration.includes("'internal-release-audit-2026-07-14'")) {
+      || !migration.includes("'internal-release-audit-2026-07-17'")) {
     throw new Error("canary migration approval identity is invalid");
   }
   if (policy.rolloutStage !== "canary" || !policy.executionEnabled || !policy.capitalActivationAllowed) {
@@ -107,10 +107,10 @@ function main() {
   const result = validateEngineeringCanary({
     evidence: JSON.parse(readFileSync(join(root, "config", "engineering-canary-evidence.json"), "utf8")),
     audit: readFileSync(join(root, "docs", "production-audit-mainnet-live-execution.md")),
-    migration: readFileSync(join(root, "coordinator", "migrations", "0016_enable_basis_aapl_canary.sql"), "utf8"),
+    migration: readFileSync(join(root, "coordinator", "migrations", "0017_refresh_basis_aapl_canary.sql"), "utf8"),
     policy: JSON.parse(readFileSync(join(root, "config", "mainnet-live-policy.json"), "utf8")),
   });
-  console.log(`engineering canary evidence is valid (${result.evidenceHash})`);
+  console.log(`static engineering canary evidence is valid (${result.evidenceHash}); live readiness was not evaluated`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();

@@ -108,8 +108,8 @@ settings.
 The authenticated Rust routes require `DATABASE_URL`, `PRIVY_APP_ID`, `PRIVY_APP_SECRET`,
 `PRIVY_VERIFICATION_KEY`, provider `APP_RPC_URL`, and the three confirmed application contract
 addresses. The web service requires the public Privy app ID, the private API host, the Privy
-verification key, and a server-only Alchemy API key. `ALCHEMY_POLICY_ID` is optional. Render owns
-these values; do not place them in tracked environment files.
+verification key, and a server-only Alchemy API key for the legacy testnet wallet proxy. Render
+owns these values; do not place them in tracked environment files.
 
 The API runs migrations at startup. Next.js validates a Privy access token before creating the
 HTTP-only same-origin session cookie. The Rust API validates the token again and resolves wallet
@@ -119,14 +119,10 @@ owner operation.
 Alchemy Wallet API traffic uses `POST /api/wallet`. This authenticated proxy accepts only the
 prepare, submit, and status methods used by the application, verifies each prepared batch against
 the user's server-side account and vault state, removes client-supplied paymaster data, rate-limits
-the session, and forwards the request without exposing provider credentials to the browser. When
-`ALCHEMY_POLICY_ID` is set, the proxy injects that policy. Otherwise, the signer account must hold
-enough ETH on Robinhood Chain to pay gas.
-
-Runtime RPC access uses the Alchemy app API key. Policy provisioning is a separate administrative
-operation and requires an Alchemy access key with Gas Manager Read & Write plus the Alchemy app ID.
-If policy provisioning is available, place only its policy ID in `ALCHEMY_POLICY_ID` on the web
-service. It is an optional UX enhancement, not an onboarding dependency.
+the session, and forwards the request without exposing provider credentials to the browser. The
+proxy always strips paymaster capabilities. The signing account must hold enough ETH on Robinhood
+Chain to pay gas. Mainnet owner actions use the connected owner wallet directly and do not depend
+on this proxy or an Alchemy gas policy.
 
 ## Record integrity
 

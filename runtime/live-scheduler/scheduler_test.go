@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -122,14 +124,21 @@ func (q *quoteStub) Quote(_ context.Context, body []byte) ([]byte, error) {
 	if request.Action == ActionUnwind {
 		spotSide, perpSide, phase, reduceOnly = "sell", "long", "perp_and_spot", true
 		exitAuthority = mustJSON(map[string]any{
-			"execution_account_id": request.ExecutionAccountID,
-			"intent_id":            request.IntentID,
+			"source": "execution-authority", "source_session": "authority-session-1",
+			"source_event_id": "authority-event-1", "source_sequence": 1,
+			"execution_account_id": request.ExecutionAccountID, "intent_id": request.IntentID,
+			"market_manifest": request.MarketManifest, "payload_sha256": strings.Repeat("c", 64),
+			"received_at_ms":             uint64(q.now.Add(-500 * time.Millisecond).UnixMilli()),
+			"submission_deadline_ms":     uint64(q.now.Add(4 * time.Second).UnixMilli()),
+			"reconciliation_deadline_ms": uint64(q.now.Add(24*time.Hour + 4*time.Second).UnixMilli()),
 		})
 	}
 	quote := QuoteBundle{
 		SchemaVersion: quoteSchemaVersion, RequestID: request.RequestID, ExecutionAccountID: request.ExecutionAccountID,
 		SourceEvaluationID: request.SourceEvaluationID, MarketManifest: request.MarketManifest, StrategyVersion: StrategyVersion,
-		StrategyManifestSHA256: StrategyManifestSHA256, SourceConfigSHA256: SourceConfigSHA256, RouteSHA256: routeSHA256,
+		StrategyManifestSHA256:       StrategyManifestSHA256,
+		TargetStrategyManifestSHA256: request.TargetStrategyManifestSHA256,
+		SourceConfigSHA256:           SourceConfigSHA256, RouteSHA256: routeSHA256,
 		OraclePolicySHA256: oraclePolicySHA256, RiskPolicySHA256: riskPolicySHA256, Action: request.Action,
 		Source: json.RawMessage(`{"adapter_id":"reviewed","spot_source":"rpc","perp_source":"auth","oracle_round":"round"}`),
 		Spot: mustJSON(spotQuote{Venue: "robinhood-chain-mainnet", Side: spotSide, StockAmount: "1", MinimumAmountOut: "1",
@@ -182,20 +191,34 @@ func (r *runnerStub) Run(_ context.Context, body []byte) ([]byte, error) {
 	}
 	intentID := testHash(request.AccountState.ExecutionAccountID + "-intent")
 	if request.Evaluation.Action == ActionUnwind {
-		unwindID := testHash(request.AccountState.ExecutionAccountID + "-unwind")
+		unwind := unwindIdentity{
+			Version: 1, PairIntentID: request.Evaluation.PairIntentID,
+			SpotUnwindIntentID: request.OpenEpisode.SpotUnwindIntentID,
+			ExecutionAccountID: request.AccountState.ExecutionAccountID, AgentID: request.AccountState.AgentID,
+			SourceEvaluationID: evaluationID, StrategyVersion: StrategyVersion,
+			StrategyManifestSHA256: StrategyManifestSHA256, RiskVersion: StrategyVersion,
+			SpotSide: "sell", SpotAmountIn: request.OpenEpisode.SpotAmount,
+			MinimumSettlementAmountOut: request.OpenEpisode.MinimumSettlementAmountOut,
+			ExpectedUIMultiplier:       request.AccountState.UIMultiplierE18, MinOracleRoundID: "1",
+			PerpSide: "long", PerpBaseAmount: request.OpenEpisode.PerpBaseAmount, PerpLimitPrice: 100, ReduceOnly: true,
+			QuoteSourceSession: "authority-session-1", QuoteSourceEventID: "authority-event-1",
+			QuotePayloadSHA256: strings.Repeat("c", 64), ObservedAtMS: request.Evaluation.ObservedAtMS,
+			DeadlineMS:               uint64(time.Unix(1_800_000_000, 0).Add(4 * time.Second).UnixMilli()),
+			ReconciliationDeadlineMS: uint64(time.Unix(1_800_000_000, 0).Add(24*time.Hour + 4*time.Second).UnixMilli()),
+		}
+		material := unwind
+		encoded, _ := json.Marshal(material)
+		hash := sha256.New()
+		hash.Write([]byte("robin.live.unwind-directive.v1\x00"))
+		hash.Write(encoded)
+		unwind.ID = "0x" + hex.EncodeToString(hash.Sum(nil))
 		return json.Marshal(map[string]any{
-			"kind": ActionUnwind,
-			"unwind": map[string]any{
-				"id": unwindID, "pair_intent_id": request.Evaluation.PairIntentID,
-				"execution_account_id":     request.AccountState.ExecutionAccountID,
-				"agent_id":                 request.AccountState.AgentID,
-				"source_evaluation_id":     evaluationID,
-				"strategy_manifest_sha256": StrategyManifestSHA256,
-			},
+			"kind":   ActionUnwind,
+			"unwind": unwind,
 			"exit_persistence": map[string]any{
-				"status": "persisted", "request_id": unwindID,
+				"status": "persisted", "request_id": unwind.ID,
 				"intent_id":         request.Evaluation.PairIntentID,
-				"coordinator_state": "EXITING", "coordinator_version": 5,
+				"coordinator_state": "unwinding", "coordinator_version": 5,
 			},
 		})
 	}
@@ -240,6 +263,7 @@ func TestSchedulerDispatchesNaturalStrategyExit(t *testing.T) {
 	dispatch.Evaluation.PairIntentID = testHash("account-exit-pair")
 	dispatch.AccountState.Flat = false
 	dispatch.AccountState.ActiveEpisodes = 1
+	dispatch.TargetStrategyManifestSHA256 = StrategyManifestSHA256
 	dispatch.OpenEpisode = &OpenEpisode{
 		PairIntentID: dispatch.Evaluation.PairIntentID, SpotUnwindIntentID: testHash("spot-unwind"),
 		SpotAmount: "1", MinimumSettlementAmountOut: "1", PerpBaseAmount: 1,
@@ -257,13 +281,179 @@ func TestSchedulerDispatchesNaturalStrategyExit(t *testing.T) {
 	}
 	var request QuoteRequest
 	if err := decodeStrict(quotes.requests[0], &request); err != nil || request.Action != ActionUnwind ||
-		request.IntentID != dispatch.Evaluation.PairIntentID {
+		request.IntentID != dispatch.Evaluation.PairIntentID ||
+		request.TargetStrategyManifestSHA256 != StrategyManifestSHA256 {
 		t.Fatal("natural exit quote was not bound to the pair intent")
 	}
 	var run RunRequest
 	if err := decodeStrict(runner.bodies[0], &run); err != nil || run.OpenEpisode == nil ||
 		run.OpenEpisode.PairIntentID != dispatch.Evaluation.PairIntentID {
 		t.Fatal("strategy runner did not receive the immutable open episode")
+	}
+}
+
+func TestAuthoritativeExitCompletionRejectsForgedOrSubstitutedProof(t *testing.T) {
+	now, private, _ := testClockAndKey(t)
+	dispatch := validDispatch(t, now, "account-proof", "agent-proof")
+	dispatch.Evaluation.Action = ActionUnwind
+	dispatch.Evaluation.PairIntentID = testHash("account-proof-pair")
+	dispatch.AccountState.Flat = false
+	dispatch.AccountState.ActiveEpisodes = 1
+	dispatch.TargetStrategyManifestSHA256 = StrategyManifestSHA256
+	dispatch.OpenEpisode = &OpenEpisode{
+		PairIntentID: dispatch.Evaluation.PairIntentID, SpotUnwindIntentID: testHash("spot-unwind"),
+		SpotAmount: "1", MinimumSettlementAmountOut: "1", PerpBaseAmount: 1,
+	}
+	sealApproval(t, dispatch)
+	request := QuoteRequest{
+		RequestID: requestID(dispatch.EvaluationID, dispatch.ExecutionAccountID, ActionUnwind,
+			dispatch.Evaluation.PairIntentID, StrategyManifestSHA256),
+		ExecutionAccountID: dispatch.ExecutionAccountID, SourceEvaluationID: dispatch.EvaluationID,
+		MarketManifest: dispatch.Evaluation.MarketManifest, IntentID: dispatch.Evaluation.PairIntentID,
+		TargetStrategyManifestSHA256: StrategyManifestSHA256, Action: ActionUnwind,
+		RequestedAtMS: uint64(now.UnixMilli()),
+	}
+	requestBody, _ := json.Marshal(request)
+	quoteBody, err := (&quoteStub{private: private, now: now}).Quote(context.Background(), requestBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatch.QuoteBody = quoteBody
+	runRequest, _ := json.Marshal(RunRequest{
+		Evaluation: dispatch.Evaluation, Readiness: dispatch.Readiness,
+		AccountState: dispatch.AccountState, Quotes: quoteBody, OpenEpisode: dispatch.OpenEpisode,
+	})
+	outputBody, err := (&runnerStub{}).Run(context.Background(), runRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output runOutput
+	var unwind unwindIdentity
+	var persistence exitPersistence
+	var quote QuoteBundle
+	var authority exitQuoteAuthority
+	if decodeStrict(outputBody, &output) != nil || decodeStrict(output.Unwind, &unwind) != nil ||
+		decodeStrict(output.ExitPersistence, &persistence) != nil || decodeStrict(quoteBody, &quote) != nil ||
+		decodeStrict(quote.ExitAuthority, &authority) != nil {
+		t.Fatal("invalid authoritative exit fixture")
+	}
+	stored := storedExitRequest{
+		RequestID: persistence.RequestID, ExecutionAccountID: dispatch.ExecutionAccountID,
+		IntentID: dispatch.Evaluation.PairIntentID, QuoteSourceSession: unwind.QuoteSourceSession,
+		QuoteSourceEventID: unwind.QuoteSourceEventID, QuotePayloadSHA256: unwind.QuotePayloadSHA256,
+		PerpUnwindPrice: unwind.PerpLimitPrice, MinimumUnwindSettlementOut: unwind.MinimumSettlementAmountOut,
+		RequestedAtMS: authority.ReceivedAtMS, SubmissionDeadlineMS: unwind.DeadlineMS,
+		ReconciliationDeadlineMS: unwind.ReconciliationDeadlineMS, Reason: "strategy_exit",
+	}
+	storedBody, _ := json.Marshal(stored)
+	saga := storedSaga{IntentID: stored.IntentID, State: "unwinding", Version: persistence.CoordinatorVersion}
+	sagaBody, _ := json.Marshal(saga)
+	if err := validateAuthoritativeExit(*dispatch, outputBody, storedBody, digest(storedBody),
+		int64(persistence.CoordinatorVersion), sagaBody, int64(saga.Version)); err != nil {
+		t.Fatalf("exact authoritative proof rejected: %v", err)
+	}
+
+	t.Run("acceptance proof survives later saga progress", func(t *testing.T) {
+		progressed := saga
+		progressed.State = "closed"
+		progressed.Version++
+		progressedBody, _ := json.Marshal(progressed)
+		if err := validateAuthoritativeExit(*dispatch, outputBody, storedBody, digest(storedBody),
+			int64(persistence.CoordinatorVersion), progressedBody, int64(progressed.Version)); err != nil {
+			t.Fatalf("immutable acceptance proof rejected after saga progress: %v", err)
+		}
+	})
+	t.Run("missing persisted payload", func(t *testing.T) {
+		if err := validateAuthoritativeExit(*dispatch, outputBody, nil, "", int64(persistence.CoordinatorVersion),
+			sagaBody, int64(saga.Version)); err == nil {
+			t.Fatal("missing authoritative exit proof accepted")
+		}
+	})
+	t.Run("substituted persisted account", func(t *testing.T) {
+		substituted := stored
+		substituted.ExecutionAccountID = "account-other"
+		payload, _ := json.Marshal(substituted)
+		if err := validateAuthoritativeExit(*dispatch, outputBody, payload, digest(payload),
+			int64(persistence.CoordinatorVersion), sagaBody, int64(saga.Version)); err == nil {
+			t.Fatal("cross-account exit proof accepted")
+		}
+	})
+	t.Run("substituted persisted request", func(t *testing.T) {
+		substituted := stored
+		substituted.RequestID = testHash("other-exit")
+		payload, _ := json.Marshal(substituted)
+		if err := validateAuthoritativeExit(*dispatch, outputBody, payload, digest(payload),
+			int64(persistence.CoordinatorVersion), sagaBody, int64(saga.Version)); err == nil {
+			t.Fatal("cross-request exit proof accepted")
+		}
+	})
+	t.Run("forged persisted digest", func(t *testing.T) {
+		if err := validateAuthoritativeExit(*dispatch, outputBody, storedBody, strings.Repeat("f", 64),
+			int64(persistence.CoordinatorVersion), sagaBody, int64(saga.Version)); err == nil {
+			t.Fatal("forged exit payload digest accepted")
+		}
+	})
+	t.Run("substituted saga", func(t *testing.T) {
+		substituted := saga
+		substituted.IntentID = testHash("other-intent")
+		value, _ := json.Marshal(substituted)
+		if err := validateAuthoritativeExit(*dispatch, outputBody, storedBody, digest(storedBody),
+			int64(persistence.CoordinatorVersion), value, int64(substituted.Version)); err == nil {
+			t.Fatal("cross-intent saga proof accepted")
+		}
+	})
+	t.Run("forged response version", func(t *testing.T) {
+		forged := output
+		receipt := persistence
+		receipt.CoordinatorVersion++
+		forged.ExitPersistence, _ = json.Marshal(receipt)
+		value, _ := json.Marshal(forged)
+		if err := validateAuthoritativeExit(*dispatch, value, storedBody, digest(storedBody),
+			int64(persistence.CoordinatorVersion), sagaBody, int64(saga.Version)); err == nil {
+			t.Fatal("forged coordinator version accepted")
+		}
+	})
+	t.Run("forged response state", func(t *testing.T) {
+		forged := output
+		receipt := persistence
+		receipt.CoordinatorState = "closed"
+		forged.ExitPersistence, _ = json.Marshal(receipt)
+		value, _ := json.Marshal(forged)
+		if err := validateAuthoritativeExit(*dispatch, value, storedBody, digest(storedBody),
+			int64(persistence.CoordinatorVersion), sagaBody, int64(saga.Version)); err == nil {
+			t.Fatal("forged coordinator state accepted")
+		}
+	})
+}
+
+func TestSchedulerBindsCurrentUnwindTargetManifest(t *testing.T) {
+	previousTarget := "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f"
+	current := requestID(testHash("evaluation"), "account-canary-1", ActionUnwind, testHash("intent"), StrategyManifestSHA256)
+	previous := requestID(testHash("evaluation"), "account-canary-1", ActionUnwind, testHash("intent"), previousTarget)
+	if current == previous {
+		t.Fatal("quote request ID does not bind the target manifest")
+	}
+
+	now, private, public := testClockAndKey(t)
+	dispatch := validDispatch(t, now, "account-prior", "agent-prior")
+	dispatch.Evaluation.Action = ActionUnwind
+	dispatch.Evaluation.PairIntentID = testHash("account-prior-pair")
+	dispatch.AccountState.Flat = false
+	dispatch.AccountState.ActiveEpisodes = 1
+	dispatch.TargetStrategyManifestSHA256 = previousTarget
+	dispatch.OpenEpisode = &OpenEpisode{
+		PairIntentID: dispatch.Evaluation.PairIntentID, SpotUnwindIntentID: testHash("spot-unwind"),
+		SpotAmount: "1", MinimumSettlementAmountOut: "1", PerpBaseAmount: 1,
+	}
+	sealApproval(t, dispatch)
+	store := newMemoryStore(dispatch)
+	quotes := &quoteStub{private: private, now: now}
+	service := mustScheduler(t, store, quotes, &runnerStub{}, public, now)
+	if err := service.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.states[store.key(*dispatch)] != "blocked" || len(quotes.requests) != 0 {
+		t.Fatal("normal scheduler admitted a predecessor-manifest recovery")
 	}
 }
 
@@ -352,6 +542,30 @@ func TestSchedulerRejectsQuoteAndRunnerIdentityMismatch(t *testing.T) {
 		}
 		if store.states[store.key(*dispatch)] != "blocked" {
 			t.Fatal("quote mismatch was not blocked")
+		}
+	})
+	t.Run("quote target", func(t *testing.T) {
+		dispatch := validDispatch(t, now, "account-target", "agent-target")
+		dispatch.Evaluation.Action = ActionUnwind
+		dispatch.Evaluation.PairIntentID = testHash("account-target-pair")
+		dispatch.AccountState.Flat = false
+		dispatch.AccountState.ActiveEpisodes = 1
+		dispatch.TargetStrategyManifestSHA256 = StrategyManifestSHA256
+		dispatch.OpenEpisode = &OpenEpisode{
+			PairIntentID: dispatch.Evaluation.PairIntentID, SpotUnwindIntentID: testHash("spot-unwind"),
+			SpotAmount: "1", MinimumSettlementAmountOut: "1", PerpBaseAmount: 1,
+		}
+		sealApproval(t, dispatch)
+		store := newMemoryStore(dispatch)
+		quotes := &quoteStub{private: private, now: now, mutate: func(q *QuoteBundle) {
+			q.TargetStrategyManifestSHA256 = "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f"
+		}}
+		service := mustScheduler(t, store, quotes, &runnerStub{}, public, now)
+		if err := service.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if store.states[store.key(*dispatch)] != "blocked" {
+			t.Fatal("quote target mismatch was not blocked")
 		}
 	})
 	t.Run("runner", func(t *testing.T) {

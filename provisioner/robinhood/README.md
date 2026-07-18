@@ -1,9 +1,10 @@
 # Robinhood account provisioner
 
-Private authority for per-user Robinhood Chain execution bindings. It creates or resolves one AWS
-KMS customer-managed `ECC_SECG_P256K1` signing key for each execution account and stores the KMS ARN
-only in its private database. KMS keys use deterministic aliases and AWS KMS origin, so private key
-material is never exportable.
+Private authority for per-user Robinhood Chain execution bindings. It invokes the fixed AWS key
+control plane with only the execution-account UUID, verifies the returned public binding, and stores
+the KMS ARN only in its private database. The Render role cannot create, tag, alias, manage, or sign
+with KMS keys. The control plane creates one AWS-origin `ECC_SECG_P256K1` signing key behind a
+deterministic alias, so private key material is never exportable.
 
 `POST /v1/graphs/prepare` returns one unsigned, zero-value `RwaUserVaultFactoryV1.deploy(owner)` call.
 The owner or any ordinary ETH-funded relayer may submit it. The route never signs, broadcasts, or

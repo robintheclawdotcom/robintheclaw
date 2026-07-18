@@ -66,7 +66,7 @@ type pgStore struct {
 	pool *pgxpool.Pool
 }
 
-func openStore(ctx context.Context, databaseURL string) (*pgStore, error) {
+func openStore(ctx context.Context, databaseURL string, runMigrations bool) (*pgStore, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		return nil, errors.New("open Robinhood provisioner database")
@@ -75,14 +75,16 @@ func openStore(ctx context.Context, databaseURL string) (*pgStore, error) {
 		pool.Close()
 		return nil, errors.New("connect Robinhood provisioner database")
 	}
-	contents, err := migrations.ReadFile("migrations/0001_bindings.sql")
-	if err != nil {
-		pool.Close()
-		return nil, errors.New("read Robinhood provisioner migration")
-	}
-	if _, err := pool.Exec(ctx, string(contents)); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("apply Robinhood provisioner migration: %w", err)
+	if runMigrations {
+		contents, err := migrations.ReadFile("migrations/0001_bindings.sql")
+		if err != nil {
+			pool.Close()
+			return nil, errors.New("read Robinhood provisioner migration")
+		}
+		if _, err := pool.Exec(ctx, string(contents)); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("apply Robinhood provisioner migration: %w", err)
+		}
 	}
 	return &pgStore{pool: pool}, nil
 }

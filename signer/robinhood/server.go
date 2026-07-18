@@ -39,7 +39,7 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /livez", server.live)
 	mux.HandleFunc("GET /readyz", server.ready)
 	mux.HandleFunc("POST /v1/spot-intents", server.executeSpot)
-	return securityHeaders(mux)
+	return signedResponses(securityHeaders(mux), server.config.CallerID, server.config.APIHMACKey)
 }
 
 func (server *Server) live(response http.ResponseWriter, _ *http.Request) {
@@ -251,6 +251,63 @@ func securityHeaders(next http.Handler) http.Handler {
 		response.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(response, request)
 	})
+}
+
+type bufferedResponse struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (response *bufferedResponse) Header() http.Header {
+	return response.header
+}
+
+func (response *bufferedResponse) WriteHeader(status int) {
+	if response.status == 0 {
+		response.status = status
+	}
+}
+
+func (response *bufferedResponse) Write(body []byte) (int, error) {
+	if response.status == 0 {
+		response.status = http.StatusOK
+	}
+	return response.body.Write(body)
+}
+
+func signedResponses(next http.Handler, caller string, key []byte) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		buffered := &bufferedResponse{header: make(http.Header)}
+		next.ServeHTTP(buffered, request)
+		if buffered.status == 0 {
+			buffered.status = http.StatusOK
+		}
+		for name, values := range buffered.header {
+			response.Header()[name] = append([]string(nil), values...)
+		}
+		response.Header().Set(
+			"X-RTC-Response-Signature",
+			signResponse(
+				key,
+				request.URL.Path,
+				caller,
+				request.Header.Get("X-RTC-Nonce"),
+				buffered.status,
+				buffered.body.Bytes(),
+			),
+		)
+		response.WriteHeader(buffered.status)
+		_, _ = response.Write(buffered.body.Bytes())
+	})
+}
+
+func signResponse(key []byte, path, caller, nonce string, status int, body []byte) string {
+	digest := sha256.Sum256(body)
+	canonical := fmt.Sprintf("RESPONSE\n%s\n%s\n%s\n%d\n%x", path, caller, nonce, status, digest)
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(canonical))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {

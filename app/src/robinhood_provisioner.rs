@@ -168,13 +168,18 @@ impl RobinhoodProvisioner {
             .header("Content-Type", "application/json")
             .header("X-RTC-Caller", &self.caller_id)
             .header("X-RTC-Timestamp", timestamp)
-            .header("X-RTC-Nonce", nonce)
+            .header("X-RTC-Nonce", &nonce)
             .header("X-RTC-Signature", signature)
             .body(body)
             .send()
             .await
             .map_err(|_| anyhow!("Robinhood provisioner is unavailable"))?;
         let status = response.status();
+        let response_signature = response
+            .headers()
+            .get("X-RTC-Response-Signature")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         if response
             .content_length()
             .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -192,6 +197,15 @@ impl RobinhoodProvisioner {
             }
             response_body.extend_from_slice(&chunk);
         }
+        verify_response_signature(
+            hmac_key,
+            path,
+            &self.caller_id,
+            &nonce,
+            status,
+            &response_body,
+            response_signature.as_deref(),
+        )?;
         if !status.is_success() {
             let message = serde_json::from_slice::<ServiceError>(&response_body)
                 .ok()
@@ -202,6 +216,33 @@ impl RobinhoodProvisioner {
         serde_json::from_slice(&response_body)
             .map_err(|_| anyhow!("Robinhood provisioner returned an invalid response"))
     }
+}
+
+fn verify_response_signature(
+    key: &[u8; 32],
+    path: &str,
+    caller: &str,
+    nonce: &str,
+    status: StatusCode,
+    body: &[u8],
+    signature: Option<&str>,
+) -> Result<()> {
+    let provided = signature
+        .ok_or_else(|| anyhow!("Robinhood provisioner returned an unsigned response"))
+        .and_then(|value| {
+            hex::decode(value)
+                .map_err(|_| anyhow!("Robinhood provisioner returned an invalid response"))
+        })?;
+    let canonical = format!(
+        "RESPONSE\n{path}\n{caller}\n{nonce}\n{}\n{}",
+        status.as_u16(),
+        hex::encode(Sha256::digest(body)),
+    );
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|_| anyhow!("invalid Robinhood provisioner HMAC key"))?;
+    mac.update(canonical.as_bytes());
+    mac.verify_slice(&provided)
+        .map_err(|_| anyhow!("Robinhood provisioner returned an invalid response"))
 }
 
 #[derive(Deserialize)]
@@ -260,5 +301,55 @@ mod tests {
             "11".repeat(32)
         );
         assert!(serde_json::from_str::<PublicGraphBinding>(&body).is_err());
+    }
+
+    #[test]
+    fn response_signature_binds_request_and_response() {
+        let key = [0x42; 32];
+        let path = "/v1/graphs/prepare";
+        let caller = "robin-api";
+        let nonce = "1234567890abcdef1234567890abcdef";
+        let status = StatusCode::CREATED;
+        let body = br#"{"status":"awaiting_deployment"}"#;
+        let canonical = format!(
+            "RESPONSE\n{path}\n{caller}\n{nonce}\n{}\n{}",
+            status.as_u16(),
+            hex::encode(Sha256::digest(body)),
+        );
+        let mut mac = HmacSha256::new_from_slice(&key).unwrap();
+        mac.update(canonical.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+
+        assert!(verify_response_signature(
+            &key,
+            path,
+            caller,
+            nonce,
+            status,
+            body,
+            Some(&signature)
+        )
+        .is_ok());
+        assert!(verify_response_signature(
+            &key,
+            path,
+            caller,
+            nonce,
+            StatusCode::OK,
+            body,
+            Some(&signature)
+        )
+        .is_err());
+        assert!(verify_response_signature(
+            &key,
+            path,
+            caller,
+            nonce,
+            status,
+            b"{}",
+            Some(&signature)
+        )
+        .is_err());
+        assert!(verify_response_signature(&key, path, caller, nonce, status, body, None).is_err());
     }
 }

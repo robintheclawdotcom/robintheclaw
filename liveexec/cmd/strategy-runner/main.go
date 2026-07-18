@@ -50,6 +50,7 @@ func listen(address string, handler http.Handler) error {
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 	return server.ListenAndServe()
 }

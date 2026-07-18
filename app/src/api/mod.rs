@@ -9,6 +9,7 @@ pub mod product;
 
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/health", web::get().to(health::health))
+        .route("/readyz", web::get().to(health::ready))
         .service(
             web::scope("/internal/v1")
                 .app_data(web::PayloadConfig::new(64 << 10))
@@ -42,6 +43,14 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
                         .route(
                             "/agents/{id}/lighter/confirm",
                             web::post().to(product::lighter_confirm),
+                        )
+                        .route(
+                            "/agents/{id}/lighter/revocation",
+                            web::get().to(product::lighter_revocation),
+                        )
+                        .route(
+                            "/agents/{id}/lighter/revocation/confirm",
+                            web::post().to(product::lighter_revocation_confirm),
                         )
                         .route(
                             "/agents/{id}/robinhood/prepare",

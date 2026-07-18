@@ -103,6 +103,7 @@ async fn main() -> std::io::Result<()> {
             "coordinator registration configuration failed: {error}"
         ))
     })?;
+    let command_dispatcher_ready = command_client.is_enabled();
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -120,12 +121,14 @@ async fn main() -> std::io::Result<()> {
         robinhood_provisioner,
         readiness_auth,
         coordinator_registration: registration_client.clone(),
+        command_dispatcher_ready,
     });
 
     orchestrator::spawn_background_services(state.clone());
     command_dispatcher::spawn(
         state.product_store.clone(),
         command_client,
+        state.lighter_provisioner.clone(),
         config.command_worker_id.clone(),
     );
     account_registration::spawn(

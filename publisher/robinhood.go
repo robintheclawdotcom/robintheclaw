@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	usdgAddress         = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
-	aaplAddress         = "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9"
-	maxFinalizedHeadAge = 30 * time.Second
+	usdgAddress             = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+	aaplAddress             = "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9"
+	zeroAddress             = "0x0000000000000000000000000000000000000000"
+	maxFinalizedEvidenceAge = 30 * time.Minute
 )
 
 type RobinhoodClient struct {
@@ -85,8 +86,7 @@ type rpcReceipt struct {
 }
 
 type endpointObservation struct {
-	Finalized            blockRef
-	Safe                 blockRef
+	Block                blockRef
 	Owner                string
 	Factory              string
 	RiskManager          string
@@ -119,6 +119,7 @@ type endpointObservation struct {
 type endpointHeads struct {
 	Finalized blockRef
 	Safe      blockRef
+	Latest    blockRef
 }
 
 func NewRobinhoodClient(primaryURL, secondaryURL string, client *http.Client) (*RobinhoodClient, error) {
@@ -156,15 +157,14 @@ func (c *RobinhoodClient) Collect(ctx context.Context, binding RobinhoodBinding)
 	c.mu.Unlock()
 
 	type headResult struct {
-		endpoint *rpcEndpoint
-		heads    endpointHeads
-		err      error
+		heads endpointHeads
+		err   error
 	}
 	headResults := make(chan headResult, 2)
 	for _, endpoint := range []*rpcEndpoint{c.primary, c.secondary} {
 		go func(endpoint *rpcEndpoint) {
 			heads, err := endpoint.heads(ctx, prior)
-			headResults <- headResult{endpoint: endpoint, heads: heads, err: err}
+			headResults <- headResult{heads: heads, err: err}
 		}(endpoint)
 	}
 	firstHead, secondHead := <-headResults, <-headResults
@@ -174,91 +174,189 @@ func (c *RobinhoodClient) Collect(ctx context.Context, binding RobinhoodBinding)
 	if secondHead.err != nil {
 		return RobinhoodObservation{}, secondHead.err
 	}
-	commonNumber := firstHead.heads.Finalized.Number
-	if secondHead.heads.Finalized.Number < commonNumber {
-		commonNumber = secondHead.heads.Finalized.Number
+
+	finalizedNumber := minimumBlockNumber(firstHead.heads.Finalized, secondHead.heads.Finalized)
+	safeNumber := minimumBlockNumber(firstHead.heads.Safe, secondHead.heads.Safe)
+	currentNumber := minimumBlockNumber(firstHead.heads.Latest, secondHead.heads.Latest)
+	if finalizedNumber == 0 || safeNumber < finalizedNumber || currentNumber < safeNumber ||
+		(prior.Number > 0 && finalizedNumber < prior.Number) {
+		return RobinhoodObservation{}, errors.New("Robinhood RPC head ordering is unsafe")
 	}
-	if commonNumber == 0 || firstHead.heads.Safe.Number < commonNumber || secondHead.heads.Safe.Number < commonNumber {
-		return unhealthyRobinhoodObservation(binding), nil
+
+	finalizedBlock, err := c.commonBlock(ctx, finalizedNumber)
+	if err != nil {
+		return RobinhoodObservation{}, err
 	}
-	type blockResult struct {
-		endpoint *rpcEndpoint
-		block    blockRef
-		err      error
+	safeBlock, err := c.commonBlock(ctx, safeNumber)
+	if err != nil {
+		return RobinhoodObservation{}, err
 	}
-	blockResults := make(chan blockResult, 2)
-	for _, result := range []headResult{firstHead, secondHead} {
+	currentBlock, err := c.commonBlock(ctx, currentNumber)
+	if err != nil {
+		return RobinhoodObservation{}, err
+	}
+	if !commonHeadMatches(finalizedBlock, firstHead.heads.Finalized, secondHead.heads.Finalized) ||
+		!commonHeadMatches(safeBlock, firstHead.heads.Safe, secondHead.heads.Safe) ||
+		!commonHeadMatches(currentBlock, firstHead.heads.Latest, secondHead.heads.Latest) {
+		return RobinhoodObservation{}, errors.New("Robinhood RPC tagged head disagreement")
+	}
+	now := time.Now().UTC()
+	if staleBlock(finalizedBlock, now, maxFinalizedEvidenceAge) {
+		return RobinhoodObservation{}, errors.New("Robinhood finalized evidence is stale")
+	}
+	if staleBlock(safeBlock, now, maxFinalizedEvidenceAge) {
+		return RobinhoodObservation{}, errors.New("Robinhood safe evidence is stale")
+	}
+	if staleBlock(currentBlock, now, maxEvidenceAge) {
+		return RobinhoodObservation{}, errors.New("Robinhood current account state is stale")
+	}
+	if safeBlock.Number < finalizedBlock.Number || currentBlock.Number < safeBlock.Number ||
+		safeBlock.Timestamp < finalizedBlock.Timestamp || currentBlock.Timestamp < safeBlock.Timestamp {
+		return RobinhoodObservation{}, errors.New("Robinhood current account state predates finality evidence")
+	}
+
+	finalized, err := c.collectAt(ctx, binding, finalizedBlock, true)
+	if err != nil {
+		return RobinhoodObservation{}, err
+	}
+	current := finalized
+	if currentBlock != finalizedBlock {
+		current, err = c.collectAt(ctx, binding, currentBlock, false)
+		if err != nil {
+			return RobinhoodObservation{}, err
+		}
+	}
+
+	wiring := immutableWiringMatches(finalized, binding) &&
+		validModes(finalized) && currentWiringMatches(current, binding)
+	finality := receiptsFinal(finalized.Receipts, finalizedBlock) && receiptsBound(finalized.Receipts, binding)
+	if finality {
+		c.mu.Lock()
+		c.finalized[binding.Vault] = finalizedBlock
+		c.mu.Unlock()
+	}
+	return RobinhoodObservation{
+		Vault: binding.Vault, Signer: binding.Signer, Owner: binding.Owner,
+		SettlementBalanceRaw: current.SettlementBalanceRaw, OwnerGasRaw: current.OwnerGasRaw, SignerGasRaw: current.SignerGasRaw,
+		AgentEnabled: current.AgentEnabled, FinalizedAgentAddress: finalized.VaultAgent,
+		FinalizedAgentEnabled: finalized.AgentEnabled,
+		FinalizedAgentRevoked: agentRevoked(finalized), Flat: current.Flat && current.StockBalanceRaw == "0",
+		WiringVerified: wiring, FinalityHealthy: finality,
+		FundingReady:   decimalAtLeast(current.SettlementBalanceRaw, binding.MinimumSettlementRaw),
+		OwnerGasReady:  decimalAtLeast(current.OwnerGasRaw, binding.MinimumOwnerGasRaw),
+		SignerGasReady: decimalAtLeast(current.SignerGasRaw, binding.MinimumSignerGasRaw),
+		GlobalMode:     modeName(current.GlobalMode), FinalizedGlobalMode: modeName(finalized.GlobalMode),
+		RiskMode: modeName(current.RiskMode), FinalizedRiskMode: modeName(finalized.RiskMode),
+		FinalizedNumber:    finalizedBlock.Number,
+		SignerNonceAligned: signerNonceAligned(binding, current.SignerNonce),
+		SpotConfigVersion:  current.SpotConfigVersion, StockDecimals: current.StockDecimals,
+		UIMultiplierE18: current.UIMultiplierE18, NewUIMultiplierE18: current.NewUIMultiplierE18,
+		OraclePaused: current.OraclePaused, OracleHealthy: current.OracleHealthy,
+		SequencerHealthy: current.SequencerHealthy,
+		FinalizedHash:    finalizedBlock.Hash, FinalizedTimestamp: finalizedBlock.Timestamp,
+		SourceBlockNumber: currentBlock.Number, SourceBlockHash: currentBlock.Hash, SourceBlockTimestamp: currentBlock.Timestamp,
+		ObservedAt: time.Unix(int64(currentBlock.Timestamp), 0).UTC(),
+	}, nil
+}
+
+func (c *RobinhoodClient) commonBlock(ctx context.Context, number uint64) (blockRef, error) {
+	type result struct {
+		block blockRef
+		err   error
+	}
+	results := make(chan result, 2)
+	for _, endpoint := range []*rpcEndpoint{c.primary, c.secondary} {
 		go func(endpoint *rpcEndpoint) {
-			block, err := endpoint.block(ctx, encodeQuantity(commonNumber))
-			blockResults <- blockResult{endpoint: endpoint, block: block, err: err}
-		}(result.endpoint)
+			block, err := endpoint.block(ctx, encodeQuantity(number))
+			results <- result{block: block, err: err}
+		}(endpoint)
 	}
-	firstBlock, secondBlock := <-blockResults, <-blockResults
-	if firstBlock.err != nil {
-		return RobinhoodObservation{}, firstBlock.err
+	first, second := <-results, <-results
+	if first.err != nil {
+		return blockRef{}, first.err
 	}
-	if secondBlock.err != nil {
-		return RobinhoodObservation{}, secondBlock.err
+	if second.err != nil {
+		return blockRef{}, second.err
 	}
-	if firstBlock.block != secondBlock.block || staleFinalizedHead(firstBlock.block, time.Now().UTC()) ||
-		(prior.Number > 0 && commonNumber < prior.Number) {
-		return unhealthyRobinhoodObservation(binding), nil
+	if first.block.Number != number || second.block.Number != number || first.block != second.block {
+		return blockRef{}, errors.New("Robinhood RPC block disagreement")
 	}
-	common := firstBlock.block
+	return first.block, nil
+}
+
+func (c *RobinhoodClient) collectAt(ctx context.Context, binding RobinhoodBinding, block blockRef, includeReceipts bool) (endpointObservation, error) {
 	type result struct {
 		observation endpointObservation
 		err         error
 	}
 	results := make(chan result, 2)
-	for _, endpoint := range []*rpcEndpoint{firstBlock.endpoint, secondBlock.endpoint} {
+	for _, endpoint := range []*rpcEndpoint{c.primary, c.secondary} {
 		go func(endpoint *rpcEndpoint) {
-			observation, err := endpoint.collectAt(ctx, binding, common)
+			observation, err := endpoint.collectAt(ctx, binding, block, includeReceipts)
 			results <- result{observation: observation, err: err}
 		}(endpoint)
 	}
 	first, second := <-results, <-results
 	if first.err != nil {
-		return RobinhoodObservation{}, first.err
+		return endpointObservation{}, first.err
 	}
 	if second.err != nil {
-		return RobinhoodObservation{}, second.err
+		return endpointObservation{}, second.err
 	}
-	primary, secondary := first.observation, second.observation
-	if !sameEndpointObservation(primary, secondary) {
-		return unhealthyRobinhoodObservation(binding), nil
+	if !sameEndpointObservation(first.observation, second.observation) {
+		return endpointObservation{}, errors.New("Robinhood RPC account-state disagreement")
 	}
+	return first.observation, nil
+}
 
-	wiring := strings.EqualFold(primary.Owner, binding.Owner) && strings.EqualFold(primary.Factory, binding.Factory) &&
-		strings.EqualFold(primary.RiskManager, binding.RiskManager) && strings.EqualFold(primary.SpotAdapter, binding.SpotAdapter) &&
-		strings.EqualFold(primary.VaultOwner, binding.Owner) && strings.EqualFold(primary.VaultAgent, binding.Signer) &&
-		strings.EqualFold(primary.VaultRegistry, binding.Registry) && strings.EqualFold(primary.VaultRiskManager, binding.RiskManager) &&
-		strings.EqualFold(primary.VaultSpotAdapter, binding.SpotAdapter) && strings.EqualFold(primary.VaultCodeHash, binding.VaultCodeHash) &&
-		primary.GlobalMode <= 2 && primary.RiskMode <= 2
-	finality := primary.Finalized.Number > 0 && primary.Safe.Number >= primary.Finalized.Number &&
-		receiptsFinal(primary.Receipts, primary.Finalized) && receiptsBound(primary.Receipts, binding)
-	if prior.Number > 0 && primary.Finalized.Number < prior.Number {
-		finality = false
+func minimumBlockNumber(blocks ...blockRef) uint64 {
+	if len(blocks) == 0 {
+		return 0
 	}
-	if finality {
-		c.mu.Lock()
-		c.finalized[binding.Vault] = primary.Finalized
-		c.mu.Unlock()
+	minimum := blocks[0].Number
+	for _, block := range blocks[1:] {
+		if block.Number < minimum {
+			minimum = block.Number
+		}
 	}
-	return RobinhoodObservation{
-		Vault: binding.Vault, Signer: binding.Signer, Owner: binding.Owner,
-		SettlementBalanceRaw: primary.SettlementBalanceRaw, OwnerGasRaw: primary.OwnerGasRaw, SignerGasRaw: primary.SignerGasRaw,
-		AgentEnabled: primary.AgentEnabled, Flat: primary.Flat && primary.StockBalanceRaw == "0", WiringVerified: wiring, FinalityHealthy: finality,
-		FundingReady:   decimalAtLeast(primary.SettlementBalanceRaw, binding.MinimumSettlementRaw),
-		OwnerGasReady:  decimalAtLeast(primary.OwnerGasRaw, binding.MinimumOwnerGasRaw),
-		SignerGasReady: decimalAtLeast(primary.SignerGasRaw, binding.MinimumSignerGasRaw),
-		RiskMode:       modeName(primary.RiskMode), FinalizedNumber: primary.Finalized.Number,
-		SignerNonceAligned: signerNonceAligned(binding, primary.SignerNonce),
-		SpotConfigVersion:  primary.SpotConfigVersion, StockDecimals: primary.StockDecimals,
-		UIMultiplierE18: primary.UIMultiplierE18, NewUIMultiplierE18: primary.NewUIMultiplierE18,
-		OraclePaused: primary.OraclePaused, OracleHealthy: primary.OracleHealthy,
-		SequencerHealthy: primary.SequencerHealthy,
-		FinalizedHash:    primary.Finalized.Hash, ObservedAt: time.Now().UTC(),
-	}, nil
+	return minimum
+}
+
+func commonHeadMatches(common blockRef, heads ...blockRef) bool {
+	for _, head := range heads {
+		if head.Number == common.Number && head != common {
+			return false
+		}
+	}
+	return true
+}
+
+func immutableWiringMatches(observation endpointObservation, binding RobinhoodBinding) bool {
+	return strings.EqualFold(observation.Owner, binding.Owner) &&
+		strings.EqualFold(observation.Factory, binding.Factory) &&
+		strings.EqualFold(observation.RiskManager, binding.RiskManager) &&
+		strings.EqualFold(observation.SpotAdapter, binding.SpotAdapter) &&
+		strings.EqualFold(observation.VaultOwner, binding.Owner) &&
+		strings.EqualFold(observation.VaultRegistry, binding.Registry) &&
+		strings.EqualFold(observation.VaultRiskManager, binding.RiskManager) &&
+		strings.EqualFold(observation.VaultSpotAdapter, binding.SpotAdapter) &&
+		strings.EqualFold(observation.VaultCodeHash, binding.VaultCodeHash)
+}
+
+func currentWiringMatches(observation endpointObservation, binding RobinhoodBinding) bool {
+	if !immutableWiringMatches(observation, binding) || !validModes(observation) {
+		return false
+	}
+	return strings.EqualFold(observation.VaultAgent, binding.Signer) ||
+		agentRevoked(observation) && observation.RiskMode == 2
+}
+
+func validModes(observation endpointObservation) bool {
+	return observation.GlobalMode <= 2 && observation.RiskMode <= 2
+}
+
+func agentRevoked(observation endpointObservation) bool {
+	return !observation.AgentEnabled && strings.EqualFold(observation.VaultAgent, zeroAddress)
 }
 
 func signerNonceAligned(binding RobinhoodBinding, observed uint64) bool {
@@ -282,36 +380,48 @@ func (e *rpcEndpoint) heads(ctx context.Context, prior blockRef) (endpointHeads,
 	if err != nil {
 		return endpointHeads{}, err
 	}
+	latest, err := e.block(ctx, "latest")
+	if err != nil {
+		return endpointHeads{}, err
+	}
+	if finalized.Number == 0 || safe.Number < finalized.Number || latest.Number < safe.Number {
+		return endpointHeads{}, errors.New("Robinhood RPC head ordering is invalid")
+	}
 	if prior.Number > 0 {
 		previous, err := e.block(ctx, encodeQuantity(prior.Number))
 		if err != nil || previous.Hash != prior.Hash {
 			return endpointHeads{}, errors.New("Robinhood finalized chain reorg detected")
 		}
 	}
-	return endpointHeads{Finalized: finalized, Safe: safe}, nil
+	return endpointHeads{Finalized: finalized, Safe: safe, Latest: latest}, nil
 }
 
-func (e *rpcEndpoint) collectAt(ctx context.Context, binding RobinhoodBinding, finalized blockRef) (endpointObservation, error) {
-	tag := encodeQuantity(finalized.Number)
+func (e *rpcEndpoint) collectAt(
+	ctx context.Context,
+	binding RobinhoodBinding,
+	block blockRef,
+	includeReceipts bool,
+) (endpointObservation, error) {
+	tag := encodeQuantity(block.Number)
 	proof, err := e.proof(ctx, binding.Vault, tag)
 	if err != nil {
 		return endpointObservation{}, err
 	}
 
 	addressCalls := []struct {
-		to   string
-		data string
-		dest *string
+		to        string
+		data      string
+		allowZero bool
 	}{
-		{binding.Registry, addressCall("2724fe09", binding.Vault), nil},
-		{binding.Registry, addressCall("15600884", binding.Vault), nil},
-		{binding.Registry, addressCall("55bbaf1e", binding.Vault), nil},
-		{binding.Registry, addressCall("73068297", binding.Vault), nil},
-		{binding.Vault, "0x8da5cb5b", nil},
-		{binding.Vault, "0xf5ff5c76", nil},
-		{binding.Vault, "0x7b103999", nil},
-		{binding.Vault, "0x47842663", nil},
-		{binding.Vault, "0x34d45c62", nil},
+		{binding.Registry, addressCall("2724fe09", binding.Vault), false},
+		{binding.Registry, addressCall("15600884", binding.Vault), false},
+		{binding.Registry, addressCall("55bbaf1e", binding.Vault), false},
+		{binding.Registry, addressCall("73068297", binding.Vault), false},
+		{binding.Vault, "0x8da5cb5b", false},
+		{binding.Vault, "0xf5ff5c76", true},
+		{binding.Vault, "0x7b103999", false},
+		{binding.Vault, "0x47842663", false},
+		{binding.Vault, "0x34d45c62", false},
 	}
 	values := make([]string, len(addressCalls))
 	for index, call := range addressCalls {
@@ -319,7 +429,11 @@ func (e *rpcEndpoint) collectAt(ctx context.Context, binding RobinhoodBinding, f
 		if err != nil {
 			return endpointObservation{}, err
 		}
-		values[index], err = abiAddress(value)
+		if call.allowZero {
+			values[index], err = abiAddressOrZero(value)
+		} else {
+			values[index], err = abiAddress(value)
+		}
 		if err != nil {
 			return endpointObservation{}, err
 		}
@@ -357,7 +471,7 @@ func (e *rpcEndpoint) collectAt(ctx context.Context, binding RobinhoodBinding, f
 	if err != nil {
 		return endpointObservation{}, err
 	}
-	oracleHealthy := oracleRoundHealthy(oracleRound, finalized.Timestamp, heartbeat)
+	oracleHealthy := oracleRoundHealthy(oracleRound, block.Timestamp, heartbeat)
 	sequencerFeedRaw, err := e.ethCall(ctx, binding.RiskManager, "0x3b521cb6", tag)
 	if err != nil {
 		return endpointObservation{}, err
@@ -374,7 +488,7 @@ func (e *rpcEndpoint) collectAt(ctx context.Context, binding RobinhoodBinding, f
 	if err != nil {
 		return endpointObservation{}, err
 	}
-	sequencerHealthy := sequencerRoundHealthy(sequencerRound, finalized.Timestamp, abiUint(graceRaw))
+	sequencerHealthy := sequencerRoundHealthy(sequencerRound, block.Timestamp, abiUint(graceRaw))
 	stockDecimalsRaw, err := e.ethCall(ctx, aaplAddress, "0x313ce567", tag)
 	if err != nil {
 		return endpointObservation{}, err
@@ -415,23 +529,26 @@ func (e *rpcEndpoint) collectAt(ctx context.Context, binding RobinhoodBinding, f
 	if err != nil {
 		return endpointObservation{}, err
 	}
-	receipts := make([]rpcReceipt, 0, len(binding.ReceiptHashes))
-	for _, hash := range binding.ReceiptHashes {
-		var receipt rpcReceipt
-		if err := e.call(ctx, "eth_getTransactionReceipt", []interface{}{hash}, &receipt); err != nil {
-			return endpointObservation{}, err
+	var receipts []rpcReceipt
+	if includeReceipts {
+		receipts = make([]rpcReceipt, 0, len(binding.ReceiptHashes))
+		for _, hash := range binding.ReceiptHashes {
+			var receipt rpcReceipt
+			if err := e.call(ctx, "eth_getTransactionReceipt", []interface{}{hash}, &receipt); err != nil {
+				return endpointObservation{}, err
+			}
+			if !strings.EqualFold(receipt.TransactionHash, hash) {
+				return endpointObservation{}, errors.New("Robinhood receipt hash mismatch")
+			}
+			receiptBlock, err := e.block(ctx, receipt.BlockNumber)
+			if err != nil || !strings.EqualFold(receiptBlock.Hash, receipt.BlockHash) {
+				return endpointObservation{}, errors.New("Robinhood receipt block mismatch")
+			}
+			receipts = append(receipts, receipt)
 		}
-		if !strings.EqualFold(receipt.TransactionHash, hash) {
-			return endpointObservation{}, errors.New("Robinhood receipt hash mismatch")
-		}
-		block, err := e.block(ctx, receipt.BlockNumber)
-		if err != nil || !strings.EqualFold(block.Hash, receipt.BlockHash) {
-			return endpointObservation{}, errors.New("Robinhood receipt block mismatch")
-		}
-		receipts = append(receipts, receipt)
 	}
 	return endpointObservation{
-		Finalized: finalized, Safe: finalized, Owner: values[0], Factory: values[1], RiskManager: values[2], SpotAdapter: values[3],
+		Block: block, Owner: values[0], Factory: values[1], RiskManager: values[2], SpotAdapter: values[3],
 		VaultOwner: values[4], VaultAgent: values[5], VaultRegistry: values[6], VaultRiskManager: values[7], VaultSpotAdapter: values[8],
 		VaultCodeHash: strings.ToLower(proof.CodeHash), AgentEnabled: abiBool(agentEnabledRaw), Flat: abiBool(flatRaw),
 		GlobalMode: abiUint(globalModeRaw), RiskMode: abiUint(riskModeRaw), SettlementBalanceRaw: abiUintString(settlementRaw),
@@ -443,20 +560,13 @@ func (e *rpcEndpoint) collectAt(ctx context.Context, binding RobinhoodBinding, f
 	}, nil
 }
 
-func unhealthyRobinhoodObservation(binding RobinhoodBinding) RobinhoodObservation {
-	return RobinhoodObservation{
-		Vault: binding.Vault, Signer: binding.Signer, Owner: binding.Owner,
-		ObservedAt: time.Now().UTC(),
-	}
-}
-
-func staleFinalizedHead(block blockRef, now time.Time) bool {
-	if block.Number == 0 || block.Timestamp == 0 {
+func staleBlock(block blockRef, now time.Time, maximumAge time.Duration) bool {
+	if block.Number == 0 || block.Timestamp == 0 || now.Unix() < 0 || block.Timestamp > uint64(now.Unix()) {
 		return true
 	}
 	observed := time.Unix(int64(block.Timestamp), 0)
 	age := now.Sub(observed)
-	return age < -5*time.Second || age > maxFinalizedHeadAge
+	return age < 0 || age > maximumAge
 }
 
 func (e *rpcEndpoint) call(ctx context.Context, method string, params []interface{}, target interface{}) error {
@@ -571,7 +681,7 @@ func validateRobinhoodBinding(binding RobinhoodBinding) error {
 	}
 	if !validHash(binding.VaultCodeHash) || !decimalAtLeast(binding.MinimumSettlementRaw, "25000000") ||
 		!decimalAtLeast(binding.MinimumOwnerGasRaw, "1") || !decimalAtLeast(binding.MinimumSignerGasRaw, "1") ||
-		len(binding.ReceiptHashes) == 0 || !binding.SignerJournalReady {
+		len(binding.ReceiptHashes) < 2 || !binding.SignerJournalReady {
 		return errors.New("unsafe Robinhood minimums")
 	}
 	seen := make(map[string]struct{}, len(binding.ReceiptHashes))
@@ -639,12 +749,23 @@ func addressCall(selector, address string) string {
 }
 
 func abiAddress(value string) (string, error) {
+	address, err := abiAddressOrZero(value)
+	if err != nil || address == zeroAddress {
+		return "", errors.New("invalid ABI address")
+	}
+	return address, nil
+}
+
+func abiAddressOrZero(value string) (string, error) {
+	if len(value) != 66 || !strings.HasPrefix(value, "0x") {
+		return "", errors.New("invalid ABI address")
+	}
 	decoded, err := hex.DecodeString(value[2:])
 	if err != nil || len(decoded) != 32 {
 		return "", errors.New("invalid ABI address")
 	}
 	address := "0x" + hex.EncodeToString(decoded[12:])
-	if !validAddress(address) {
+	if address != zeroAddress && !validAddress(address) {
 		return "", errors.New("invalid ABI address")
 	}
 	return address, nil

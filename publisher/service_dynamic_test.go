@@ -3,6 +3,9 @@ package publisher
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 type changingAccountSource struct {
 	mu       sync.Mutex
 	versions [][]AccountBinding
+	rejected []string
 	index    int
 }
 
@@ -22,7 +26,10 @@ func (value *changingAccountSource) List(context.Context) (AccountDiscovery, err
 		index = len(value.versions) - 1
 	}
 	value.index++
-	return AccountDiscovery{Accounts: append([]AccountBinding(nil), value.versions[index]...)}, nil
+	return AccountDiscovery{
+		Accounts:    append([]AccountBinding(nil), value.versions[index]...),
+		RejectedIDs: append([]string(nil), value.rejected...),
+	}, nil
 }
 
 func (*changingAccountSource) Close() {}
@@ -49,14 +56,20 @@ func (value *recordingLighterCollector) Collect(_ context.Context, executionID s
 type healthyRobinhoodCollector struct{}
 
 func (*healthyRobinhoodCollector) Collect(_ context.Context, binding RobinhoodBinding) (RobinhoodObservation, error) {
+	now := time.Now().UTC().Truncate(time.Second)
 	return RobinhoodObservation{
 		Vault: binding.Vault, Signer: binding.Signer, Owner: binding.Owner,
 		SettlementBalanceRaw: "50000000", OwnerGasRaw: "1", SignerGasRaw: "1",
-		AgentEnabled: true, Flat: true, WiringVerified: true, FinalityHealthy: true,
+		AgentEnabled: true, FinalizedAgentAddress: binding.Signer, FinalizedAgentEnabled: true, Flat: true,
+		WiringVerified: true, FinalityHealthy: true,
 		FundingReady: true, OwnerGasReady: true, SignerGasReady: true,
 		SignerNonceAligned: true, SpotConfigVersion: 1, StockDecimals: 18,
 		UIMultiplierE18: "1000000000000000000", NewUIMultiplierE18: "1000000000000000000",
-		OracleHealthy: true, SequencerHealthy: true, RiskMode: "ACTIVE", ObservedAt: time.Now().UTC(),
+		OracleHealthy: true, SequencerHealthy: true, GlobalMode: "ACTIVE",
+		FinalizedGlobalMode: "ACTIVE", RiskMode: "ACTIVE", FinalizedRiskMode: "ACTIVE",
+		FinalizedNumber: 100, FinalizedHash: "0x" + strings.Repeat("a", 64), FinalizedTimestamp: uint64(now.Add(-time.Minute).Unix()),
+		SourceBlockNumber: 110, SourceBlockHash: "0x" + strings.Repeat("b", 64), SourceBlockTimestamp: uint64(now.Unix()),
+		ObservedAt: now,
 	}, nil
 }
 
@@ -108,6 +121,35 @@ func TestRunOnceDiscoversAndRemovesAccountsWithoutRestart(t *testing.T) {
 	assertPolicyEvidence(t, application.bodies[2], true)
 }
 
+func TestEmptyDiscoveryIsProcessReadyButRejectedBindingsAreNot(t *testing.T) {
+	service := &Service{
+		config:   Config{Enabled: true, PollInterval: 5 * time.Second},
+		accounts: &changingAccountSource{versions: [][]AccountBinding{{}}},
+		metrics:  newPublisherMetrics("test"),
+	}
+	if err := service.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	service.HealthHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"ready"`) {
+		t.Fatalf("readyz status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	service.accounts = &changingAccountSource{
+		versions: [][]AccountBinding{{}},
+		rejected: []string{"invalid-account-binding"},
+	}
+	if err := service.RunOnce(context.Background()); err == nil {
+		t.Fatal("rejected empty discovery was accepted")
+	}
+	response = httptest.NewRecorder()
+	service.HealthHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestReadinessTracksKnownStateWhilePositionIsOpen(t *testing.T) {
 	application := &recordingSnapshotClient{}
 	service := &Service{application: application}
@@ -140,6 +182,103 @@ func TestReadinessTracksKnownStateWhilePositionIsOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertReadinessEvidence(t, application.bodies[3], "reconciled", false)
+}
+
+func TestPublishAccountPreservesAuthoritativeSourceTTL(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	lighterObserved := now.Add(-2 * time.Second)
+	robinhoodObserved := now.Add(-time.Second)
+	coordinator := &recordingSnapshotClient{}
+	application := &recordingSnapshotClient{}
+	service := &Service{
+		coordinator: coordinator, application: application, session: "test",
+		sequences: make(map[string]int64),
+	}
+	account := configTestAccount("10000000-0000-4000-8000-000000000001", 77, "0x1111111111111111111111111111111111111111")
+	account.ReadinessAccountID = account.ExecutionAccountID
+	lighter := LighterObservation{
+		Nonce: 9, ExpectedNonce: 9, NoUnknownOrders: true, NoUnknownPositions: true,
+		CollateralReady: true, RESTReconstructed: true, ObservedAt: lighterObserved,
+	}
+	robinhood := RobinhoodObservation{
+		WiringVerified: true, FinalityHealthy: true, FundingReady: true,
+		OwnerGasReady: true, SignerGasReady: true, SignerNonceAligned: true,
+		FinalizedAgentAddress: account.Robinhood.Signer, FinalizedAgentEnabled: true,
+		GlobalMode: "ACTIVE", FinalizedGlobalMode: "ACTIVE",
+		RiskMode: "ACTIVE", FinalizedRiskMode: "ACTIVE",
+		FinalizedNumber: 100, FinalizedHash: "0x" + strings.Repeat("a", 64),
+		FinalizedTimestamp: uint64(now.Add(-15 * time.Minute).Unix()),
+		SourceBlockNumber:  110, SourceBlockHash: "0x" + strings.Repeat("b", 64),
+		SourceBlockTimestamp: uint64(robinhoodObserved.Unix()),
+		ObservedAt:           robinhoodObserved,
+	}
+	if err := service.publishAccount(context.Background(), account, lighter, robinhood); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(coordinator.bodies) != 2 {
+		t.Fatalf("coordinator snapshots = %d", len(coordinator.bodies))
+	}
+	var first CoordinatorSnapshot
+	if err := json.Unmarshal(coordinator.bodies[0], &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Source != "robinhood-chain" {
+		t.Fatalf("Robinhood v3 snapshot must bootstrap before dependent sources: %s", first.Source)
+	}
+	for _, body := range coordinator.bodies {
+		var snapshot CoordinatorSnapshot
+		if err := json.Unmarshal(body, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.ExpiresAtMS-snapshot.ObservedAtMS != maxEvidenceAge.Milliseconds() {
+			t.Fatalf("%s snapshot TTL was re-stamped: %+v", snapshot.Source, snapshot)
+		}
+		if snapshot.ExpiresAtMS >= snapshot.ReceivedAtMS+maxEvidenceAge.Milliseconds() {
+			t.Fatalf("%s snapshot expiry was extended from receipt time: %+v", snapshot.Source, snapshot)
+		}
+		if snapshot.Source == "robinhood-chain" {
+			encoded, err := json.Marshal(snapshot.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload RobinhoodPayload
+			if err := json.Unmarshal(encoded, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.FinalizedNumber != robinhood.FinalizedNumber ||
+				payload.FinalizedHash != robinhood.FinalizedHash ||
+				payload.FinalizedTimestamp != robinhood.FinalizedTimestamp ||
+				payload.FinalizedAgentAddress != robinhood.FinalizedAgentAddress ||
+				payload.FinalizedAgentEnabled != robinhood.FinalizedAgentEnabled ||
+				payload.FinalizedAgentRevoked != robinhood.FinalizedAgentRevoked ||
+				payload.GlobalMode != robinhood.GlobalMode ||
+				payload.FinalizedGlobalMode != robinhood.FinalizedGlobalMode ||
+				payload.FinalizedRiskMode != robinhood.FinalizedRiskMode ||
+				payload.SourceBlockNumber != robinhood.SourceBlockNumber ||
+				payload.SourceBlockHash != robinhood.SourceBlockHash ||
+				payload.SourceBlockTimestamp != robinhood.SourceBlockTimestamp {
+				t.Fatalf("Robinhood source block evidence was not persisted: %+v", payload)
+			}
+		}
+	}
+
+	var readiness ReadinessSnapshot
+	if err := json.Unmarshal(application.bodies[0], &readiness); err != nil {
+		t.Fatal(err)
+	}
+	for _, evidence := range readiness.Evidence {
+		switch evidence.CheckName {
+		case "reconciled":
+			if !evidence.ObservedAt.Equal(lighterObserved) || !evidence.ExpiresAt.Equal(lighterObserved.Add(maxEvidenceAge)) {
+				t.Fatalf("reconciled evidence did not preserve the oldest source time: %+v", evidence)
+			}
+		case "robinhood_funded":
+			if !evidence.ObservedAt.Equal(robinhoodObserved) || !evidence.ExpiresAt.Equal(robinhoodObserved.Add(maxEvidenceAge)) {
+				t.Fatalf("Robinhood readiness evidence was re-stamped: %+v", evidence)
+			}
+		}
+	}
 }
 
 func assertPolicyEvidence(t *testing.T, body []byte, expected bool) {

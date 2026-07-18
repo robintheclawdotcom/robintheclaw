@@ -1,0 +1,43 @@
+{
+  "groups": {
+    "robin-lighter-market-config": {
+      "LIGHTER_AAPL_MARKET_INDEX": ""
+    },
+    "robin-aapl-strategy-policy": {
+      "AAPL_MINIMUM_NET_EDGE_PPM": "",
+      "AAPL_STRATEGY_POLICY_SALT": ""
+    },
+    "robin-quote-authority-robinhood-rpc": {
+      "ROBINHOOD_RPC_URL": "",
+      "ROBINHOOD_RECONCILIATION_RPC_URL": ""
+    },
+    "robin-lighter-market-spec": {
+      "LIGHTER_AAPL_BASE_DECIMALS": "",
+      "LIGHTER_AAPL_PRICE_DECIMALS": ""
+    },
+    "robin-aapl-reference-feed-config": {
+      "AAPL_REFERENCE_FEED": "",
+      "AAPL_REFERENCE_FEED_CODE_HASH": "",
+      "AAPL_SOURCE_FEED_CODE_HASH": "",
+      "AAPL_SOURCE_AGGREGATOR": "",
+      "AAPL_SOURCE_AGGREGATOR_CODE_HASH": "",
+      "AAPL_REFERENCE_FEED_DECIMALS": "",
+      "AAPL_REFERENCE_FEED_HEARTBEAT_SECONDS": ""
+    },
+    "robin-quote-authority-public-key": {
+      "ROBIN_QUOTE_AUTHORITY_ED25519_PUBLIC_KEY": ""
+    },
+    "robin-sequencer-feed-config": {
+      "SEQUENCER_FEED_ADDRESS": "",
+      "SEQUENCER_FEED_CODE_HASH": "",
+      "SEQUENCER_USDG_PROXY_CODE_HASH": "",
+      "SEQUENCER_USDG_IMPLEMENTATION_ADDRESS": "",
+      "SEQUENCER_USDG_IMPLEMENTATION_CODE_HASH": "",
+      "SEQUENCER_AAPL_PROXY_CODE_HASH": "",
+      "SEQUENCER_AAPL_BEACON_ADDRESS": "",
+      "SEQUENCER_AAPL_BEACON_CODE_HASH": "",
+      "SEQUENCER_AAPL_IMPLEMENTATION_ADDRESS": "",
+      "SEQUENCER_AAPL_IMPLEMENTATION_CODE_HASH": ""
+    }
+  }
+}

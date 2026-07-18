@@ -1,13 +1,15 @@
 use crate::api::error::ApiError;
 use crate::auth::require_user;
 use crate::evm::abi;
-use crate::lighter_provisioner::{ConfirmLink, LighterProvisionerError, PrepareLink};
+use crate::lighter_provisioner::{
+    ConfirmLink, ConfirmRevocation, LighterProvisionerError, PrepareLink, RevocationBinding,
+};
 use crate::product::{
     ActivityPage, AgentCommandInput, AgentCreateInput, AgentExecutionStatus, AgentStatusInput,
     Amount, ConfirmVaultInput, ConfirmedVault, DashboardSnapshot, LighterConfirmInput,
-    LighterLinkRequestInput, MetricInput, OpportunitySnapshot, PreferencesInput,
-    RobinhoodConfirmInput, TransactionCall, TransactionPlan, VaultSnapshot, WalletBalanceSnapshot,
-    LIVE_STRATEGY_VERSION,
+    LighterLinkRequestInput, LighterRevocationConfirmInput, MetricInput, OpportunitySnapshot,
+    PreferencesInput, RobinhoodConfirmInput, TransactionCall, TransactionPlan, VaultSnapshot,
+    WalletBalanceSnapshot, LIVE_STRATEGY_VERSION,
 };
 use crate::product_store::normalize_address;
 use crate::robinhood_provisioner::{ConfirmGraph, PrepareGraph};
@@ -468,6 +470,113 @@ pub async fn lighter_confirm(
     } else {
         Ok(HttpResponse::Accepted().json(binding))
     }
+}
+
+pub async fn lighter_revocation(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    if !state.lighter_provisioner.is_enabled() {
+        return Err(ApiError::ServiceUnavailable(
+            "Lighter provisioning is not enabled.".to_string(),
+        ));
+    }
+    let agent_id = path.into_inner();
+    let command = state
+        .product_store
+        .pending_agent_command(&auth.did, agent_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|command| command.command == "close")
+        .ok_or_else(|| ApiError::Conflict("Agent has no pending close command.".to_string()))?;
+    let identity = state
+        .product_store
+        .lighter_binding_identity(&auth.did, agent_id)
+        .await
+        .map_err(ApiError::internal)?;
+    if identity.execution_account_id != command.execution_account_id {
+        return Err(ApiError::Conflict(
+            "Close command does not match the execution account.".to_string(),
+        ));
+    }
+    let binding = revocation_binding(identity)?;
+    let revocation = state
+        .lighter_provisioner
+        .revocation_status(&binding)
+        .await
+        .map_err(lighter_provisioner_error)?;
+    if revocation.status == "revoked" {
+        Ok(HttpResponse::Ok().json(revocation))
+    } else {
+        Ok(HttpResponse::Accepted().json(revocation))
+    }
+}
+
+pub async fn lighter_revocation_confirm(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<Uuid>,
+    input: web::Json<LighterRevocationConfirmInput>,
+) -> Result<HttpResponse, ApiError> {
+    let auth = require_user(&req, &state)?;
+    ensure_database(&state)?;
+    if !state.lighter_provisioner.is_enabled() {
+        return Err(ApiError::ServiceUnavailable(
+            "Lighter provisioning is not enabled.".to_string(),
+        ));
+    }
+    let agent_id = path.into_inner();
+    let command = state
+        .product_store
+        .pending_agent_command(&auth.did, agent_id)
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|command| command.command == "close")
+        .ok_or_else(|| ApiError::Conflict("Agent has no pending close command.".to_string()))?;
+    let identity = state
+        .product_store
+        .lighter_binding_identity(&auth.did, agent_id)
+        .await
+        .map_err(ApiError::internal)?;
+    if identity.execution_account_id != command.execution_account_id {
+        return Err(ApiError::Conflict(
+            "Close command does not match the execution account.".to_string(),
+        ));
+    }
+    let binding = revocation_binding(identity)?;
+    let revocation = state
+        .lighter_provisioner
+        .confirm_revocation(
+            &ConfirmRevocation {
+                execution_account_id: binding.execution_account_id,
+                revocation_id: input.revocation_id,
+                l1_signature: &input.l1_signature,
+            },
+            &binding,
+        )
+        .await
+        .map_err(lighter_provisioner_error)?;
+    if revocation.status == "revoked" {
+        Ok(HttpResponse::Ok().json(revocation))
+    } else {
+        Ok(HttpResponse::Accepted().json(revocation))
+    }
+}
+
+fn revocation_binding(
+    identity: crate::product::LighterBindingIdentity,
+) -> Result<RevocationBinding, ApiError> {
+    let api_key_index = u8::try_from(identity.api_key_index)
+        .map_err(|_| ApiError::Conflict("Linked Lighter API key index is invalid.".to_string()))?;
+    Ok(RevocationBinding {
+        execution_account_id: identity.execution_account_id,
+        owner_address: identity.owner_address,
+        account_index: identity.account_index,
+        api_key_index,
+    })
 }
 
 fn lighter_provisioner_error(error: anyhow::Error) -> ApiError {

@@ -148,6 +148,9 @@ func TestPublisherRejectsCrossAccountAndQuantitySubstitution(t *testing.T) {
 		{name: "episode", mutate: func(quote *protocol.QuoteBundle) {
 			quote.ExitAuthority.IntentID = hash("other")
 		}},
+		{name: "target_manifest", mutate: func(quote *protocol.QuoteBundle) {
+			quote.TargetStrategyManifestSHA256 = digest64('c')
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -179,6 +182,25 @@ func TestPublisherHandlesPartialAndSpotOnlyPhases(t *testing.T) {
 	}
 }
 
+func TestQuoteRequestBindsTargetStrategyManifest(t *testing.T) {
+	first := candidate("account-target", "8", PhasePerpAndSpot, 7)
+	second := first
+	second.TargetStrategyManifestSHA256 = digest64('c')
+	firstRequest, err := quoteRequest(first, uint64(timelessNow.UnixMilli()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRequest, err := quoteRequest(second, uint64(timelessNow.UnixMilli()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstRequest.TargetStrategyManifestSHA256 != first.TargetStrategyManifestSHA256 ||
+		firstRequest.RequestID == secondRequest.RequestID ||
+		firstRequest.SourceEvaluationID == secondRequest.SourceEvaluationID {
+		t.Fatal("target strategy manifest was not domain-bound")
+	}
+}
+
 func TestPublisherHasNoWorkWithoutPendingExit(t *testing.T) {
 	_, public := keypair(t)
 	store := &memoryStore{persisted: map[string]bool{}}
@@ -190,15 +212,18 @@ func TestPublisherHasNoWorkWithoutPendingExit(t *testing.T) {
 
 func candidate(account, suffix string, phase Phase, remaining uint64) Candidate {
 	return Candidate{ActionID: action(suffix), ExecutionAccountID: account, IntentID: hash("intent-" + suffix),
-		MarketManifest: hash("market"), SagaVersion: 8, SpotAmount: "250000", PerpBaseAmount: remaining, Phase: phase}
+		MarketManifest: hash("market"), TargetStrategyManifestSHA256: protocol.StrategyManifestSHA256,
+		SagaVersion: 8, SpotAmount: "250000", PerpBaseAmount: remaining, Phase: phase}
 }
 
 func validQuote(now time.Time, private ed25519.PrivateKey, request protocol.QuoteRequest, candidate Candidate) protocol.QuoteBundle {
 	quote := protocol.QuoteBundle{
 		SchemaVersion: protocol.QuoteSchemaVersion, RequestID: request.RequestID,
 		ExecutionAccountID: request.ExecutionAccountID, SourceEvaluationID: request.SourceEvaluationID,
-		MarketManifest: request.MarketManifest, StrategyVersion: protocol.StrategyVersion,
-		StrategyManifestSHA256: protocol.StrategyManifestSHA256, SourceConfigSHA256: protocol.SourceConfigSHA256,
+		MarketManifest:               request.MarketManifest,
+		TargetStrategyManifestSHA256: request.TargetStrategyManifestSHA256,
+		StrategyVersion:              protocol.StrategyVersion,
+		StrategyManifestSHA256:       protocol.StrategyManifestSHA256, SourceConfigSHA256: protocol.SourceConfigSHA256,
 		RouteSHA256: protocol.RouteSHA256, OraclePolicySHA256: protocol.OraclePolicySHA256,
 		RiskPolicySHA256: protocol.RiskPolicySHA256, Action: protocol.ActionUnwind,
 		Source: protocol.SourceIdentity{AdapterID: "reviewed", SpotSource: "rpc", PerpSource: "auth", OracleRound: "101"},
@@ -247,6 +272,7 @@ func keypair(t *testing.T) (ed25519.PrivateKey, ed25519.PublicKey) {
 
 func hash(value string) string {
 	candidate := Candidate{ExecutionAccountID: "account-hash", IntentID: "0x" + digest64('b'), ActionID: action("f"),
+		MarketManifest: "0x" + digest64('d'), TargetStrategyManifestSHA256: digest64('e'),
 		SagaVersion: 1, SpotAmount: "1", PerpBaseAmount: 1, Phase: PhasePerpAndSpot}
 	return domainHash("test."+value, candidate, 0)
 }

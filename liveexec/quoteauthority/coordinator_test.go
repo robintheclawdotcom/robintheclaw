@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -33,8 +34,7 @@ func TestCoordinatorPublisherRetriesExactQuoteAfterCommitTimeout(t *testing.T) {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(protocol.MarketQuoteReceipt{
+		writeSignedCoordinatorResponse(t, w, request, key, http.StatusOK, protocol.MarketQuoteReceipt{
 			Status: "duplicate", SourceSession: quote.SourceSession, SourceEventID: quote.SourceEventID,
 			PayloadSHA256: payloadSHA256,
 		})
@@ -58,7 +58,8 @@ func publicationFixture() protocol.MarketQuotePublication {
 		Source: "execution-authority", SourceSession: "authority-session-1", SourceEventID: "authority-event-1",
 		SourceSequence: 1, ExecutionAccountID: "account-canary-1", MarketManifest: testHash("market"),
 		StrategyManifestSHA256: protocol.StrategyManifestSHA256, RouteSHA256: protocol.RouteSHA256,
-		LighterMarketIndex: 101, QuoteBlockHash: testHash("block"), MarkPrice: 25_000, PublisherAtMS: 99_000,
+		TargetStrategyManifestSHA256: protocol.PreviousStrategyManifestSHA256,
+		LighterMarketIndex:           101, QuoteBlockHash: testHash("block"), MarkPrice: 25_000, PublisherAtMS: 99_000,
 		ReceivedAtMS: 99_500, ExpiresAtMS: 102_000,
 		IntentID:           "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		SpotUnwindAmountIn: "2000000", SpotUnwindExpectedAmountOut: "25000000",
@@ -68,8 +69,10 @@ func publicationFixture() protocol.MarketQuotePublication {
 
 func TestCoordinatorPublisherRejectsPayloadCollision(t *testing.T) {
 	key := bytes.Repeat([]byte{5}, 32)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusConflict)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		writeSignedCoordinatorResponse(t, w, request, key, http.StatusConflict, map[string]string{
+			"error": "market quote conflict",
+		})
 	}))
 	defer server.Close()
 	publisher, err := NewCoordinatorPublisher(server.URL, "quote-publisher", key)
@@ -80,4 +83,51 @@ func TestCoordinatorPublisherRejectsPayloadCollision(t *testing.T) {
 	if err != ErrMarketQuoteConflict {
 		t.Fatalf("payload collision was not rejected: %v", err)
 	}
+}
+
+func TestCoordinatorPublisherRejectsUnsignedReceipt(t *testing.T) {
+	key := bytes.Repeat([]byte{5}, 32)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protocol.MarketQuoteReceipt{Status: "recorded"})
+	}))
+	defer server.Close()
+	publisher, err := NewCoordinatorPublisher(server.URL, "quote-publisher", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = publisher.Publish(context.Background(), publicationFixture())
+	if !errors.Is(err, ErrMarketQuoteAmbiguous) {
+		t.Fatalf("unsigned quote receipt was accepted: %v", err)
+	}
+}
+
+func writeSignedCoordinatorResponse(
+	t *testing.T,
+	w http.ResponseWriter,
+	request *http.Request,
+	key []byte,
+	status int,
+	value any,
+) {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, '\n')
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(
+		"X-RTC-Response-Signature",
+		hex.EncodeToString(protocol.ResponseMAC(
+			key,
+			request.URL.Path,
+			"quote-publisher",
+			request.Header.Get("X-RTC-Nonce"),
+			status,
+			body,
+		)),
+	)
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }

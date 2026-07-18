@@ -93,3 +93,14 @@ func TestSignerJournalStateRejectsMismatchedAndDuplicateBindings(t *testing.T) {
 		t.Fatal("duplicate signer journal state was accepted")
 	}
 }
+
+func TestBlockedCustodyBindingRemainsObservable(t *testing.T) {
+	if !custodyObservable("active") || !custodyObservable("blocked") {
+		t.Fatal("recovery-observable custody status was rejected")
+	}
+	for _, status := range []string{"awaiting_deployment", "confirming", "rotation_pending", "closed", ""} {
+		if custodyObservable(status) {
+			t.Fatalf("non-observable custody status %q was accepted", status)
+		}
+	}
+}

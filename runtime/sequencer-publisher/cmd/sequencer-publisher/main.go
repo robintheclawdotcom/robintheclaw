@@ -44,6 +44,7 @@ func run() error {
 	journalContext, journalCancel := context.WithTimeout(ctx, config.RequestTimeout)
 	journal, err := sequencerpublisher.OpenJournal(
 		journalContext, config.DatabaseURL, config.PublisherID, config.FeedAddress, config.SignerAddress,
+		config.RunMigrations,
 	)
 	journalCancel()
 	if err != nil {
@@ -59,7 +60,8 @@ func run() error {
 	server := &http.Server{
 		Addr: config.ListenAddress, Handler: sequencerpublisher.MetricsHandler(metrics, config.Interval),
 		ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second,
-		IdleTimeout: 30 * time.Second,
+		IdleTimeout:    30 * time.Second,
+		MaxHeaderBytes: 16 << 10,
 	}
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

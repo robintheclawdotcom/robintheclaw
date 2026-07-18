@@ -58,6 +58,23 @@ const manifestKeys = [
   "strategy_version",
   "symbol",
 ];
+const riskPolicyKeys = [
+  "ambiguousSendBlocksGlobalEntry",
+  "entryDirection",
+  "maxActiveEpisodesPerAccount",
+  "maxDailyTurnoverMicros",
+  "maxGrossNotionalMicros",
+  "maxLeveragePpm",
+  "maxLegNotionalMicros",
+  "maxSpotSlippageBps",
+  "maximumAuthenticatedStateAgeMs",
+  "maximumExecutableQuoteAgeMs",
+  "minimumMaintenanceMarginCoveragePpm",
+  "minimumNetEdgePolicyCommitmentSha256",
+  "perpFirst",
+  "schemaVersion",
+  "strategyVersion",
+];
 
 const fixedLimits = {
   maxLegNotionalMicros: 25_000_000,
@@ -240,6 +257,22 @@ function validateManifest(manifest, artifacts, fail) {
   for (const [key, expected] of Object.entries(expectedArtifacts)) {
     if (manifest[key] !== expected) fail(`strategy manifest ${key} does not match its artifact`);
   }
+  let riskPolicy;
+  try {
+    riskPolicy = JSON.parse(artifacts.riskPolicy.toString("utf8"));
+  } catch {
+    fail("risk policy is not valid JSON");
+  }
+  exactKeys(riskPolicy, riskPolicyKeys, "risk policy", fail);
+  const commitment = riskPolicy.minimumNetEdgePolicyCommitmentSha256;
+  if (!/^[0-9a-f]{64}$/.test(commitment)) {
+    fail("risk policy strategy commitment is invalid");
+  }
+  for (const [name, source] of Object.entries(artifacts.policyConsumers)) {
+    if (!source.includes(commitment)) {
+      fail(`${name} strategy policy commitment does not match the risk policy`);
+    }
+  }
   if (manifest.sha256 !== calculateStrategyManifestHash(manifest)) {
     fail("strategy manifest checksum is invalid");
   }
@@ -283,11 +316,15 @@ function readInputs() {
       route: readFileSync(join(strategyDir, "basis-aapl-v1.route.json")),
       oraclePolicy: readFileSync(join(strategyDir, "basis-aapl-v1.oracle-policy.json")),
       riskPolicy: readFileSync(join(strategyDir, "basis-aapl-v1.risk-policy.json")),
+      policyConsumers: {
+        liveEvaluation: readFileSync(join(root, "runtime", "live-evaluation", "strategy_policy.go"), "utf8"),
+        paperAgent: readFileSync(join(root, "runtime", "src", "paper.rs"), "utf8"),
+      },
     },
   };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   validateLivePolicy(readInputs());
-  console.log("mainnet live policy is fail-closed");
+  console.log("mainnet live policy artifact is internally consistent; live readiness was not evaluated");
 }

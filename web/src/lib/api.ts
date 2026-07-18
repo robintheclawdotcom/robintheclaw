@@ -9,6 +9,7 @@ import type {
   ExecutionAccountRecord,
   ExecutionBindingRecord,
   LighterLinkRequest,
+  LighterRevocation,
   MeResponse,
   PreferencesRecord,
   TransactionPlan,
@@ -20,6 +21,7 @@ export class AppApiError extends Error {
     message: string,
     readonly status: number,
     readonly code: string,
+    readonly details?: unknown,
   ) {
     super(message);
   }
@@ -100,6 +102,25 @@ export class AppApi {
     });
   }
 
+  async lighterRevocation(agentId: string): Promise<LighterRevocation | null> {
+    try {
+      return await this.request(`/v1/agents/${encodeURIComponent(agentId)}/lighter/revocation`);
+    } catch (error) {
+      if (error instanceof AppApiError && [400, 404].includes(error.status)) return null;
+      throw error;
+    }
+  }
+
+  confirmLighterRevocation(agentId: string, input: {
+    revocationId: string;
+    l1Signature: string;
+  }): Promise<LighterRevocation> {
+    return this.request(`/v1/agents/${encodeURIComponent(agentId)}/lighter/revocation/confirm`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
   prepareRobinhood(agentId: string): Promise<ExecutionBindingRecord> {
     return this.request(`/v1/agents/${encodeURIComponent(agentId)}/robinhood/prepare`, { method: "POST" });
   }
@@ -119,11 +140,22 @@ export class AppApi {
     const pending = this.readPendingCommand(storageKey);
     const key = idempotencyKey ?? pending?.key ?? crypto.randomUUID();
     this.writePendingCommand(storageKey, { key, commandId: pending?.commandId });
-    const result = await this.request<AgentCommandRecord>(`/v1/agents/${encodeURIComponent(agentId)}/commands`, {
-      method: "POST",
-      headers: { "Idempotency-Key": key },
-      body: JSON.stringify({ command }),
-    });
+    let result: AgentCommandRecord;
+    try {
+      result = await this.request<AgentCommandRecord>(`/v1/agents/${encodeURIComponent(agentId)}/commands`, {
+        method: "POST",
+        headers: { "Idempotency-Key": key },
+        body: JSON.stringify({ command }),
+      });
+    } catch (error) {
+      if (
+        error instanceof AppApiError
+        && rejectedCommandMatches(error.details, agentId, command, key)
+      ) {
+        this.clearPendingCommand(storageKey);
+      }
+      throw error;
+    }
     if (this.isTerminalCommand(result)) this.clearPendingCommand(storageKey);
     else this.writePendingCommand(storageKey, { key, commandId: result.id });
     return result;
@@ -230,16 +262,38 @@ export class AppApi {
       | T
       | null;
     if (!response.ok) {
-      const error = payload as { error?: string; message?: string } | null;
+      const error = payload as { error?: string; message?: string; errorReason?: string } | null;
       if (response.status === 401 && typeof window !== "undefined") {
         window.dispatchEvent(new Event("robin:session-expired"));
       }
       throw new AppApiError(
-        error?.message ?? "Application request failed.",
+        error?.message ?? commandErrorMessage(error?.errorReason) ?? "Application request failed.",
         response.status,
-        error?.error ?? "request_failed",
+        error?.error ?? error?.errorReason ?? "request_failed",
+        payload,
       );
     }
     return payload as T;
   }
+}
+
+function rejectedCommandMatches(
+  value: unknown,
+  agentId: string,
+  command: AgentCommand,
+  idempotencyKey: string,
+) {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<AgentCommandRecord>;
+  return record.status === "rejected"
+    && record.agentId === agentId
+    && record.command === command
+    && record.idempotencyKey === idempotencyKey;
+}
+
+function commandErrorMessage(reason?: string) {
+  if (reason === "external_execution_authority_requires_reconciliation") {
+    return "Execution authority is already provisioned. Finish venue registration and reconciliation before closing; Robin will then require the owner-signed revocation.";
+  }
+  return reason?.replaceAll("_", " ");
 }

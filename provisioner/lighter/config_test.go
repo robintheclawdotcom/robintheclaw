@@ -14,6 +14,9 @@ func TestProvisionerIsDisabledByDefault(t *testing.T) {
 	if value.Enabled {
 		t.Fatal("provisioner enabled without explicit flag")
 	}
+	if !value.RunMigrations {
+		t.Fatal("development migration default changed")
+	}
 }
 
 func TestEnabledProvisionerUsesPrivateDatabaseConfiguration(t *testing.T) {
@@ -36,5 +39,25 @@ func TestEnabledProvisionerUsesPrivateDatabaseConfiguration(t *testing.T) {
 	}
 	if value.DatabaseURL != "postgres://provisioner.invalid/credentials" {
 		t.Fatalf("database URL = %q", value.DatabaseURL)
+	}
+}
+
+func TestProvisionerCanRunWithRestrictedRuntimeDatabaseRole(t *testing.T) {
+	t.Setenv("LIGHTER_PROVISIONER_ENABLED", "false")
+	t.Setenv("LIGHTER_PROVISIONER_RUN_MIGRATIONS", "false")
+	value, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.RunMigrations {
+		t.Fatal("runtime migration opt-out was ignored")
+	}
+}
+
+func TestProvisionerRejectsAmbiguousMigrationFlag(t *testing.T) {
+	t.Setenv("LIGHTER_PROVISIONER_ENABLED", "false")
+	t.Setenv("LIGHTER_PROVISIONER_RUN_MIGRATIONS", "0")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("ambiguous migration flag was accepted")
 	}
 }

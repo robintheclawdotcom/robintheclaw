@@ -1,6 +1,11 @@
 package evaluation
 
-import "testing"
+import (
+	"crypto/sha256"
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func setMarketBootstrapEnv(t *testing.T) {
 	t.Helper()
@@ -33,6 +38,12 @@ func TestLoadConfigRequiresDistinctDatabasesAndPinnedPolicy(t *testing.T) {
 	t.Setenv("ROBIN_LIVE_EVALUATION_EXECUTION_DATABASE_URL", "postgres://localhost/execution")
 	t.Setenv("ROBIN_LIVE_EVALUATION_WORKER_ID", "live-evaluation-1")
 	t.Setenv("AAPL_MINIMUM_NET_EDGE_PPM", "2000")
+	salt := strings.Repeat("ab", 32)
+	t.Setenv("AAPL_STRATEGY_POLICY_SALT", salt)
+	canonical := fmt.Sprintf("basis-aapl-v1\x00minimum_net_edge_ppm\x00%d\x00%s", 2_000, salt)
+	previousCommitment := expectedStrategyPolicyCommitment
+	expectedStrategyPolicyCommitment = fmt.Sprintf("%x", sha256.Sum256([]byte(canonical)))
+	t.Cleanup(func() { expectedStrategyPolicyCommitment = previousCommitment })
 	t.Setenv("ROBIN_LIVE_EVALUATION_LIGHTER_AAPL_MARKET_INDEX", "101")
 	setMarketBootstrapEnv(t)
 	config, err := LoadConfig()

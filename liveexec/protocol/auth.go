@@ -71,3 +71,26 @@ func RequestMAC(key []byte, method, path, caller, timestamp, nonce string, body 
 	_, _ = mac.Write([]byte(canonical))
 	return mac.Sum(nil)
 }
+
+func ResponseMAC(key []byte, path, caller, nonce string, status int, body []byte) []byte {
+	bodyHash := sha256.Sum256(body)
+	canonical := fmt.Sprintf("RESPONSE\n%s\n%s\n%s\n%d\n%s", path, caller, nonce, status, hex.EncodeToString(bodyHash[:]))
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(canonical))
+	return mac.Sum(nil)
+}
+
+func VerifyResponseMAC(key []byte, path, caller, nonce string, status int, body []byte, signature string) error {
+	provided, err := hex.DecodeString(signature)
+	if err != nil || len(provided) != sha256.Size {
+		return errors.New("invalid response signature")
+	}
+	if subtle.ConstantTimeCompare(provided, ResponseMAC(key, path, caller, nonce, status, body)) != 1 {
+		return errors.New("response signature mismatch")
+	}
+	return nil
+}
+
+func (a *Authenticator) ResponseSignature(path, nonce string, status int, body []byte) string {
+	return hex.EncodeToString(ResponseMAC(a.key, path, a.caller, nonce, status, body))
+}

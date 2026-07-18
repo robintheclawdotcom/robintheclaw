@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configureSponsorship, parseWalletRpc, WalletProxyError } from "./wallet-proxy";
+import { parseWalletRpc, removeSponsorship, WalletProxyError } from "./wallet-proxy";
 
 describe("wallet proxy", () => {
   it("accepts only the required wallet methods", () => {
@@ -11,15 +11,15 @@ describe("wallet proxy", () => {
       .toThrow("single JSON-RPC request");
   });
 
-  it("replaces client paymaster data with the server policy", () => {
+  it("removes paymaster data even when the client requests sponsorship", () => {
     const request = parseWalletRpc({
       jsonrpc: "2.0",
       id: 2,
       method: "wallet_prepareCalls",
       params: [{ capabilities: { paymasterService: { policyId: "client" }, auxiliary: true } }],
     });
-    expect(configureSponsorship(request, "server").params[0]).toEqual({
-      capabilities: { auxiliary: true, paymasterService: { policyId: "server" } },
+    expect(removeSponsorship(request).params[0]).toEqual({
+      capabilities: { auxiliary: true },
     });
   });
 
@@ -30,7 +30,7 @@ describe("wallet proxy", () => {
       method: "wallet_prepareCalls",
       params: [{ capabilities: { paymasterService: { policyId: "client" }, paymaster: { policyId: "client" }, auxiliary: true } }],
     });
-    expect(configureSponsorship(request).params[0]).toEqual({
+    expect(removeSponsorship(request).params[0]).toEqual({
       capabilities: { auxiliary: true },
     });
   });

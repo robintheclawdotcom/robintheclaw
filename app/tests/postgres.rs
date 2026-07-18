@@ -36,6 +36,316 @@ fn random_hash() -> String {
     format!("0x{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
+async fn insert_provisioning_agent(pool: &sqlx::PgPool) -> (String, Uuid, Uuid) {
+    let user_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let account_id = Uuid::new_v4();
+    let did = format!("did:test:{user_id}");
+    sqlx::query("INSERT INTO users (id, privy_did) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(&did)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, user_id, strategy_version, mode, status) VALUES ($1, $2, 'basis-aapl-v1', 'live', 'provisioning')",
+    )
+    .bind(agent_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937', 'provisioning')",
+    )
+    .bind(account_id)
+    .bind(user_id)
+    .bind(agent_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    (did, agent_id, account_id)
+}
+
+async fn insert_release_blocked_account(
+    pool: &sqlx::PgPool,
+) -> (String, Uuid, Uuid, AccountRegistration) {
+    let user_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let account_id = Uuid::new_v4();
+    let did = format!("did:test:{user_id}");
+    sqlx::query("INSERT INTO users (id, privy_did) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(&did)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO agents (
+            id, user_id, strategy_version, mode, status, blocked_reason
+        ) VALUES (
+            $1, $2, 'basis-aapl-v1', 'live', 'blocked',
+            'strategy release changed; reconcile before reprovisioning'
+        )
+        "#,
+    )
+    .bind(agent_id)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_accounts (
+            id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status
+        ) VALUES (
+            $1, $2, $3, 'basis-aapl-v1',
+            'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f',
+            'blocked'
+        )
+        "#,
+    )
+    .bind(account_id)
+    .bind(user_id)
+    .bind(agent_id)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let lighter_account_index = i64::from(u32::from_be_bytes(
+        account_id.as_bytes()[..4].try_into().unwrap(),
+    )) + 1;
+    let mut registration = AccountRegistration {
+        execution_account_id: account_id,
+        agent_id,
+        strategy_version: "basis-aapl-v1".into(),
+        risk_version: "basis-aapl-v1".into(),
+        strategy_manifest_sha256:
+            "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f".into(),
+        lighter_account_index,
+        lighter_api_key_index: 254,
+        robinhood_owner: random_address().to_ascii_lowercase(),
+        robinhood_vault: random_address().to_ascii_lowercase(),
+        robinhood_signer: random_address().to_ascii_lowercase(),
+        binding_sha256: String::new(),
+    };
+    registration.binding_sha256 = registration.calculate_binding_sha256();
+    sqlx::query(
+        r#"
+        INSERT INTO coordinator_account_registrations (
+            execution_account_id, agent_id, strategy_version, risk_version,
+            strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+            robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256,
+            status, coordinator_account_status, coordinator_control_mode,
+            registered_at, last_error
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+            'blocked', 'blocked', 'HALTED', now(),
+            'strategy release changed; registration must not be reused'
+        )
+        "#,
+    )
+    .bind(registration.execution_account_id)
+    .bind(registration.agent_id)
+    .bind(&registration.strategy_version)
+    .bind(&registration.risk_version)
+    .bind(&registration.strategy_manifest_sha256)
+    .bind(registration.lighter_account_index)
+    .bind(registration.lighter_api_key_index)
+    .bind(&registration.robinhood_owner)
+    .bind(&registration.robinhood_vault)
+    .bind(&registration.robinhood_signer)
+    .bind(&registration.binding_sha256)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_account_bindings (
+            id, execution_account_id, venue, binding_ref, request_id, owner_address,
+            lighter_account_index, lighter_api_key_index, public_identifier, status
+        ) VALUES ($1, $2, 'lighter', $3, $4, $5, $6, $7, $8, 'linked')
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(&registration.robinhood_owner)
+    .bind(registration.lighter_account_index)
+    .bind(registration.lighter_api_key_index)
+    .bind(format!(
+        "account:{}:key:{}",
+        registration.lighter_account_index, registration.lighter_api_key_index
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    (did, agent_id, account_id, registration)
+}
+
+#[tokio::test]
+#[ignore = "requires APP_TEST_DATABASE_URL"]
+async fn release_upgrade_terminalizes_registration_outbox() {
+    let database_url = std::env::var("APP_TEST_DATABASE_URL").expect("APP_TEST_DATABASE_URL");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "DROP SCHEMA IF EXISTS release_upgrade_outbox CASCADE; \
+         CREATE SCHEMA release_upgrade_outbox",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::raw_sql("SET search_path TO release_upgrade_outbox")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
+    for migration in [
+        include_str!("../migrations/0001_product.sql"),
+        include_str!("../migrations/0002_agents.sql"),
+        include_str!("../migrations/0003_mainnet_agents.sql"),
+        include_str!("../migrations/0004_live_agent_hardening.sql"),
+        include_str!("../migrations/0005_command_dispatch.sql"),
+        include_str!("../migrations/0006_robinhood_provisioning.sql"),
+        include_str!("../migrations/0007_account_registration.sql"),
+        include_str!("../migrations/0008_robinhood_authorization_proof.sql"),
+        include_str!("../migrations/0009_repin_strategy_manifest.sql"),
+    ] {
+        sqlx::raw_sql(migration)
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+    }
+
+    let user_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let account_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, privy_did) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(format!("did:test:{user_id}"))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, user_id, strategy_version, mode, status) \
+         VALUES ($1, $2, 'basis-aapl-v1', 'live', 'ready')",
+    )
+    .bind(agent_id)
+    .bind(user_id)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO execution_accounts \
+         (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) \
+         VALUES ($1, $2, $3, 'basis-aapl-v1', $4, 'ready')",
+    )
+    .bind(account_id)
+    .bind(user_id)
+    .bind(agent_id)
+    .bind("da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f")
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO coordinator_account_registrations (
+            execution_account_id, agent_id, strategy_version, risk_version,
+            strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+            robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256,
+            status, registered_at
+        ) VALUES (
+            $1, $2, 'basis-aapl-v1', 'basis-aapl-v1', $3, 91, 254,
+            '0x0000000000000000000000000000000000000091',
+            '0x0000000000000000000000000000000000000092',
+            '0x0000000000000000000000000000000000000093',
+            $4, 'registered', now()
+        )
+        "#,
+    )
+    .bind(account_id)
+    .bind(agent_id)
+    .bind("da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f")
+    .bind("a".repeat(64))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO coordinator_account_registration_outbox \
+         (execution_account_id, claimed_at, claimed_by) VALUES ($1, now(), 'old-worker')",
+    )
+    .bind(account_id)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+
+    sqlx::raw_sql(include_str!(
+        "../migrations/0010_repin_private_strategy_policy.sql"
+    ))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0011_execution_account_generations.sql"
+    ))
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+
+    let state = sqlx::query_as::<_, (String, Option<String>, bool, bool, bool)>(
+        r#"
+        SELECT registration.status, registration.last_error,
+               outbox.delivered_at IS NOT NULL,
+               outbox.claimed_at IS NULL,
+               outbox.claimed_by IS NULL
+        FROM coordinator_account_registrations registration
+        JOIN coordinator_account_registration_outbox outbox USING (execution_account_id)
+        WHERE registration.execution_account_id = $1
+        "#,
+    )
+    .bind(account_id)
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        state,
+        (
+            "blocked".into(),
+            Some("strategy release changed; registration must not be reused".into()),
+            true,
+            true,
+            true,
+        )
+    );
+
+    let legacy_upsert = sqlx::query(
+        r#"
+        INSERT INTO agents (id, user_id, strategy_version, mode, status)
+        VALUES ($1, $2, 'basis-aapl-v1', 'live', 'setup')
+        ON CONFLICT (user_id) DO UPDATE SET
+            strategy_version = EXCLUDED.strategy_version,
+            mode = 'live',
+            status = 'setup',
+            blocked_reason = NULL,
+            updated_at = now()
+        WHERE agents.mode = 'paper'
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    assert_eq!(legacy_upsert.rows_affected(), 0);
+}
+
 #[tokio::test]
 #[ignore = "requires APP_TEST_DATABASE_URL"]
 async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
@@ -45,6 +355,7 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
         .connect(&database_url)
         .await
         .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
     let user_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let account_id = Uuid::new_v4();
@@ -67,7 +378,7 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f', 'provisioning')",
+        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937', 'provisioning')",
     )
     .bind(account_id)
     .bind(user_id)
@@ -150,7 +461,7 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
         strategy_version: "basis-aapl-v1".into(),
         risk_version: "basis-aapl-v1".into(),
         strategy_manifest_sha256:
-            "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f".into(),
+            "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937".into(),
         lighter_account_index: account_index,
         lighter_api_key_index: 254,
         robinhood_owner: random_address().to_ascii_lowercase(),
@@ -321,7 +632,7 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f', 'provisioning')",
+        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937', 'provisioning')",
     )
     .bind(other_account)
     .bind(other_user)
@@ -452,7 +763,7 @@ async fn readiness_is_complete_fresh_append_only_and_tenant_unique() {
 
 #[tokio::test]
 #[ignore = "requires APP_TEST_DATABASE_URL"]
-async fn unregistered_agent_closes_locally_without_dispatch() {
+async fn unprovisioned_agent_closes_locally_without_dispatch() {
     let database_url = std::env::var("APP_TEST_DATABASE_URL").expect("APP_TEST_DATABASE_URL");
     let pool = PgPoolOptions::new()
         .max_connections(2)
@@ -460,33 +771,7 @@ async fn unregistered_agent_closes_locally_without_dispatch() {
         .await
         .unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
-    let user_id = Uuid::new_v4();
-    let agent_id = Uuid::new_v4();
-    let account_id = Uuid::new_v4();
-    let did = format!("did:test:{user_id}");
-    sqlx::query("INSERT INTO users (id, privy_did) VALUES ($1, $2)")
-        .bind(user_id)
-        .bind(&did)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO agents (id, user_id, strategy_version, mode, status) VALUES ($1, $2, 'basis-aapl-v1', 'live', 'provisioning')",
-    )
-    .bind(agent_id)
-    .bind(user_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f', 'provisioning')",
-    )
-    .bind(account_id)
-    .bind(user_id)
-    .bind(agent_id)
-    .execute(&pool)
-    .await
-    .unwrap();
+    let (did, agent_id, account_id) = insert_provisioning_agent(&pool).await;
 
     let store = ProductStore::from_pool(pool.clone());
     for command in ["launch", "pause", "resume", "withdraw"] {
@@ -505,54 +790,6 @@ async fn unregistered_agent_closes_locally_without_dispatch() {
             Some("coordinator_account_not_registered")
         );
     }
-
-    let mut registration = AccountRegistration {
-        execution_account_id: account_id,
-        agent_id,
-        strategy_version: "basis-aapl-v1".into(),
-        risk_version: "basis-aapl-v1".into(),
-        strategy_manifest_sha256:
-            "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f".into(),
-        lighter_account_index: i64::from(u32::from_be_bytes(
-            account_id.as_bytes()[..4].try_into().unwrap(),
-        )) + 1,
-        lighter_api_key_index: 254,
-        robinhood_owner: random_address().to_ascii_lowercase(),
-        robinhood_vault: random_address().to_ascii_lowercase(),
-        robinhood_signer: random_address().to_ascii_lowercase(),
-        binding_sha256: String::new(),
-    };
-    registration.binding_sha256 = registration.calculate_binding_sha256();
-    sqlx::query(
-        r#"
-        INSERT INTO coordinator_account_registrations (
-            execution_account_id, agent_id, strategy_version, risk_version,
-            strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
-            robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        "#,
-    )
-    .bind(registration.execution_account_id)
-    .bind(registration.agent_id)
-    .bind(&registration.strategy_version)
-    .bind(&registration.risk_version)
-    .bind(&registration.strategy_manifest_sha256)
-    .bind(registration.lighter_account_index)
-    .bind(registration.lighter_api_key_index)
-    .bind(&registration.robinhood_owner)
-    .bind(&registration.robinhood_vault)
-    .bind(&registration.robinhood_signer)
-    .bind(&registration.binding_sha256)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO coordinator_account_registration_outbox (execution_account_id) VALUES ($1)",
-    )
-    .bind(account_id)
-    .execute(&pool)
-    .await
-    .unwrap();
 
     let closed = store
         .create_agent_command(&did, agent_id, "pre-registration-close", "close")
@@ -596,27 +833,577 @@ async fn unregistered_agent_closes_locally_without_dispatch() {
     .await
     .unwrap();
     assert_eq!(outbox_rows, 0);
-    let registration_state = sqlx::query_as::<_, (String, Option<String>, bool)>(
+    let next_agent = store
+        .create_live_agent(&did, "basis-aapl-v1")
+        .await
+        .unwrap();
+    assert_eq!(next_agent.id, agent_id);
+    assert_eq!(next_agent.status, "setup");
+    let next_account = store
+        .create_execution_account(&did, next_agent.id)
+        .await
+        .unwrap();
+    assert_eq!(next_account.id, account_id);
+    assert_eq!(next_account.status, "provisioning");
+}
+
+#[tokio::test]
+#[ignore = "requires APP_TEST_DATABASE_URL"]
+async fn robinhood_authority_requires_registered_revocation_before_close() {
+    let database_url = std::env::var("APP_TEST_DATABASE_URL").expect("APP_TEST_DATABASE_URL");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let (did, agent_id, account_id) = insert_provisioning_agent(&pool).await;
+    let owner = random_address().to_ascii_lowercase();
+    let vault = random_address().to_ascii_lowercase();
+    let signer = random_address().to_ascii_lowercase();
+    let factory = random_address().to_ascii_lowercase();
+    let registry = random_address().to_ascii_lowercase();
+    let risk_manager = random_address().to_ascii_lowercase();
+    let spot_adapter = random_address().to_ascii_lowercase();
+    let policy_digest = random_hash();
+    let deployment_hash = random_hash();
+    let authorization_hash = random_hash();
+
+    sqlx::query(
         r#"
-        SELECT registration.status, registration.last_error,
-            outbox.delivered_at IS NOT NULL
-        FROM coordinator_account_registrations registration
-        JOIN coordinator_account_registration_outbox outbox USING (execution_account_id)
-        WHERE registration.execution_account_id = $1
+        INSERT INTO execution_account_bindings (
+            id, execution_account_id, venue, binding_ref, request_id,
+            provider_request_id, owner_address, public_identifier,
+            proof_transaction_hash, status, robinhood_vault_address,
+            robinhood_signer_address, robinhood_key_version,
+            robinhood_factory_address, robinhood_registry_address,
+            robinhood_policy_digest, robinhood_risk_manager_address,
+            robinhood_spot_adapter_address, robinhood_deployment_block,
+            robinhood_authorization_transaction_hash,
+            robinhood_authorization_block
+        ) VALUES (
+            $1, $2, 'robinhood', $3, $4, $2, $5, $6, $7, 'linked',
+            $6, $8, 1, $9, $10, $11, $12, $13, 100, $14, 101
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(&owner)
+    .bind(&vault)
+    .bind(&deployment_hash)
+    .bind(&signer)
+    .bind(&factory)
+    .bind(&registry)
+    .bind(&policy_digest)
+    .bind(&risk_manager)
+    .bind(&spot_adapter)
+    .bind(&authorization_hash)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let store = ProductStore::from_pool(pool.clone());
+    let rejected = store
+        .create_agent_command(&did, agent_id, "robinhood-before-lighter-close", "close")
+        .await
+        .unwrap();
+    assert_eq!(rejected.status, "rejected");
+    assert_eq!(
+        rejected.error_reason.as_deref(),
+        Some("external_execution_authority_requires_reconciliation")
+    );
+    assert!(rejected.completed_at.is_none());
+    assert!(rejected.owner_actions.is_empty());
+    let lifecycle = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT account.status, agent.status
+        FROM execution_accounts account
+        JOIN agents agent ON agent.id = account.agent_id
+        WHERE account.id = $1
         "#,
     )
     .bind(account_id)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(
-        registration_state,
-        (
-            "blocked".into(),
-            Some("owner_closed_before_registration".into()),
-            true
+    assert_eq!(lifecycle, ("provisioning".into(), "provisioning".into()));
+    let outbox_rows = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM agent_command_outbox outbox
+        JOIN agent_commands command ON command.id = outbox.command_id
+        WHERE command.agent_id = $1
+        "#,
+    )
+    .bind(agent_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(outbox_rows, 0);
+
+    let lighter_account_index = i64::from(u32::from_be_bytes(
+        account_id.as_bytes()[..4].try_into().unwrap(),
+    )) + 1;
+    sqlx::query(
+        r#"
+        INSERT INTO execution_account_bindings (
+            id, execution_account_id, venue, binding_ref, request_id,
+            provider_request_id, owner_address, lighter_account_index,
+            lighter_api_key_index, public_identifier, public_key,
+            association_payload, proof_transaction_hash, status
+        ) VALUES (
+            $1, $2, 'lighter', $3, $4, $5, $6, $7, 254,
+            $8, $9, 'owner-authorized', $10, 'linked'
         )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(&owner)
+    .bind(lighter_account_index)
+    .bind(format!("account:{lighter_account_index}:key:254"))
+    .bind(random_hash())
+    .bind(random_hash())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut registration = AccountRegistration {
+        execution_account_id: account_id,
+        agent_id,
+        strategy_version: "basis-aapl-v1".into(),
+        risk_version: "basis-aapl-v1".into(),
+        strategy_manifest_sha256:
+            "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937".into(),
+        lighter_account_index,
+        lighter_api_key_index: 254,
+        robinhood_owner: owner.clone(),
+        robinhood_vault: vault.clone(),
+        robinhood_signer: signer,
+        binding_sha256: String::new(),
+    };
+    registration.binding_sha256 = registration.calculate_binding_sha256();
+    sqlx::query(
+        r#"
+        INSERT INTO coordinator_account_registrations (
+            execution_account_id, agent_id, strategy_version, risk_version,
+            strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+            robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256,
+            status, coordinator_account_status, coordinator_control_mode, registered_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+            'registered', 'active', 'ACTIVE', now()
+        )
+        "#,
+    )
+    .bind(registration.execution_account_id)
+    .bind(registration.agent_id)
+    .bind(&registration.strategy_version)
+    .bind(&registration.risk_version)
+    .bind(&registration.strategy_manifest_sha256)
+    .bind(registration.lighter_account_index)
+    .bind(registration.lighter_api_key_index)
+    .bind(&registration.robinhood_owner)
+    .bind(&registration.robinhood_vault)
+    .bind(&registration.robinhood_signer)
+    .bind(&registration.binding_sha256)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let close = store
+        .create_agent_command(&did, agent_id, "reconciled-close", "close")
+        .await
+        .unwrap();
+    assert_eq!(close.status, "pending");
+    assert_eq!(close.agent_status, "closing");
+    let claimed = store
+        .claim_agent_commands("reconciled-close-worker", 1)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, close.id);
+    assert_eq!(claimed[0].lighter_owner.as_deref(), Some(owner.as_str()));
+    assert_eq!(
+        claimed[0].lighter_account_index,
+        Some(lighter_account_index)
     );
+    assert_eq!(claimed[0].lighter_api_key_index, Some(254));
+    let halt = OwnerAction {
+        chain_id: 4663,
+        from: owner,
+        to: vault,
+        data: "0x51755334".into(),
+        value: "0".into(),
+    };
+    store
+        .await_agent_command_signature(close.id, &"a".repeat(64), &[halt])
+        .await
+        .unwrap();
+    let awaiting_revocation = store.agent_command(&did, agent_id, close.id).await.unwrap();
+    assert_eq!(awaiting_revocation.status, "awaiting_signature");
+    assert_eq!(awaiting_revocation.owner_actions.len(), 1);
+    assert!(awaiting_revocation.completed_at.is_none());
+    let other_did = format!("did:test:{}", Uuid::new_v4());
+    assert!(store
+        .lighter_binding_identity(&other_did, agent_id)
+        .await
+        .is_err());
+    assert!(store
+        .agent_command(&other_did, agent_id, close.id)
+        .await
+        .is_err());
+    assert!(store
+        .pending_agent_command(&other_did, agent_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM agents WHERE id = $1")
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "closing"
+    );
+
+    let closed = store
+        .complete_reconciled_agent_command(close.id, &"b".repeat(64), None)
+        .await
+        .unwrap();
+    assert_eq!(closed.status, "completed");
+    assert_eq!(closed.agent_status, "closed");
+    assert_eq!(
+        store
+            .create_live_agent(&did, "basis-aapl-v1")
+            .await
+            .unwrap_err()
+            .to_string(),
+        "governance_rotation_required"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires APP_TEST_DATABASE_URL"]
+async fn release_rotation_terminalizes_non_close_commands_and_preserves_close() {
+    let database_url = std::env::var("APP_TEST_DATABASE_URL").expect("APP_TEST_DATABASE_URL");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let store = ProductStore::from_pool(pool.clone());
+
+    for status in ["pending", "processing", "awaiting_signature"] {
+        let (did, agent_id, account_id, registration) = insert_release_blocked_account(&pool).await;
+        let stale_id = Uuid::new_v4();
+        let stale_action = OwnerAction {
+            chain_id: 4663,
+            from: registration.robinhood_owner.clone(),
+            to: registration.robinhood_vault.clone(),
+            data: format!("0x142834dd{:064x}", 1),
+            value: "0".into(),
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO agent_commands (
+                id, agent_id, execution_account_id, idempotency_key, command,
+                status, agent_status, target_agent_status, dispatch_requested_at,
+                result_evidence_digest, result_owner_actions
+            ) VALUES (
+                $1, $2, $3, $4, 'withdraw', $5, 'blocked', 'closed',
+                CASE WHEN $5 = 'pending' THEN NULL ELSE now() END,
+                $6, $7
+            )
+            "#,
+        )
+        .bind(stale_id)
+        .bind(agent_id)
+        .bind(account_id)
+        .bind(format!("stale-{status}"))
+        .bind(status)
+        .bind("a".repeat(64))
+        .bind(sqlx::types::Json(vec![stale_action.clone()]))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO agent_command_outbox (command_id) VALUES ($1)")
+            .bind(stale_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let claimed = store
+            .claim_agent_commands(&format!("release-rotation-{status}"), 100)
+            .await
+            .unwrap();
+        assert!(claimed.iter().all(|item| item.id != stale_id));
+        let recovered = store.recover_agent_commands(100).await.unwrap();
+        assert!(recovered.iter().all(|item| item.id != stale_id));
+
+        let close = store
+            .create_agent_command(&did, agent_id, &format!("release-close-{status}"), "close")
+            .await
+            .unwrap();
+        assert_eq!(close.status, "pending");
+
+        let terminal =
+            sqlx::query_as::<_, (String, Option<String>, bool, i64, bool, Option<String>)>(
+                r#"
+            SELECT command.status, command.error_reason,
+                command.completed_at IS NOT NULL,
+                jsonb_array_length(command.result_owner_actions)::bigint,
+                outbox.delivered_at IS NOT NULL, outbox.last_error
+            FROM agent_commands command
+            JOIN agent_command_outbox outbox ON outbox.command_id = command.id
+            WHERE command.id = $1
+            "#,
+            )
+            .bind(stale_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            terminal,
+            (
+                "failed".into(),
+                Some("strategy_release_changed_close_required".into()),
+                true,
+                0,
+                true,
+                Some("strategy_release_changed_close_required".into())
+            )
+        );
+        assert!(store
+            .await_agent_command_signature(stale_id, &"b".repeat(64), &[stale_action])
+            .await
+            .is_err());
+        assert!(store
+            .complete_reconciled_agent_command(stale_id, &"c".repeat(64), None)
+            .await
+            .is_err());
+
+        store
+            .block_account_registration(
+                account_id,
+                "strategy release changed; registration must not be reused",
+            )
+            .await
+            .unwrap();
+        let preserved = sqlx::query_as::<_, (String, String, String)>(
+            r#"
+            SELECT command.status, command.agent_status, agent.status
+            FROM agent_commands command
+            JOIN agents agent ON agent.id = command.agent_id
+            WHERE command.id = $1
+            "#,
+        )
+        .bind(close.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            preserved,
+            ("pending".into(), "blocked".into(), "blocked".into())
+        );
+        let claimed = store
+            .claim_agent_commands(&format!("release-close-worker-{status}"), 100)
+            .await
+            .unwrap();
+        assert!(claimed.iter().any(|item| item.id == close.id));
+        let closed = store
+            .complete_reconciled_agent_command(close.id, &"d".repeat(64), None)
+            .await
+            .unwrap();
+        assert_eq!(closed.status, "completed");
+        assert_eq!(closed.agent_status, "closed");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires APP_TEST_DATABASE_URL"]
+async fn release_blocked_account_closes_but_requires_governance_rotation() {
+    let database_url = std::env::var("APP_TEST_DATABASE_URL").expect("APP_TEST_DATABASE_URL");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+
+    let user_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let account_id = Uuid::new_v4();
+    let did = format!("did:test:{user_id}");
+    sqlx::query("INSERT INTO users (id, privy_did) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(&did)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO agents (
+            id, user_id, strategy_version, mode, status, blocked_reason
+        ) VALUES (
+            $1, $2, 'basis-aapl-v1', 'live', 'blocked',
+            'strategy release changed; reconcile before reprovisioning'
+        )
+        "#,
+    )
+    .bind(agent_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_accounts (
+            id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status
+        ) VALUES (
+            $1, $2, $3, 'basis-aapl-v1',
+            'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f',
+            'blocked'
+        )
+        "#,
+    )
+    .bind(account_id)
+    .bind(user_id)
+    .bind(agent_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let snapshot_id = Uuid::new_v4();
+    let observed_at = Utc::now();
+    for check_name in [
+        "lighter_linked",
+        "lighter_funded",
+        "robinhood_deployed",
+        "robinhood_funded",
+        "user_gas_ready",
+        "execution_gas_ready",
+        "policy_active",
+        "reconciled",
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO agent_readiness_evidence (
+                id, execution_account_id, snapshot_id, check_name, ready, source,
+                evidence_digest, observed_at, expires_at
+            ) VALUES ($1, $2, $3, $4, false, 'release-upgrade-test', $5, $6, $7)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(account_id)
+        .bind(snapshot_id)
+        .bind(check_name)
+        .bind("2".repeat(64))
+        .bind(observed_at)
+        .bind(observed_at + Duration::minutes(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let lighter_account_index = i64::from(u32::from_be_bytes(
+        account_id.as_bytes()[..4].try_into().unwrap(),
+    )) + 1;
+    let mut registration = AccountRegistration {
+        execution_account_id: account_id,
+        agent_id,
+        strategy_version: "basis-aapl-v1".into(),
+        risk_version: "basis-aapl-v1".into(),
+        strategy_manifest_sha256:
+            "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f".into(),
+        lighter_account_index,
+        lighter_api_key_index: 254,
+        robinhood_owner: random_address().to_ascii_lowercase(),
+        robinhood_vault: random_address().to_ascii_lowercase(),
+        robinhood_signer: random_address().to_ascii_lowercase(),
+        binding_sha256: String::new(),
+    };
+    registration.binding_sha256 = registration.calculate_binding_sha256();
+    sqlx::query(
+        r#"
+        INSERT INTO coordinator_account_registrations (
+            execution_account_id, agent_id, strategy_version, risk_version,
+            strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+            robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256,
+            status, coordinator_account_status, coordinator_control_mode,
+            registered_at, last_error
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+            'blocked', 'blocked', 'HALTED', now(),
+            'strategy release changed; registration must not be reused'
+        )
+        "#,
+    )
+    .bind(registration.execution_account_id)
+    .bind(registration.agent_id)
+    .bind(&registration.strategy_version)
+    .bind(&registration.risk_version)
+    .bind(&registration.strategy_manifest_sha256)
+    .bind(registration.lighter_account_index)
+    .bind(registration.lighter_api_key_index)
+    .bind(&registration.robinhood_owner)
+    .bind(&registration.robinhood_vault)
+    .bind(&registration.robinhood_signer)
+    .bind(&registration.binding_sha256)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_account_bindings (
+            id, execution_account_id, venue, binding_ref, request_id, owner_address,
+            lighter_account_index, lighter_api_key_index, public_identifier, status
+        ) VALUES ($1, $2, 'lighter', $3, $4, $5, $6, 254, $7, 'linked')
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(&registration.robinhood_owner)
+    .bind(lighter_account_index)
+    .bind(format!("account:{lighter_account_index}:key:254"))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let store = ProductStore::from_pool(pool.clone());
+    let close = store
+        .create_agent_command(&did, agent_id, "release-upgrade-close", "close")
+        .await
+        .unwrap();
+    assert_eq!(close.status, "pending");
+    assert_eq!(close.agent_status, "closing");
+    let claimed = store
+        .claim_agent_commands("release-upgrade-worker", 1)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, close.id);
+    let closed = store
+        .complete_reconciled_agent_command(close.id, &"3".repeat(64), None)
+        .await
+        .unwrap();
+    assert_eq!(closed.status, "completed");
+    assert_eq!(closed.agent_status, "closed");
+
+    let error = store
+        .create_live_agent(&did, "basis-aapl-v1")
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "governance_rotation_required");
 }
 
 #[tokio::test]
@@ -668,7 +1455,7 @@ async fn robinhood_graph_binding_is_immutable_and_provisioner_authoritative() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f', 'provisioning')",
+        "INSERT INTO execution_accounts (id, user_id, agent_id, strategy_version, strategy_manifest_sha256, status) VALUES ($1, $2, $3, 'basis-aapl-v1', '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937', 'provisioning')",
     )
     .bind(account_id)
     .bind(user_id)

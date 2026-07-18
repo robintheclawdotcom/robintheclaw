@@ -7,10 +7,11 @@ use crate::{
     AppState,
 };
 use axum::{
-    body::Bytes,
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    body::{to_bytes, Body, Bytes},
+    extract::{Path, Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -48,7 +49,49 @@ pub fn routes(state: Arc<AppState>) -> Router {
         )
         .route("/v1/market-quotes", post(record_market_quote))
         .layer(axum::extract::DefaultBodyLimit::max(64 << 10))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            authenticate_response,
+        ))
         .with_state(state)
+}
+
+async fn authenticate_response(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let nonce = request
+        .headers()
+        .get("X-RTC-Nonce")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let Some(scope) = response_scope(&method, &path) else {
+        return next.run(request).await;
+    };
+    let (Some(key), Some(caller)) = auth_binding(&state, scope) else {
+        return next.run(request).await;
+    };
+    let key = *key;
+    let caller = caller.to_string();
+    let response = next.run(request).await;
+    let status = response.status();
+    let (mut parts, body) = response.into_parts();
+    let Ok(body) = to_bytes(body, 64 << 10).await else {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response authentication failed",
+        );
+    };
+    let signature = response_signature(&key, &path, &caller, &nonce, status, &body);
+    parts.headers.insert(
+        "X-RTC-Response-Signature",
+        HeaderValue::from_str(&signature).expect("hex signature is a valid header value"),
+    );
+    Response::from_parts(parts, Body::from(body))
 }
 
 async fn register_account(
@@ -606,31 +649,34 @@ impl AuthScope {
     }
 }
 
-async fn authorize(
-    state: &AppState,
-    scope: AuthScope,
-    path: &str,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<(), (StatusCode, &'static str)> {
-    authorize_method(state, scope, "POST", path, headers, body).await
+fn response_scope(method: &Method, path: &str) -> Option<AuthScope> {
+    match (method, path) {
+        (&Method::POST, "/v1/intents" | "/v1/intent-status") => Some(AuthScope::Intent),
+        (&Method::POST, "/v1/exits" | "/v1/exit-status" | "/v1/recoveries") => {
+            Some(AuthScope::Exit)
+        }
+        (&Method::POST, "/v1/venue-events") => Some(AuthScope::VenueEvent),
+        (&Method::POST, "/v1/account-snapshots") => Some(AuthScope::AccountSnapshot),
+        (&Method::POST, "/v1/market-quotes") => Some(AuthScope::MarketQuote),
+        (&Method::POST, "/v1/account-commands" | "/v1/account-command-status") => {
+            Some(AuthScope::AccountCommand)
+        }
+        (&Method::POST, "/v1/account-registrations") => Some(AuthScope::AccountRegistration),
+        (&Method::GET, path)
+            if path.starts_with("/v1/account-registrations/")
+                || path.starts_with("/v1/account-executions/") =>
+        {
+            Some(AuthScope::AccountRegistration)
+        }
+        (&Method::GET, path) if path.starts_with("/v1/open-episodes/") => {
+            Some(AuthScope::OpenEpisode)
+        }
+        _ => None,
+    }
 }
 
-async fn authorize_method(
-    state: &AppState,
-    scope: AuthScope,
-    method: &str,
-    path: &str,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<(), (StatusCode, &'static str)> {
-    if !state.config.enabled {
-        return Err((StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled"));
-    }
-    let Some(store) = &state.store else {
-        return Err((StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled"));
-    };
-    let (key, caller) = match scope {
+fn auth_binding(state: &AppState, scope: AuthScope) -> (Option<&[u8; 32]>, Option<&str>) {
+    match scope {
         AuthScope::Intent => (
             state.config.intent_hmac_key.as_ref(),
             state.config.intent_caller_id.as_deref(),
@@ -663,7 +709,34 @@ async fn authorize_method(
             state.config.episode_hmac_key.as_ref(),
             state.config.episode_caller_id.as_deref(),
         ),
+    }
+}
+
+async fn authorize(
+    state: &AppState,
+    scope: AuthScope,
+    path: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(), (StatusCode, &'static str)> {
+    authorize_method(state, scope, "POST", path, headers, body).await
+}
+
+async fn authorize_method(
+    state: &AppState,
+    scope: AuthScope,
+    method: &str,
+    path: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(), (StatusCode, &'static str)> {
+    if !state.config.enabled {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled"));
+    }
+    let Some(store) = &state.store else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled"));
     };
+    let (key, caller) = auth_binding(state, scope);
     let (Some(key), Some(caller)) = (key, caller) else {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "coordinator disabled"));
     };
@@ -751,6 +824,24 @@ fn verify_request_signature(
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("fixed-length HMAC key");
     mac.update(canonical.as_bytes());
     mac.verify_slice(signature).is_ok()
+}
+
+fn response_signature(
+    key: &[u8; 32],
+    path: &str,
+    caller: &str,
+    nonce: &str,
+    status: StatusCode,
+    body: &[u8],
+) -> String {
+    let canonical = format!(
+        "RESPONSE\n{path}\n{caller}\n{nonce}\n{}\n{}",
+        status.as_u16(),
+        hex::encode(Sha256::digest(body)),
+    );
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("fixed-length HMAC key");
+    mac.update(canonical.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 fn valid_nonce(value: &str) -> bool {
@@ -858,6 +949,51 @@ mod tests {
             body,
             &signature,
         ));
+    }
+
+    #[test]
+    fn response_signature_binds_route_request_and_result() {
+        let key = [0x42; 32];
+        let path = "/v1/account-commands";
+        let caller = "product-command-worker";
+        let nonce = "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn";
+        let status = StatusCode::ACCEPTED;
+        let body = br#"{"status":"reducing"}"#;
+        let signature = response_signature(&key, path, caller, nonce, status, body);
+        let decoded = hex::decode(signature).unwrap();
+        let canonical = format!(
+            "RESPONSE\n{path}\n{caller}\n{nonce}\n{}\n{}",
+            status.as_u16(),
+            hex::encode(Sha256::digest(body)),
+        );
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        mac.update(canonical.as_bytes());
+        assert!(mac.verify_slice(&decoded).is_ok());
+        assert_ne!(
+            response_signature(&key, path, caller, nonce, StatusCode::OK, body),
+            hex::encode(&decoded)
+        );
+        assert_ne!(
+            response_signature(&key, path, caller, nonce, status, b"{}"),
+            hex::encode(&decoded)
+        );
+    }
+
+    #[test]
+    fn response_scope_matches_every_authenticated_route_family() {
+        assert!(matches!(
+            response_scope(&Method::POST, "/v1/intents"),
+            Some(AuthScope::Intent)
+        ));
+        assert!(matches!(
+            response_scope(&Method::GET, "/v1/open-episodes/account-id/intent-id"),
+            Some(AuthScope::OpenEpisode)
+        ));
+        assert!(matches!(
+            response_scope(&Method::GET, "/v1/account-executions/account-id"),
+            Some(AuthScope::AccountRegistration)
+        ));
+        assert!(response_scope(&Method::GET, "/readyz").is_none());
     }
 
     #[test]

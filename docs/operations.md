@@ -69,11 +69,8 @@ Before enabling onboarding:
 
 1. Confirm the chain ID, runtime bytecode, factory/faucet wiring, and addresses in
    `deployments/ux-testnet.json`.
-2. Choose the gas mode. For self-funded operation, leave `ALCHEMY_POLICY_ID` unset and fund the
-   embedded account with ETH on Robinhood Chain before onboarding. For sponsored operation, create
-   an Alchemy policy limited to the application contracts, child vaults and guards, the `claim`,
-   `approve`, `createVault`, `deposit`, `withdraw`, and `setHalted` selectors, with per-account and
-   global quotas. Store only the resulting policy ID in the web service settings.
+2. Fund the embedded account with ETH on Robinhood Chain before onboarding. The wallet proxy strips
+   paymaster capabilities and does not use a sponsorship policy.
 3. Configure all `sync: false` application values in Render. Use a provider RPC for `APP_RPC_URL`.
    Keep `PRODUCT_INDEXER_BLOCK_RANGE` within the provider's `eth_getLogs` limit; the testnet
    Blueprint uses Alchemy's 10,000-block PAYG range and a 50,000-block initial lookback.

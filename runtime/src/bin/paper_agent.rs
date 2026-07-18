@@ -2,7 +2,7 @@ use anyhow::Context;
 use chrono::Utc;
 use robin_runtime::{
     agents::AgentStore,
-    paper::{evaluate, PaperConfig, RobinhoodReader},
+    paper::{evaluate, validate_aapl_strategy_policy, PaperConfig, RobinhoodReader},
     storage::{PaperRecordOutcome, PaperStore},
 };
 use std::{env, time::Duration};
@@ -72,6 +72,9 @@ async fn main() -> anyhow::Result<()> {
         .context("AAPL_MINIMUM_NET_EDGE_PPM is required")?
         .parse()
         .context("AAPL_MINIMUM_NET_EDGE_PPM must be an integer")?;
+    let strategy_policy_salt =
+        env::var("AAPL_STRATEGY_POLICY_SALT").context("AAPL_STRATEGY_POLICY_SALT is required")?;
+    validate_aapl_strategy_policy(minimum_net_edge_ppm, &strategy_policy_salt)?;
     config.set_minimum_net_edge_ppm(minimum_net_edge_ppm)?;
     let rpc_url = env::var("ROBINHOOD_RPC_URL").context("ROBINHOOD_RPC_URL is required")?;
     let reader = RobinhoodReader::new(rpc_url)?;

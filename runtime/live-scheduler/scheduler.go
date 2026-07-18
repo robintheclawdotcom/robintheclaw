@@ -127,20 +127,22 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 func (s *Scheduler) resolveQuote(ctx context.Context, dispatch *Dispatch, now time.Time) (QuoteBundle, error) {
 	if dispatch.RequestID == "" {
 		dispatch.RequestID = requestID(dispatch.EvaluationID, dispatch.ExecutionAccountID,
-			dispatch.Evaluation.Action, dispatch.Evaluation.PairIntentID)
+			dispatch.Evaluation.Action, dispatch.Evaluation.PairIntentID,
+			dispatch.TargetStrategyManifestSHA256)
 		dispatch.RequestedAtMS = uint64(now.UnixMilli())
 		if err := s.store.PrepareQuote(ctx, *dispatch, dispatch.RequestID, dispatch.RequestedAtMS); err != nil {
 			return QuoteBundle{}, err
 		}
 	}
 	request := QuoteRequest{
-		RequestID:          dispatch.RequestID,
-		ExecutionAccountID: dispatch.ExecutionAccountID,
-		SourceEvaluationID: dispatch.EvaluationID,
-		MarketManifest:     dispatch.Evaluation.MarketManifest,
-		IntentID:           dispatch.Evaluation.PairIntentID,
-		Action:             dispatch.Evaluation.Action,
-		RequestedAtMS:      dispatch.RequestedAtMS,
+		RequestID:                    dispatch.RequestID,
+		ExecutionAccountID:           dispatch.ExecutionAccountID,
+		SourceEvaluationID:           dispatch.EvaluationID,
+		MarketManifest:               dispatch.Evaluation.MarketManifest,
+		IntentID:                     dispatch.Evaluation.PairIntentID,
+		TargetStrategyManifestSHA256: dispatch.TargetStrategyManifestSHA256,
+		Action:                       dispatch.Evaluation.Action,
+		RequestedAtMS:                dispatch.RequestedAtMS,
 	}
 	if len(dispatch.QuoteBody) != 0 {
 		if digest(dispatch.QuoteBody) != dispatch.QuoteSHA256 {

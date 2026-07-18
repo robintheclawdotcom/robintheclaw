@@ -104,6 +104,35 @@ impl ServiceAuth {
             nonce_expires_at: now + Duration::minutes(1),
         })
     }
+
+    pub fn sign_response(
+        &self,
+        path: &str,
+        request: &AuthorizedRequest,
+        status: u16,
+        body: &[u8],
+    ) -> Result<String> {
+        let caller = self
+            .caller
+            .as_deref()
+            .ok_or_else(|| anyhow!("readiness publisher authentication is disabled"))?;
+        let key = self
+            .key
+            .as_ref()
+            .ok_or_else(|| anyhow!("readiness publisher authentication is disabled"))?;
+        if request.caller != caller {
+            return Err(anyhow!("invalid readiness publisher authentication"));
+        }
+        let canonical = format!(
+            "RESPONSE\n{path}\n{caller}\n{}\n{status}\n{}",
+            request.nonce,
+            hex::encode(Sha256::digest(body))
+        );
+        let mut mac = HmacSha256::new_from_slice(key)
+            .map_err(|_| anyhow!("invalid readiness publisher authentication"))?;
+        mac.update(canonical.as_bytes());
+        Ok(hex::encode(mac.finalize().into_bytes()))
+    }
 }
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str> {

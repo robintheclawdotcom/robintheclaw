@@ -33,6 +33,10 @@ impl PrivyClient {
         }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.app_id.is_some() && self.app_secret.is_some()
+    }
+
     pub async fn identity(&self, did: &str) -> Result<IdentitySnapshot> {
         let app_id = self
             .app_id

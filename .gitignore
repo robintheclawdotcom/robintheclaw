@@ -9,6 +9,7 @@ dist/
 .harden-skill/
 web/public/docs/
 web/output/
+web/.playwright-cli/
 
 # secrets / private strategy core (never public)
 keys/

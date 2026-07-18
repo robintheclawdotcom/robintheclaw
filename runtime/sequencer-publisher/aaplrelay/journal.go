@@ -93,10 +93,12 @@ func OpenJournal(ctx context.Context, config Config) (*Journal, error) {
 	if err != nil {
 		return nil, errors.New("connect AAPL relay journal")
 	}
-	for _, schema := range []string{stateSchema, transactionSchema} {
-		if _, err := pool.Exec(ctx, schema); err != nil {
-			pool.Close()
-			return nil, fmt.Errorf("create AAPL relay journal: %w", err)
+	if config.RunMigrations {
+		for _, schema := range []string{stateSchema, transactionSchema} {
+			if _, err := pool.Exec(ctx, schema); err != nil {
+				pool.Close()
+				return nil, fmt.Errorf("create AAPL relay journal: %w", err)
+			}
 		}
 	}
 	command, err := pool.Exec(ctx, `

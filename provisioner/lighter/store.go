@@ -17,10 +17,12 @@ import (
 )
 
 var (
-	errNotFound        = errors.New("link not found")
-	errBindingMismatch = errors.New("execution account binding mismatch")
-	errRotationOpen    = errors.New("credential provisioning already in progress")
-	errAccountBound    = errors.New("Lighter subaccount is already bound to another execution account")
+	errNotFound           = errors.New("link not found")
+	errBindingMismatch    = errors.New("execution account binding mismatch")
+	errRotationOpen       = errors.New("credential provisioning already in progress")
+	errAccountBound       = errors.New("Lighter subaccount is already bound to another execution account")
+	errBindingRevoked     = errors.New("Lighter credential binding is terminally revoked")
+	errNoActiveCredential = errors.New("execution account has no active Lighter credential")
 )
 
 //go:embed migrations/*.sql
@@ -28,12 +30,18 @@ var migrationFiles embed.FS
 
 type credentialStore interface {
 	Reserve(context.Context, string, string, int64, uint8, int64) (reservation, error)
+	ReserveRevocation(context.Context, string) (revocationReservation, error)
+	ReplaceExpiredRevocation(context.Context, credential, time.Time) (revocationReservation, error)
 	Complete(context.Context, credential) (credential, error)
+	CompleteRevocation(context.Context, credential) (credential, error)
+	VerifyRevocationNonce(context.Context, credential, int64) error
 	Fail(context.Context, string, string) error
 	Latest(context.Context, string) (credential, error)
 	Get(context.Context, string, string) (credential, error)
 	MarkVerifying(context.Context, credential, string, []byte) (credential, error)
+	MarkRevocationVerifying(context.Context, credential, string, []byte) (credential, error)
 	Activate(context.Context, credential) (credential, error)
+	FinalizeRevocation(context.Context, credential, string) (credential, error)
 	Block(context.Context, credential, string) error
 	Active(context.Context, string) (credential, error)
 	ExpectedNonce(context.Context, credential) (uint64, error)
@@ -49,7 +57,7 @@ type pgStore struct {
 	pool *pgxpool.Pool
 }
 
-func openStore(ctx context.Context, databaseURL string) (*pgStore, error) {
+func openStore(ctx context.Context, databaseURL string, runMigrations bool) (*pgStore, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		return nil, errors.New("open provisioner database")
@@ -59,9 +67,11 @@ func openStore(ctx context.Context, databaseURL string) (*pgStore, error) {
 		return nil, errors.New("connect provisioner database")
 	}
 	value := &pgStore{pool: pool}
-	if err := value.migrate(ctx); err != nil {
-		pool.Close()
-		return nil, err
+	if runMigrations {
+		if err := value.migrate(ctx); err != nil {
+			pool.Close()
+			return nil, err
+		}
 	}
 	return value, nil
 }
@@ -100,12 +110,13 @@ func (value *pgStore) Reserve(ctx context.Context, executionID, owner string, ac
 	var boundOwner string
 	var boundAccount int64
 	var boundKey uint8
+	var bindingStatus string
 	var activeID *string
 	err = tx.QueryRow(ctx, `
-		SELECT owner_address, account_index, api_key_index, active_credential_id::text
+		SELECT owner_address, account_index, api_key_index, status, active_credential_id::text
 		FROM lighter_credential_bindings
 		WHERE execution_account_id = $1
-		FOR UPDATE`, executionID).Scan(&boundOwner, &boundAccount, &boundKey, &activeID)
+		FOR UPDATE`, executionID).Scan(&boundOwner, &boundAccount, &boundKey, &bindingStatus, &activeID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		_, err = tx.Exec(ctx, `
 			INSERT INTO lighter_credential_bindings (
@@ -118,9 +129,15 @@ func (value *pgStore) Reserve(ctx context.Context, executionID, owner string, ac
 			}
 			return reservation{}, errors.New("create credential binding")
 		}
-		boundOwner, boundAccount, boundKey = owner, accountIndex, apiKeyIndex
+		boundOwner, boundAccount, boundKey, bindingStatus = owner, accountIndex, apiKeyIndex, "pending"
 	} else if err != nil {
 		return reservation{}, errors.New("lock credential binding")
+	}
+	if bindingStatus == "revoked" {
+		return reservation{}, errBindingRevoked
+	}
+	if bindingStatus == "revocation_pending" || bindingStatus == "revoking" {
+		return reservation{}, errRotationOpen
 	}
 	if boundOwner != owner || boundAccount != accountIndex || boundKey != apiKeyIndex {
 		return reservation{}, errBindingMismatch
@@ -159,6 +176,7 @@ func (value *pgStore) Reserve(ctx context.Context, executionID, owner string, ac
 		AccountIndex:       accountIndex,
 		APIKeyIndex:        apiKeyIndex,
 		Version:            version,
+		Purpose:            purposeAssociation,
 		Status:             statusGenerating,
 		CreatedAt:          now,
 		UpdatedAt:          now,
@@ -172,14 +190,14 @@ func (value *pgStore) Reserve(ctx context.Context, executionID, owner string, ac
 		return reservation{}, errors.New("reserve credential")
 	}
 	rotation := activeID != nil && *activeID != ""
-	bindingStatus := "pending"
+	nextBindingStatus := "pending"
 	if rotation {
-		bindingStatus = "rotation_pending"
+		nextBindingStatus = "rotation_pending"
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE lighter_credential_bindings
 		SET status = $2, updated_at = $3
-		WHERE execution_account_id = $1`, executionID, bindingStatus, now); err != nil {
+		WHERE execution_account_id = $1`, executionID, nextBindingStatus, now); err != nil {
 		return reservation{}, errors.New("mark credential binding pending")
 	}
 	if err := appendAudit(ctx, tx, record, "credential_reserved", map[string]any{"rotation": rotation}); err != nil {
@@ -191,7 +209,215 @@ func (value *pgStore) Reserve(ctx context.Context, executionID, owner string, ac
 	return reservation{Credential: record, Rotation: rotation}, nil
 }
 
+func (value *pgStore) ReserveRevocation(ctx context.Context, executionID string) (revocationReservation, error) {
+	tx, err := value.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return revocationReservation{}, errors.New("begin credential revocation")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var owner, bindingStatus string
+	var accountIndex int64
+	var apiKeyIndex uint8
+	var activeID *string
+	err = tx.QueryRow(ctx, `
+		SELECT owner_address, account_index, api_key_index, status, active_credential_id::text
+		FROM lighter_credential_bindings
+		WHERE execution_account_id = $1
+		FOR UPDATE`, executionID).Scan(&owner, &accountIndex, &apiKeyIndex, &bindingStatus, &activeID)
+	if errors.Is(err, pgx.ErrNoRows) || activeID == nil || *activeID == "" {
+		return revocationReservation{}, errNoActiveCredential
+	}
+	if err != nil {
+		return revocationReservation{}, errors.New("lock credential revocation binding")
+	}
+	if bindingStatus == "revoked" {
+		return revocationReservation{}, errBindingRevoked
+	}
+
+	active, err := scanCredential(tx.QueryRow(ctx, credentialSelect+`
+		WHERE c.execution_account_id = $1 AND c.id = $2
+		FOR UPDATE`, executionID, *activeID))
+	if err != nil || active.Status != statusLinked || active.Purpose != purposeAssociation {
+		return revocationReservation{}, errNoActiveCredential
+	}
+
+	open, err := scanCredential(tx.QueryRow(ctx, credentialSelect+`
+		WHERE c.execution_account_id = $1
+		  AND c.status IN ('generating', 'pending', 'verifying')
+		ORDER BY c.version DESC LIMIT 1
+		FOR UPDATE`, executionID))
+	if err == nil {
+		if open.Purpose == purposeRevocation && open.ReplacesCredentialID == active.ID &&
+			open.Status != statusGenerating &&
+			(bindingStatus == "revocation_pending" || bindingStatus == "revoking") {
+			return revocationReservation{Active: active, Tombstone: open, Existing: true}, nil
+		}
+		return revocationReservation{}, errRotationOpen
+	}
+	if !errors.Is(err, errNotFound) {
+		return revocationReservation{}, errors.New("check open credential revocation")
+	}
+	if bindingStatus != "linked" {
+		return revocationReservation{}, errRotationOpen
+	}
+
+	var version int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(version), 0) + 1
+		FROM lighter_credentials
+		WHERE execution_account_id = $1`, executionID).Scan(&version); err != nil {
+		return revocationReservation{}, errors.New("allocate revocation credential version")
+	}
+	id, err := newUUID()
+	if err != nil {
+		return revocationReservation{}, err
+	}
+	now := time.Now().UTC()
+	tombstone := credential{
+		ID:                   id,
+		ExecutionAccountID:   executionID,
+		OwnerAddress:         owner,
+		AccountIndex:         accountIndex,
+		APIKeyIndex:          apiKeyIndex,
+		Version:              version,
+		Purpose:              purposeRevocation,
+		ReplacesCredentialID: active.ID,
+		Status:               statusGenerating,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO lighter_credentials (
+			id, execution_account_id, owner_address, account_index, api_key_index,
+			version, purpose, replaces_credential_id, status, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, 'revocation', $7, 'generating', $8, $8)`,
+		tombstone.ID, executionID, owner, accountIndex, apiKeyIndex, version, active.ID, now); err != nil {
+		return revocationReservation{}, errors.New("reserve revocation credential")
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE lighter_credential_bindings
+		SET status = 'revocation_pending', updated_at = $3
+		WHERE execution_account_id = $1 AND status = 'linked' AND active_credential_id = $2`,
+		executionID, active.ID, now)
+	if err != nil || command.RowsAffected() != 1 {
+		return revocationReservation{}, errors.New("mark credential revocation pending")
+	}
+	if err := appendAudit(ctx, tx, tombstone, "credential_revocation_reserved", map[string]any{
+		"replacesCredentialId": active.ID,
+	}); err != nil {
+		return revocationReservation{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return revocationReservation{}, errors.New("commit credential revocation")
+	}
+	return revocationReservation{Active: active, Tombstone: tombstone}, nil
+}
+
+func (value *pgStore) ReplaceExpiredRevocation(ctx context.Context, expired credential, now time.Time) (revocationReservation, error) {
+	if expired.Purpose != purposeRevocation || expired.Status != statusPending ||
+		expired.ExpiresAtMS > now.UnixMilli() {
+		return revocationReservation{}, errors.New("credential revocation is not replaceable")
+	}
+	tx, err := value.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return revocationReservation{}, errors.New("begin expired credential revocation replacement")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var bindingStatus string
+	var activeID *string
+	if err := tx.QueryRow(ctx, `
+		SELECT status, active_credential_id::text
+		FROM lighter_credential_bindings
+		WHERE execution_account_id = $1
+		FOR UPDATE`, expired.ExecutionAccountID).Scan(&bindingStatus, &activeID); err != nil {
+		return revocationReservation{}, errors.New("lock expired credential revocation binding")
+	}
+	if bindingStatus != "revocation_pending" || activeID == nil ||
+		*activeID != expired.ReplacesCredentialID {
+		return revocationReservation{}, errors.New("expired credential revocation binding changed")
+	}
+	canonical, err := scanCredential(tx.QueryRow(ctx, credentialSelect+`
+		WHERE c.execution_account_id = $1 AND c.id = $2
+		FOR UPDATE`, expired.ExecutionAccountID, expired.ID))
+	if err != nil || canonical.Purpose != purposeRevocation ||
+		canonical.Status != statusPending || canonical.ExpiresAtMS > now.UnixMilli() ||
+		canonical.ReplacesCredentialID != *activeID {
+		return revocationReservation{}, errors.New("credential revocation is not replaceable")
+	}
+	active, err := scanCredential(tx.QueryRow(ctx, credentialSelect+`
+		WHERE c.execution_account_id = $1 AND c.id = $2
+		FOR UPDATE`, expired.ExecutionAccountID, *activeID))
+	if err != nil || active.Status != statusLinked || active.Purpose != purposeAssociation {
+		return revocationReservation{}, errNoActiveCredential
+	}
+	command, err := tx.Exec(ctx, `
+		UPDATE lighter_credentials
+		SET encrypted_data_key = NULL, cipher_nonce = NULL, ciphertext = NULL,
+		    aad_sha256 = NULL, kms_key_id = NULL, status = 'superseded', updated_at = $3
+		WHERE execution_account_id = $1 AND id = $2
+		  AND purpose = 'revocation' AND status = 'pending'`,
+		expired.ExecutionAccountID, expired.ID, now)
+	if err != nil || command.RowsAffected() != 1 {
+		return revocationReservation{}, errors.New("erase expired revocation credential")
+	}
+
+	var version int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(version), 0) + 1
+		FROM lighter_credentials
+		WHERE execution_account_id = $1`, expired.ExecutionAccountID).Scan(&version); err != nil {
+		return revocationReservation{}, errors.New("allocate replacement revocation version")
+	}
+	id, err := newUUID()
+	if err != nil {
+		return revocationReservation{}, err
+	}
+	replacement := credential{
+		ID:                   id,
+		ExecutionAccountID:   expired.ExecutionAccountID,
+		OwnerAddress:         active.OwnerAddress,
+		AccountIndex:         active.AccountIndex,
+		APIKeyIndex:          active.APIKeyIndex,
+		Version:              version,
+		Purpose:              purposeRevocation,
+		ReplacesCredentialID: active.ID,
+		Status:               statusGenerating,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO lighter_credentials (
+			id, execution_account_id, owner_address, account_index, api_key_index,
+			version, purpose, replaces_credential_id, status, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, 'revocation', $7, 'generating', $8, $8)`,
+		replacement.ID, replacement.ExecutionAccountID, replacement.OwnerAddress,
+		replacement.AccountIndex, replacement.APIKeyIndex, replacement.Version,
+		replacement.ReplacesCredentialID, now); err != nil {
+		return revocationReservation{}, errors.New("reserve replacement revocation credential")
+	}
+	if err := appendAudit(ctx, tx, canonical, "credential_revocation_expired", map[string]any{
+		"replacementCredentialId": replacement.ID,
+	}); err != nil {
+		return revocationReservation{}, err
+	}
+	if err := appendAudit(ctx, tx, replacement, "credential_revocation_reserved", map[string]any{
+		"replacesCredentialId": active.ID,
+		"replacesExpiredId":    canonical.ID,
+	}); err != nil {
+		return revocationReservation{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return revocationReservation{}, errors.New("commit replacement revocation credential")
+	}
+	return revocationReservation{Active: active, Tombstone: replacement}, nil
+}
+
 func (value *pgStore) Complete(ctx context.Context, record credential) (credential, error) {
+	if record.Purpose != purposeAssociation || record.ReplacesCredentialID != "" {
+		return credential{}, errors.New("invalid association credential")
+	}
 	tx, err := value.pool.Begin(ctx)
 	if err != nil {
 		return credential{}, errors.New("begin credential storage")
@@ -205,7 +431,8 @@ func (value *pgStore) Complete(ctx context.Context, record credential) (credenti
 			change_nonce = $9, expires_at_ms = $10, tx_type = $11,
 			tx_hash = $12, tx_info = $13, message_to_sign = $14,
 			status = 'pending', updated_at = $15
-		WHERE id = $1 AND execution_account_id = $2 AND status = 'generating'`,
+		WHERE id = $1 AND execution_account_id = $2
+		  AND purpose = 'association' AND status = 'generating'`,
 		record.ID, record.ExecutionAccountID, record.PublicKey, record.EncryptedDataKey,
 		record.CipherNonce, record.Ciphertext, record.AADDigest, record.KMSKeyID,
 		record.ChangeNonce, record.ExpiresAtMS, record.TxType, record.TxHash,
@@ -226,6 +453,70 @@ func (value *pgStore) Complete(ctx context.Context, record credential) (credenti
 	return value.Get(ctx, record.ExecutionAccountID, record.ID)
 }
 
+func (value *pgStore) CompleteRevocation(ctx context.Context, record credential) (credential, error) {
+	if record.Purpose != purposeRevocation || record.ReplacesCredentialID == "" {
+		return credential{}, errors.New("invalid revocation credential")
+	}
+	tx, err := value.pool.Begin(ctx)
+	if err != nil {
+		return credential{}, errors.New("begin revocation credential storage")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	now := time.Now().UTC()
+	command, err := tx.Exec(ctx, `
+		UPDATE lighter_credentials SET
+			public_key = $3, encrypted_data_key = $4, cipher_nonce = $5,
+			ciphertext = $6, aad_sha256 = $7, kms_key_id = $8,
+			change_nonce = $9, expires_at_ms = $10, tx_type = $11,
+			tx_hash = $12, tx_info = $13, message_to_sign = $14,
+			status = 'pending', updated_at = $15
+		WHERE id = $1 AND execution_account_id = $2
+		  AND purpose = 'revocation' AND replaces_credential_id = $16
+		  AND status = 'generating'`,
+		record.ID, record.ExecutionAccountID, record.PublicKey, record.EncryptedDataKey,
+		record.CipherNonce, record.Ciphertext, record.AADDigest, record.KMSKeyID,
+		record.ChangeNonce, record.ExpiresAtMS, record.TxType, record.TxHash,
+		record.TxInfo, record.MessageToSign, now, record.ReplacesCredentialID)
+	if err != nil || command.RowsAffected() != 1 {
+		return credential{}, errors.New("store revocation credential")
+	}
+	if err := appendAudit(ctx, tx, record, "credential_revocation_generated", map[string]any{
+		"replacesCredentialId": record.ReplacesCredentialID,
+		"transactionHash":      record.TxHash,
+	}); err != nil {
+		return credential{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return credential{}, errors.New("commit revocation credential storage")
+	}
+	return value.Get(ctx, record.ExecutionAccountID, record.ID)
+}
+
+func (value *pgStore) VerifyRevocationNonce(ctx context.Context, active credential, venueNonce int64) error {
+	if venueNonce < 0 || venueNonce > maximumLighterNonce {
+		return errors.New("invalid Lighter revocation nonce")
+	}
+	var safe bool
+	err := value.pool.QueryRow(ctx, `
+		SELECT binding.status = 'revocation_pending'
+		   AND binding.active_credential_id = $2
+		   AND NOT EXISTS (
+		       SELECT 1 FROM lighter_signing_requests
+		       WHERE credential_id = $2 AND status = 'claimed'
+		   )
+		   AND COALESCE((
+		       SELECT MAX(nonce) FROM lighter_signing_requests
+		       WHERE credential_id = $2 AND status = 'signed'
+		   ), -1) < $3
+		FROM lighter_credential_bindings AS binding
+		WHERE binding.execution_account_id = $1`,
+		active.ExecutionAccountID, active.ID, venueNonce).Scan(&safe)
+	if err != nil || !safe {
+		return errors.New("Lighter signing state is not safe for revocation")
+	}
+	return nil
+}
+
 func (value *pgStore) Fail(ctx context.Context, id, reason string) error {
 	return value.blockByID(ctx, id, reason, "credential_generation_failed")
 }
@@ -242,6 +533,9 @@ func (value *pgStore) Get(ctx context.Context, executionID, id string) (credenti
 }
 
 func (value *pgStore) MarkVerifying(ctx context.Context, record credential, signature string, txInfo []byte) (credential, error) {
+	if record.Purpose != purposeAssociation {
+		return credential{}, errors.New("invalid association credential")
+	}
 	tx, err := value.pool.Begin(ctx)
 	if err != nil {
 		return credential{}, errors.New("begin credential verification")
@@ -251,7 +545,8 @@ func (value *pgStore) MarkVerifying(ctx context.Context, record credential, sign
 	command, err := tx.Exec(ctx, `
 		UPDATE lighter_credentials
 		SET status = 'verifying', l1_signature = $3, tx_info = $4, updated_at = $5
-		WHERE id = $1 AND execution_account_id = $2 AND status = 'pending'`,
+		WHERE id = $1 AND execution_account_id = $2
+		  AND purpose = 'association' AND status = 'pending'`,
 		record.ID, record.ExecutionAccountID, signature, txInfo, now)
 	if err != nil || command.RowsAffected() != 1 {
 		return credential{}, errors.New("mark credential verification")
@@ -273,7 +568,49 @@ func (value *pgStore) MarkVerifying(ctx context.Context, record credential, sign
 	return value.Get(ctx, record.ExecutionAccountID, record.ID)
 }
 
+func (value *pgStore) MarkRevocationVerifying(ctx context.Context, record credential, signature string, txInfo []byte) (credential, error) {
+	if record.Purpose != purposeRevocation {
+		return credential{}, errors.New("invalid revocation credential")
+	}
+	tx, err := value.pool.Begin(ctx)
+	if err != nil {
+		return credential{}, errors.New("begin credential revocation verification")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	now := time.Now().UTC()
+	command, err := tx.Exec(ctx, `
+		UPDATE lighter_credentials
+		SET status = 'verifying', l1_signature = $3, tx_info = $4, updated_at = $5
+		WHERE id = $1 AND execution_account_id = $2
+		  AND purpose = 'revocation' AND status = 'pending'`,
+		record.ID, record.ExecutionAccountID, signature, txInfo, now)
+	if err != nil || command.RowsAffected() != 1 {
+		return credential{}, errors.New("mark credential revocation verification")
+	}
+	command, err = tx.Exec(ctx, `
+		UPDATE lighter_credential_bindings
+		SET status = 'revoking', updated_at = $3
+		WHERE execution_account_id = $1
+		  AND active_credential_id = $2 AND status = 'revocation_pending'`,
+		record.ExecutionAccountID, record.ReplacesCredentialID, now)
+	if err != nil || command.RowsAffected() != 1 {
+		return credential{}, errors.New("mark credential binding revoking")
+	}
+	if err := appendAudit(ctx, tx, record, "credential_revocation_submission_started", map[string]any{
+		"transactionHash": record.TxHash,
+	}); err != nil {
+		return credential{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return credential{}, errors.New("commit credential revocation verification")
+	}
+	return value.Get(ctx, record.ExecutionAccountID, record.ID)
+}
+
 func (value *pgStore) Activate(ctx context.Context, record credential) (credential, error) {
+	if record.Purpose == purposeRevocation {
+		return credential{}, errors.New("revocation credential cannot be activated")
+	}
 	tx, err := value.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return credential{}, errors.New("begin credential activation")
@@ -304,6 +641,82 @@ func (value *pgStore) Activate(ctx context.Context, record credential) (credenti
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return credential{}, errors.New("commit credential activation")
+	}
+	return value.Get(ctx, record.ExecutionAccountID, record.ID)
+}
+
+func (value *pgStore) FinalizeRevocation(ctx context.Context, record credential, registeredPublicKey string) (credential, error) {
+	registeredPublicKey = normalizePublicKey(registeredPublicKey)
+	if record.Purpose != purposeRevocation || registeredPublicKey == "" ||
+		registeredPublicKey != normalizePublicKey(record.PublicKey) {
+		return credential{}, errors.New("registered Lighter key does not prove revocation")
+	}
+	tx, err := value.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return credential{}, errors.New("begin credential revocation finalization")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var bindingStatus string
+	var activeID *string
+	if err := tx.QueryRow(ctx, `
+		SELECT status, active_credential_id::text
+		FROM lighter_credential_bindings
+		WHERE execution_account_id = $1
+		FOR UPDATE`, record.ExecutionAccountID).Scan(&bindingStatus, &activeID); err != nil {
+		return credential{}, errors.New("lock credential revocation binding")
+	}
+	if bindingStatus != "revoking" || activeID == nil || *activeID != record.ReplacesCredentialID {
+		return credential{}, errors.New("credential revocation binding changed")
+	}
+	tombstone, err := scanCredential(tx.QueryRow(ctx, credentialSelect+`
+		WHERE c.execution_account_id = $1 AND c.id = $2
+		FOR UPDATE`, record.ExecutionAccountID, record.ID))
+	if err != nil || tombstone.Purpose != purposeRevocation ||
+		tombstone.Status != statusVerifying ||
+		tombstone.ReplacesCredentialID != *activeID ||
+		normalizePublicKey(tombstone.PublicKey) != registeredPublicKey {
+		return credential{}, errors.New("credential revocation proof mismatch")
+	}
+	active, err := scanCredential(tx.QueryRow(ctx, credentialSelect+`
+		WHERE c.execution_account_id = $1 AND c.id = $2
+		FOR UPDATE`, record.ExecutionAccountID, *activeID))
+	if err != nil || active.Status != statusLinked ||
+		normalizePublicKey(active.PublicKey) == registeredPublicKey {
+		return credential{}, errors.New("registered Lighter key did not change")
+	}
+
+	now := time.Now().UTC()
+	command, err := tx.Exec(ctx, `
+		UPDATE lighter_credentials
+		SET encrypted_data_key = NULL, cipher_nonce = NULL, ciphertext = NULL,
+		    aad_sha256 = NULL, kms_key_id = NULL, status = 'revoked',
+		    registered_public_key = CASE WHEN id = $2 THEN $3 ELSE registered_public_key END,
+		    updated_at = $4
+		WHERE execution_account_id = $1`,
+		record.ExecutionAccountID, record.ID, registeredPublicKey, now)
+	if err != nil || command.RowsAffected() < 2 {
+		return credential{}, errors.New("erase revoked Lighter credentials")
+	}
+	command, err = tx.Exec(ctx, `
+		UPDATE lighter_credential_bindings
+		SET status = 'revoked', active_credential_id = NULL, updated_at = $2
+		WHERE execution_account_id = $1
+		  AND status = 'revoking' AND active_credential_id = $3`,
+		record.ExecutionAccountID, now, active.ID)
+	if err != nil || command.RowsAffected() != 1 {
+		return credential{}, errors.New("finalize credential binding revocation")
+	}
+	tombstone.RegisteredPublicKey = registeredPublicKey
+	if err := appendAudit(ctx, tx, tombstone, "credential_revoked", map[string]any{
+		"previousPublicKey":   normalizePublicKey(active.PublicKey),
+		"registeredPublicKey": registeredPublicKey,
+		"transactionHash":     tombstone.TxHash,
+	}); err != nil {
+		return credential{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return credential{}, errors.New("commit credential revocation finalization")
 	}
 	return value.Get(ctx, record.ExecutionAccountID, record.ID)
 }
@@ -345,7 +758,7 @@ func (value *pgStore) Active(ctx context.Context, executionID string) (credentia
 		JOIN lighter_credential_bindings b
 		ON b.active_credential_id = c.id
 		WHERE c.execution_account_id = $1
-		AND c.status = 'linked' AND b.status = 'linked'`, executionID))
+		AND c.status = 'linked' AND c.purpose = 'association' AND b.status = 'linked'`, executionID))
 }
 
 func (value *pgStore) ExpectedNonce(ctx context.Context, record credential) (uint64, error) {
@@ -578,13 +991,15 @@ func (value *pgStore) AuditActive(ctx context.Context, record credential, event 
 
 const credentialSelect = `
 	SELECT c.id::text, c.execution_account_id::text, c.owner_address,
-		c.account_index, c.api_key_index, c.version, COALESCE(c.public_key, ''),
+		c.account_index, c.api_key_index, c.version, COALESCE(c.purpose, 'association'),
+		COALESCE(c.replaces_credential_id::text, ''), COALESCE(c.public_key, ''),
 		COALESCE(c.encrypted_data_key, ''::bytea), COALESCE(c.cipher_nonce, ''::bytea),
 		COALESCE(c.ciphertext, ''::bytea), COALESCE(c.aad_sha256, ''::bytea),
 		COALESCE(c.kms_key_id, ''), COALESCE(c.change_nonce, 0),
 		COALESCE(c.expires_at_ms, 0), COALESCE(c.tx_type, 0),
 		COALESCE(c.tx_hash, ''), COALESCE(c.tx_info, '{}'::jsonb)::text,
 		COALESCE(c.message_to_sign, ''), COALESCE(c.l1_signature, ''),
+		COALESCE(c.registered_public_key, ''),
 		c.status, c.created_at, c.updated_at
 	FROM lighter_credentials c `
 
@@ -597,11 +1012,12 @@ func scanCredential(row rowScanner) (credential, error) {
 	var txInfo string
 	err := row.Scan(
 		&value.ID, &value.ExecutionAccountID, &value.OwnerAddress,
-		&value.AccountIndex, &value.APIKeyIndex, &value.Version, &value.PublicKey,
+		&value.AccountIndex, &value.APIKeyIndex, &value.Version, &value.Purpose,
+		&value.ReplacesCredentialID, &value.PublicKey,
 		&value.EncryptedDataKey, &value.CipherNonce, &value.Ciphertext,
 		&value.AADDigest, &value.KMSKeyID, &value.ChangeNonce,
 		&value.ExpiresAtMS, &value.TxType, &value.TxHash, &txInfo,
-		&value.MessageToSign, &value.L1Signature, &value.Status,
+		&value.MessageToSign, &value.L1Signature, &value.RegisteredPublicKey, &value.Status,
 		&value.CreatedAt, &value.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {

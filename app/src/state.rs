@@ -29,4 +29,5 @@ pub struct AppState {
     pub robinhood_provisioner: RobinhoodProvisioner,
     pub readiness_auth: ServiceAuth,
     pub coordinator_registration: CoordinatorRegistrationClient,
+    pub command_dispatcher_ready: bool,
 }

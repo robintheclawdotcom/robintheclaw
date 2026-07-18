@@ -79,7 +79,7 @@ type Journal struct {
 	lock        *pgxpool.Conn
 }
 
-func OpenJournal(ctx context.Context, databaseURL, publisherID string, feed, signer common.Address) (*Journal, error) {
+func OpenJournal(ctx context.Context, databaseURL, publisherID string, feed, signer common.Address, runMigrations bool) (*Journal, error) {
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, errors.New("parse sequencer journal configuration")
@@ -90,13 +90,15 @@ func OpenJournal(ctx context.Context, databaseURL, publisherID string, feed, sig
 	if err != nil {
 		return nil, errors.New("connect sequencer journal")
 	}
-	if _, err := pool.Exec(ctx, stateSchema); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("create sequencer publisher state: %w", err)
-	}
-	if _, err := pool.Exec(ctx, transactionSchema); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("create sequencer publisher journal: %w", err)
+	if runMigrations {
+		if _, err := pool.Exec(ctx, stateSchema); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("create sequencer publisher state: %w", err)
+		}
+		if _, err := pool.Exec(ctx, transactionSchema); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("create sequencer publisher journal: %w", err)
+		}
 	}
 	address := strings.ToLower(feed.Hex())
 	signerAddress := strings.ToLower(signer.Hex())

@@ -329,7 +329,19 @@ function MockSession({ children }: { children: React.ReactNode }) {
     linkEmail: () => undefined,
     linkPasskey: () => undefined,
     getAccessToken: async () => "test-access-token",
-    signMessage: async () => `0x${"11".repeat(65)}`,
+    signMessage: async (message, signerAddress) => {
+      const signer = signerAddress
+        ? accounts.find((candidate) => candidate.address.toLowerCase() === signerAddress.toLowerCase())
+        : accounts.find((candidate) => candidate.embedded);
+      if (!signer) throw new Error("The selected wallet is not connected in this browser.");
+      const key = "robin:e2e-signed-messages";
+      const existing = JSON.parse(window.localStorage.getItem(key) ?? "[]") as unknown[];
+      window.localStorage.setItem(key, JSON.stringify(existing.concat({
+        message,
+        signerAddress: signer.address,
+      })));
+      return `0x${"11".repeat(65)}`;
+    },
   }), [accounts, authenticated]);
   const smartWallet = useMemo<SmartWalletContextValue>(() => {
     let mainnetCall = 0;
@@ -343,6 +355,10 @@ function MockSession({ children }: { children: React.ReactNode }) {
         return callId;
       },
       executeMainnetCall: async (_call, _signerAddress, onSubmitted) => {
+        if (window.localStorage.getItem("robin:e2e-mainnet-receipt-failure") === "1") {
+          window.localStorage.removeItem("robin:e2e-mainnet-receipt-failure");
+          throw new Error("The mainnet transaction reverted.");
+        }
         const hashes = [`0x${"cd".repeat(32)}`, `0x${"ef".repeat(32)}`] as Hex[];
         const hash = hashes[Math.min(mainnetCall, hashes.length - 1)];
         mainnetCall += 1;

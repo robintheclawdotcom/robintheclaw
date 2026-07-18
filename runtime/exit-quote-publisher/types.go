@@ -28,19 +28,21 @@ var (
 )
 
 type Candidate struct {
-	ActionID           string
-	ExecutionAccountID string
-	IntentID           string
-	MarketManifest     string
-	SagaVersion        uint64
-	SpotAmount         string
-	PerpBaseAmount     uint64
-	Phase              Phase
+	ActionID                     string
+	ExecutionAccountID           string
+	IntentID                     string
+	MarketManifest               string
+	TargetStrategyManifestSHA256 string
+	SagaVersion                  uint64
+	SpotAmount                   string
+	PerpBaseAmount               uint64
+	Phase                        Phase
 }
 
 func (candidate Candidate) validate() error {
 	if !actionPattern.MatchString(candidate.ActionID) || !accountPattern.MatchString(candidate.ExecutionAccountID) ||
 		!hashPattern.MatchString(candidate.IntentID) || !hashPattern.MatchString(candidate.MarketManifest) ||
+		!digestPattern.MatchString(candidate.TargetStrategyManifestSHA256) ||
 		candidate.SagaVersion == 0 || !decimalPattern.MatchString(candidate.SpotAmount) {
 		return errors.New("invalid exit candidate identity")
 	}
@@ -58,21 +60,23 @@ func quoteRequest(candidate Candidate, nowMS uint64) (protocol.QuoteRequest, err
 		return protocol.QuoteRequest{}, err
 	}
 	requestedAt := nowMS - nowMS%4_000
-	evaluationID := domainHash("robin.exit-quote-evaluation.v1", candidate, 0)
+	evaluationID := domainHash("robin.exit-quote-evaluation.v2", candidate, 0)
 	return protocol.QuoteRequest{
-		RequestID:          domainHash("robin.exit-quote-request.v1", candidate, requestedAt),
-		ExecutionAccountID: candidate.ExecutionAccountID,
-		SourceEvaluationID: evaluationID,
-		MarketManifest:     candidate.MarketManifest,
-		IntentID:           candidate.IntentID,
-		Action:             protocol.ActionUnwind,
-		RequestedAtMS:      requestedAt,
+		RequestID:                    domainHash("robin.exit-quote-request.v2", candidate, requestedAt),
+		ExecutionAccountID:           candidate.ExecutionAccountID,
+		SourceEvaluationID:           evaluationID,
+		MarketManifest:               candidate.MarketManifest,
+		TargetStrategyManifestSHA256: candidate.TargetStrategyManifestSHA256,
+		IntentID:                     candidate.IntentID,
+		Action:                       protocol.ActionUnwind,
+		RequestedAtMS:                requestedAt,
 	}, nil
 }
 
 func domainHash(domain string, candidate Candidate, requestedAt uint64) string {
-	material := fmt.Sprintf("%s\x00%s\n%s\n%s\n%d\n%s\n%d\n%s\n%d", domain,
-		candidate.ExecutionAccountID, candidate.IntentID, candidate.ActionID, candidate.SagaVersion,
+	material := fmt.Sprintf("%s\x00%s\n%s\n%s\n%s\n%s\n%d\n%s\n%d\n%s\n%d", domain,
+		candidate.ExecutionAccountID, candidate.IntentID, candidate.ActionID, candidate.MarketManifest,
+		candidate.TargetStrategyManifestSHA256, candidate.SagaVersion,
 		candidate.SpotAmount, candidate.PerpBaseAmount, candidate.Phase, requestedAt)
 	digest := sha256.Sum256([]byte(material))
 	return "0x" + hex.EncodeToString(digest[:])
@@ -100,6 +104,8 @@ func evidenceFromQuote(candidate Candidate, request protocol.QuoteRequest, quote
 	authority := quote.ExitAuthority
 	if quote.RequestID != request.RequestID || quote.ExecutionAccountID != candidate.ExecutionAccountID ||
 		quote.SourceEvaluationID != request.SourceEvaluationID || quote.MarketManifest != candidate.MarketManifest ||
+		request.TargetStrategyManifestSHA256 != candidate.TargetStrategyManifestSHA256 ||
+		quote.TargetStrategyManifestSHA256 != candidate.TargetStrategyManifestSHA256 ||
 		quote.Action != protocol.ActionUnwind || authority == nil || authority.ExecutionAccountID != candidate.ExecutionAccountID ||
 		authority.IntentID != candidate.IntentID || authority.MarketManifest != candidate.MarketManifest ||
 		quote.Spot.StockAmount != candidate.SpotAmount || quote.Perp.BaseAmount != candidate.PerpBaseAmount ||

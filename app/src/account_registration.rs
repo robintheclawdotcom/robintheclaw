@@ -51,7 +51,7 @@ impl AccountRegistration {
         if self.strategy_version != "basis-aapl-v1"
             || self.risk_version != "basis-aapl-v1"
             || self.strategy_manifest_sha256
-                != "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f"
+                != "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937"
             || self.lighter_account_index <= 0
             || !(4..=254).contains(&self.lighter_api_key_index)
             || !valid_address(&self.robinhood_owner)
@@ -472,12 +472,17 @@ impl CoordinatorRegistrationClient {
             .header("Content-Type", "application/json")
             .header("X-RTC-Caller", &self.caller_id)
             .header("X-RTC-Timestamp", timestamp)
-            .header("X-RTC-Nonce", nonce)
+            .header("X-RTC-Nonce", &nonce)
             .header("X-RTC-Signature", signature)
             .body(body)
             .send()
             .await
             .map_err(|_| RegistrationClientError::Transport)?;
+        let response_signature = response
+            .headers()
+            .get("X-RTC-Response-Signature")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         if response
             .content_length()
             .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -496,8 +501,43 @@ impl CoordinatorRegistrationClient {
             }
             body.extend_from_slice(&chunk);
         }
+        verify_response_signature(
+            hmac_key,
+            path,
+            &self.caller_id,
+            &nonce,
+            status,
+            &body,
+            response_signature.as_deref(),
+        )?;
         Ok((status, body))
     }
+}
+
+fn verify_response_signature(
+    key: &[u8; 32],
+    path: &str,
+    caller: &str,
+    nonce: &str,
+    status: StatusCode,
+    body: &[u8],
+    signature: Option<&str>,
+) -> Result<(), RegistrationClientError> {
+    let provided = signature
+        .ok_or(RegistrationClientError::InvalidResponse)
+        .and_then(|value| {
+            hex::decode(value).map_err(|_| RegistrationClientError::InvalidResponse)
+        })?;
+    let canonical = format!(
+        "RESPONSE\n{path}\n{caller}\n{nonce}\n{}\n{}",
+        status.as_u16(),
+        hex::encode(Sha256::digest(body)),
+    );
+    let mut mac =
+        HmacSha256::new_from_slice(key).map_err(|_| RegistrationClientError::InvalidResponse)?;
+    mac.update(canonical.as_bytes());
+    mac.verify_slice(&provided)
+        .map_err(|_| RegistrationClientError::InvalidResponse)
 }
 
 fn bounded_decimal(value: &str) -> bool {
@@ -614,7 +654,7 @@ mod tests {
             strategy_version: "basis-aapl-v1".into(),
             risk_version: "basis-aapl-v1".into(),
             strategy_manifest_sha256:
-                "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f".into(),
+                "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937".into(),
             lighter_account_index: 7,
             lighter_api_key_index: 254,
             robinhood_owner: "0x1111111111111111111111111111111111111111".into(),
@@ -657,6 +697,66 @@ mod tests {
             "00"
         )
         .is_err());
+    }
+
+    #[test]
+    fn response_signature_binds_registration_request_and_result() {
+        let key = [0x42; 32];
+        let path = "/v1/account-registrations/account-id";
+        let caller = "product-account-provisioner";
+        let nonce = "1234567890abcdef1234567890abcdef";
+        let status = StatusCode::OK;
+        let body = br#"{"status":"active"}"#;
+        let canonical = format!(
+            "RESPONSE\n{path}\n{caller}\n{nonce}\n{}\n{}",
+            status.as_u16(),
+            hex::encode(Sha256::digest(body)),
+        );
+        let mut mac = HmacSha256::new_from_slice(&key).unwrap();
+        mac.update(canonical.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+
+        assert!(verify_response_signature(
+            &key,
+            path,
+            caller,
+            nonce,
+            status,
+            body,
+            Some(&signature)
+        )
+        .is_ok());
+        assert!(verify_response_signature(
+            &key,
+            "/v1/account-executions/account-id",
+            caller,
+            nonce,
+            status,
+            body,
+            Some(&signature)
+        )
+        .is_err());
+        assert!(verify_response_signature(
+            &key,
+            path,
+            caller,
+            nonce,
+            StatusCode::CREATED,
+            body,
+            Some(&signature)
+        )
+        .is_err());
+        assert!(verify_response_signature(
+            &key,
+            path,
+            caller,
+            nonce,
+            status,
+            b"{}",
+            Some(&signature)
+        )
+        .is_err());
+        assert!(verify_response_signature(&key, path, caller, nonce, status, body, None).is_err());
     }
 
     #[test]

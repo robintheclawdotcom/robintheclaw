@@ -33,9 +33,12 @@ type Config struct {
 	SourceRPC2         string
 	TargetRPC          string
 	DatabaseURL        string
+	RunMigrations      bool
 	ListenAddress      string
 	SourceFeed         common.Address
 	SourceCodeHash     common.Hash
+	SourceAggregator   common.Address
+	AggregatorCodeHash common.Hash
 	TargetFeed         common.Address
 	TargetCodeHash     common.Hash
 	PrivateKey         *ecdsa.PrivateKey
@@ -57,11 +60,12 @@ func LoadConfig() (Config, error) {
 		SourceRPC2:         os.Getenv("AAPL_RELAY_ARBITRUM_RPC_2"),
 		TargetRPC:          os.Getenv("AAPL_RELAY_ROBINHOOD_RPC"),
 		DatabaseURL:        os.Getenv("AAPL_RELAY_DATABASE_URL"),
+		RunMigrations:      true,
 		ListenAddress:      envOr("AAPL_RELAY_LISTEN_ADDRESS", "127.0.0.1:9090"),
 		SourceFeed:         common.HexToAddress(SourceFeedHex),
 		Interval:           15 * time.Second,
 		RequestTimeout:     12 * time.Second,
-		FinalizedMaxAge:    20 * time.Minute,
+		FinalizedMaxAge:    30 * time.Minute,
 		MaxGasLimit:        180_000,
 		MaxPriorityFee:     big.NewInt(100_000_000),
 		MaxFeePerGas:       big.NewInt(10_000_000_000),
@@ -74,11 +78,21 @@ func LoadConfig() (Config, error) {
 	if config.DatabaseURL == "" {
 		return Config{}, errors.New("AAPL_RELAY_DATABASE_URL is required")
 	}
+	runMigrations, err := strictBoolEnv("AAPL_RELAY_RUN_MIGRATIONS", true)
+	if err != nil {
+		return Config{}, err
+	}
+	config.RunMigrations = runMigrations
 	if err := validateIndependentRPCs(config.SourceRPC1, config.SourceRPC2, config.TargetRPC); err != nil {
 		return Config{}, err
 	}
-	var err error
 	if config.SourceCodeHash, err = requiredHash("AAPL_SOURCE_FEED_CODE_HASH"); err != nil {
+		return Config{}, err
+	}
+	if config.SourceAggregator, err = requiredAddress("AAPL_SOURCE_AGGREGATOR"); err != nil {
+		return Config{}, err
+	}
+	if config.AggregatorCodeHash, err = requiredHash("AAPL_SOURCE_AGGREGATOR_CODE_HASH"); err != nil {
 		return Config{}, err
 	}
 	if config.TargetFeed, err = requiredAddress("AAPL_REFERENCE_FEED"); err != nil {
@@ -99,7 +113,7 @@ func LoadConfig() (Config, error) {
 	if config.RequestTimeout, err = durationEnv("AAPL_RELAY_REQUEST_TIMEOUT", config.RequestTimeout, 2*time.Second, 20*time.Second); err != nil {
 		return Config{}, err
 	}
-	if config.FinalizedMaxAge, err = durationEnv("AAPL_RELAY_FINALIZED_MAX_AGE", config.FinalizedMaxAge, time.Minute, time.Hour); err != nil {
+	if config.FinalizedMaxAge, err = durationEnv("AAPL_RELAY_FINALIZED_MAX_AGE", config.FinalizedMaxAge, 20*time.Minute, 45*time.Minute); err != nil {
 		return Config{}, err
 	}
 	if config.MaxGasLimit, err = uintEnv("AAPL_RELAY_MAX_GAS_LIMIT", config.MaxGasLimit, 80_000, 300_000); err != nil {
@@ -125,6 +139,19 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("AAPL relay gas and fee caps exceed transaction cost cap")
 	}
 	return config, nil
+}
+
+func strictBoolEnv(name string, fallback bool) (bool, error) {
+	switch value := os.Getenv(name); value {
+	case "":
+		return fallback, nil
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, errors.New(name + " must be true or false")
+	}
 }
 
 func validateIndependentRPCs(values ...string) error {

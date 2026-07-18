@@ -382,6 +382,14 @@ func validAddress(value string) bool {
 	return err == nil && value == strings.ToLower(value)
 }
 
+func validHash(value string) bool {
+	if len(value) != 66 || !strings.HasPrefix(value, "0x") || value == "0x"+strings.Repeat("0", 64) {
+		return false
+	}
+	_, err := hex.DecodeString(value[2:])
+	return err == nil && value == strings.ToLower(value)
+}
+
 func validateMarket(config MarketConfig, now time.Time, lighterMarket uint32) error {
 	manifest, err := MarketManifest(config)
 	if err != nil {

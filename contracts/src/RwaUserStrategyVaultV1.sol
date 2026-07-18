@@ -157,6 +157,8 @@ contract RwaUserStrategyVaultV1 is ISpotExecution, ReentrancyGuard {
         if (amount == 0) revert InvalidAmount();
         _checkSettlementCode();
         uint256 balanceBefore = settlementAsset.balanceOf(address(this));
+        // The only caller and transfer source are the immutable owner.
+        // slither-disable-next-line arbitrary-send-erc20
         settlementAsset.safeTransferFrom(owner, address(this), amount);
         uint256 balanceAfter = settlementAsset.balanceOf(address(this));
         if (balanceAfter < balanceBefore || balanceAfter - balanceBefore != amount) {

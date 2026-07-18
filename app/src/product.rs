@@ -180,7 +180,7 @@ pub struct AgentRecord {
 
 pub const LIVE_STRATEGY_VERSION: &str = "basis-aapl-v1";
 pub const LIVE_STRATEGY_MANIFEST_SHA256: &str =
-    "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f";
+    "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -344,6 +344,13 @@ pub struct LighterConfirmInput {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LighterRevocationConfirmInput {
+    pub revocation_id: Uuid,
+    pub l1_signature: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RobinhoodConfirmInput {
     pub request_id: Uuid,
     pub transaction_hash: String,
@@ -386,6 +393,17 @@ pub struct AgentCommandWorkItem {
     pub requested_at_ms: i64,
     pub robinhood_owner: String,
     pub robinhood_vault: String,
+    pub lighter_owner: Option<String>,
+    pub lighter_account_index: Option<i64>,
+    pub lighter_api_key_index: Option<i16>,
+}
+
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct LighterBindingIdentity {
+    pub execution_account_id: Uuid,
+    pub owner_address: String,
+    pub account_index: i64,
+    pub api_key_index: i16,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -520,6 +538,24 @@ mod agent_tests {
             payload[field] = serde_json::json!(7);
             assert!(serde_json::from_value::<LighterLinkRequestInput>(payload).is_err());
         }
+    }
+
+    #[test]
+    fn lighter_revocation_confirmation_accepts_only_signature_proof() {
+        let revocation_id = Uuid::new_v4();
+        let input = serde_json::from_value::<LighterRevocationConfirmInput>(serde_json::json!({
+            "revocationId": revocation_id,
+            "l1Signature": format!("0x{}", "11".repeat(65))
+        }))
+        .unwrap();
+        assert_eq!(input.revocation_id, revocation_id);
+
+        let payload = serde_json::json!({
+            "revocationId": revocation_id,
+            "l1Signature": format!("0x{}", "11".repeat(65)),
+            "tombstonePrivateKey": "never-accepted"
+        });
+        assert!(serde_json::from_value::<LighterRevocationConfirmInput>(payload).is_err());
     }
 
     #[test]

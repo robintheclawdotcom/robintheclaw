@@ -169,6 +169,21 @@ export type LighterLinkRequest = {
   ownerAddress: string;
 };
 
+export type LighterRevocation = {
+  revocationId: string;
+  executionAccountId: string;
+  ownerAddress: `0x${string}`;
+  accountIndex: number;
+  apiKeyIndex: number;
+  tombstonePublicKey: string | null;
+  status: "pending" | "verifying" | "revoked";
+  messageToSign: string | null;
+  transactionHash: `0x${string}` | null;
+  registeredPublicKey: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type AgentReadiness = {
   executionAccountId: string;
   lighterAccountIndex: number | null;

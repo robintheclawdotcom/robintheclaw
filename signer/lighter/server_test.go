@@ -57,6 +57,33 @@ func TestLivezDoesNotClaimReadiness(t *testing.T) {
 	}
 }
 
+func TestEveryResponseIsAuthenticated(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	server := authTestServer(now)
+	body := []byte(`{"executionAccountId":"11111111-1111-4111-8111-111111111111","intentId":"intent-1","marketIndex":1,"clientOrderIndex":1,"baseAmount":1,"price":1,"isAsk":true,"orderType":0,"timeInForce":0,"reduceOnly":false,"triggerPrice":0,"orderExpiryMs":0,"transaction":{"nonce":1,"expiresAtMs":1800000300000}}`)
+
+	for name, request := range map[string]*http.Request{
+		"success": signedRequest(server.config, body, strings.Repeat("s", 32), now),
+		"authorization rejection": func() *http.Request {
+			request := httptest.NewRequest(http.MethodPost, "/v1/sign/create-order", strings.NewReader(string(body)))
+			request.Header.Set("X-RTC-Caller", server.config.callerID)
+			request.Header.Set("X-RTC-Nonce", strings.Repeat("u", 32))
+			return request
+		}(),
+		"unknown route": func() *http.Request {
+			request := httptest.NewRequest(http.MethodPost, "/v1/sign/withdraw", strings.NewReader("{}"))
+			request.Header.Set("X-RTC-Nonce", strings.Repeat("n", 32))
+			return request
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			server.routes().ServeHTTP(response, request)
+			assertResponseSignature(t, server.config, request, response)
+		})
+	}
+}
+
 func TestSignerSurfaceHasNoAssetMovementRoute(t *testing.T) {
 	server, err := newSignerServer(config{})
 	if err != nil {
@@ -430,4 +457,23 @@ func signedRequest(value config, body []byte, nonce string, signedAt time.Time) 
 	_, _ = mac.Write([]byte(canonical))
 	request.Header.Set("X-RTC-Signature", hex.EncodeToString(mac.Sum(nil)))
 	return request
+}
+
+func assertResponseSignature(t *testing.T, value config, request *http.Request, response *httptest.ResponseRecorder) {
+	t.Helper()
+	digest := sha256.Sum256(response.Body.Bytes())
+	canonical := fmt.Sprintf(
+		"RESPONSE\n%s\n%s\n%s\n%d\n%x",
+		request.URL.Path,
+		value.callerID,
+		request.Header.Get("X-RTC-Nonce"),
+		response.Code,
+		digest,
+	)
+	mac := hmac.New(sha256.New, value.apiHMACKey)
+	_, _ = mac.Write([]byte(canonical))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if response.Header().Get("X-RTC-Response-Signature") != expected {
+		t.Fatal("response signature is missing or invalid")
+	}
 }

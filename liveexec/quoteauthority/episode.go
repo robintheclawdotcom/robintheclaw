@@ -72,6 +72,21 @@ func (r *CoordinatorEpisodeResolver) Resolve(ctx context.Context, executionAccou
 		return OpenEpisode{}, fmt.Errorf("%w: coordinator request failed", ErrOpenEpisodeUnavailable)
 	}
 	defer response.Body.Close()
+	body, err := readBounded(response.Body, maximumCoordinatorResponseBytes)
+	if err != nil {
+		return OpenEpisode{}, fmt.Errorf("%w: invalid response body", ErrOpenEpisodeUnavailable)
+	}
+	if err := protocol.VerifyResponseMAC(
+		r.key,
+		path,
+		r.caller,
+		nonce,
+		response.StatusCode,
+		body,
+		response.Header.Get("X-RTC-Response-Signature"),
+	); err != nil {
+		return OpenEpisode{}, fmt.Errorf("%w: invalid response signature", ErrOpenEpisodeUnavailable)
+	}
 	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusConflict || response.StatusCode == http.StatusServiceUnavailable {
 		return OpenEpisode{}, ErrOpenEpisodeUnavailable
 	}
@@ -82,15 +97,13 @@ func (r *CoordinatorEpisodeResolver) Resolve(ctx context.Context, executionAccou
 	if err != nil || mediaType != "application/json" {
 		return OpenEpisode{}, fmt.Errorf("%w: invalid content type", ErrOpenEpisodeUnavailable)
 	}
-	body, err := readBounded(response.Body, maximumCoordinatorResponseBytes)
-	if err != nil {
-		return OpenEpisode{}, fmt.Errorf("%w: invalid response body", ErrOpenEpisodeUnavailable)
-	}
 	var episode OpenEpisode
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&episode); err != nil || decoder.Decode(&struct{}{}) != io.EOF ||
-		episode.ExecutionAccountID != executionAccountID || episode.IntentID != intentID {
+		episode.SchemaVersion != 2 ||
+		episode.ExecutionAccountID != executionAccountID || episode.IntentID != intentID ||
+		!protocol.IsAllowedUnwindTargetStrategyManifest(episode.TargetStrategyManifestSHA256) {
 		return OpenEpisode{}, fmt.Errorf("%w: response identity mismatch", ErrOpenEpisodeUnavailable)
 	}
 	return episode, nil

@@ -40,6 +40,7 @@ fully configured.
 | Route | Purpose |
 | --- | --- |
 | `GET /health` | Status, chain id, current head, indexer cursor |
+| `GET /readyz` | Mainnet RPC, database, authentication, provisioner, and coordinator readiness |
 | `GET /api/basis?limit=N` | Recent basis observations, newest first |
 | `GET /api/evm/status` | Indexer cursor and watched addresses |
 | `GET /api/evm/logs?limit=N` | Recent indexed logs |

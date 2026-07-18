@@ -13,6 +13,8 @@ const PRICE_DECIMALS: u8 = 6;
 const SHARES_DECIMALS: u8 = 18;
 const PPM: u128 = 1_000_000;
 const ZERO_ADDRESS: Address = Address::ZERO;
+pub const AAPL_STRATEGY_POLICY_COMMITMENT_SHA256: &str =
+    "39f82d4576fbd3d1e230a9d39d1971d9e6a0e004137eefd0b4cc700934728cf9";
 
 sol! {
     struct PoolKey {
@@ -223,6 +225,24 @@ impl PaperConfig {
         }
         Ok(())
     }
+}
+
+pub fn validate_aapl_strategy_policy(minimum_net_edge_ppm: u64, salt: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        minimum_net_edge_ppm > 0 && minimum_net_edge_ppm <= 1_000_000,
+        "AAPL minimum net edge is outside the approved range"
+    );
+    let decoded = hex::decode(salt).context("AAPL_STRATEGY_POLICY_SALT must be lowercase hex")?;
+    anyhow::ensure!(
+        decoded.len() == 32 && hex::encode(decoded) == salt,
+        "AAPL_STRATEGY_POLICY_SALT must be 32-byte lowercase hex"
+    );
+    let canonical = format!("basis-aapl-v1\0minimum_net_edge_ppm\0{minimum_net_edge_ppm}\0{salt}");
+    anyhow::ensure!(
+        crate::sha256(canonical.as_bytes()) == AAPL_STRATEGY_POLICY_COMMITMENT_SHA256,
+        "AAPL strategy policy commitment mismatch"
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1022,5 +1042,12 @@ mod tests {
         let mut config = PaperConfig::load("config/mainnet-paper.json").unwrap();
         config.markets[0].pool_id = format!("0x{}", "00".repeat(32));
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn strategy_policy_fails_closed_without_the_approved_private_policy() {
+        assert!(validate_aapl_strategy_policy(1_200, &"ab".repeat(32)).is_err());
+        assert!(validate_aapl_strategy_policy(1_200, "ab").is_err());
+        assert!(validate_aapl_strategy_policy(0, &"ab".repeat(32)).is_err());
     }
 }

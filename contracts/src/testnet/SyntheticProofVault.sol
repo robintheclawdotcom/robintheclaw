@@ -26,6 +26,8 @@ contract SyntheticProofVault {
 
     function fund(uint256 amount) external {
         if (msg.sender != owner) revert Unauthorized();
+        // The only caller and transfer source are the immutable testnet owner.
+        // slither-disable-next-line arbitrary-send-erc20
         asset.safeTransferFrom(owner, address(this), amount);
     }
 

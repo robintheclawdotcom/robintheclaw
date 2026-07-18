@@ -50,6 +50,9 @@ func LoadConfig() (Config, error) {
 	if err != nil || edge == 0 || edge > 1_000_000 {
 		return Config{}, errors.New("AAPL_MINIMUM_NET_EDGE_PPM must be between 1 and 1000000")
 	}
+	if err := verifyStrategyPolicy(edge, strings.TrimSpace(os.Getenv("AAPL_STRATEGY_POLICY_SALT"))); err != nil {
+		return Config{}, err
+	}
 	config.MinimumNetEdgePPM = edge
 	market, err := strconv.ParseUint(strings.TrimSpace(os.Getenv("ROBIN_LIVE_EVALUATION_LIGHTER_AAPL_MARKET_INDEX")), 10, 15)
 	if err != nil || market == 0 {

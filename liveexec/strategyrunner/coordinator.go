@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/robin-the-claw/liveexec/protocol"
 )
 
 const maximumCoordinatorResponseBytes = 64 << 10
@@ -332,6 +334,17 @@ func (c *CoordinatorClient) post(ctx context.Context, path string, body []byte, 
 	responseBody, err := readBounded(response.Body, maximumCoordinatorResponseBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: invalid response body", ErrCoordinatorAmbiguous)
+	}
+	if err := protocol.VerifyResponseMAC(
+		key,
+		path,
+		caller,
+		nonce,
+		response.StatusCode,
+		responseBody,
+		response.Header.Get("X-RTC-Response-Signature"),
+	); err != nil {
+		return nil, nil, fmt.Errorf("%w: coordinator response authentication failed", ErrCoordinatorAmbiguous)
 	}
 	return response, responseBody, nil
 }

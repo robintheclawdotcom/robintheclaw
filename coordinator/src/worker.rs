@@ -141,7 +141,7 @@ impl Worker {
             && !send_authorized
             && !exit_authority_is_current(&action, now)
         {
-            if now > action.intent.emergency_deadline_ms {
+            if now > authority_wait_deadline_ms(&action)? {
                 self.store
                     .stop_action(
                         &action.id,
@@ -484,6 +484,9 @@ impl Worker {
                     "exit_authority": exit_authority,
                     "operator_recovery": operator_recovery,
                     "client_order_index": client_order_index,
+                    "exit_reason": action.payload.get("exit_reason"),
+                    "control_command_id": action.payload.get("control_command_id"),
+                    "authority_wait_deadline_ms": action.payload.get("authority_wait_deadline_ms"),
                 })
             },
         );
@@ -560,6 +563,9 @@ impl Worker {
                     "exit_authority": exit_authority,
                     "operator_recovery": operator_recovery,
                     "client_order_index": client_order_index,
+                    "exit_reason": action.payload.get("exit_reason"),
+                    "control_command_id": action.payload.get("control_command_id"),
+                    "authority_wait_deadline_ms": action.payload.get("authority_wait_deadline_ms"),
                 })
             },
         );
@@ -1167,6 +1173,10 @@ impl Worker {
                                 payload: json!({
                                     "spot_amount": action.saga.spot_received_raw.to_string(),
                                     "exit_authority": action.payload.get("exit_authority"),
+                                    "operator_recovery": action.payload.get("operator_recovery"),
+                                    "exit_reason": action.payload.get("exit_reason"),
+                                    "control_command_id": action.payload.get("control_command_id"),
+                                    "authority_wait_deadline_ms": action.payload.get("authority_wait_deadline_ms"),
                                 }),
                             }),
                         },
@@ -1201,6 +1211,10 @@ impl Worker {
                                     "unwind_attempt": next_attempt,
                                     "unwound_before": total,
                                     "exit_authority": action.payload.get("exit_authority"),
+                                    "operator_recovery": action.payload.get("operator_recovery"),
+                                    "exit_reason": action.payload.get("exit_reason"),
+                                    "control_command_id": action.payload.get("control_command_id"),
+                                    "authority_wait_deadline_ms": action.payload.get("authority_wait_deadline_ms"),
                                 }),
                             }),
                         },
@@ -1253,6 +1267,20 @@ impl Worker {
             || recovered_request.is_some();
         let send_authorized = lighter_send_authorized(&action.result);
         if !attempted && !send_authorized && !exit_authority_is_current(&action, now) {
+            if now > authority_wait_deadline_ms(&action)? {
+                self.store
+                    .stop_action(
+                        &action.id,
+                        &self.worker_id,
+                        &action.lease_token,
+                        ActionStop::FailedSafe,
+                        "exit_authority_overdue",
+                        None,
+                        json!({"stage": "spot_unwind_authority"}),
+                    )
+                    .await?;
+                return Ok(());
+            }
             let bound = self
                 .store
                 .bind_exit_authority(&action.id, &self.worker_id, &action.lease_token, now)
@@ -1376,6 +1404,9 @@ impl Worker {
                                 "spot_amount": spot_amount.to_string(),
                                 "request_id": request.request_id,
                                 "exit_authority": action.payload.get("exit_authority"),
+                                "exit_reason": action.payload.get("exit_reason"),
+                                "control_command_id": action.payload.get("control_command_id"),
+                                "authority_wait_deadline_ms": action.payload.get("authority_wait_deadline_ms"),
                             }),
                         },
                     )
@@ -1413,6 +1444,9 @@ impl Worker {
                                 "spot_amount": spot_amount.to_string(),
                                 "request_id": request.request_id,
                                 "exit_authority": action.payload.get("exit_authority"),
+                                "exit_reason": action.payload.get("exit_reason"),
+                                "control_command_id": action.payload.get("control_command_id"),
+                                "authority_wait_deadline_ms": action.payload.get("authority_wait_deadline_ms"),
                             }),
                         },
                     )
@@ -1444,6 +1478,9 @@ impl Worker {
                         "request_id": submission.request_id,
                         "tx_hash": submission.tx_hash,
                         "exit_authority": action.payload.get("exit_authority"),
+                        "exit_reason": action.payload.get("exit_reason"),
+                        "control_command_id": action.payload.get("control_command_id"),
+                        "authority_wait_deadline_ms": action.payload.get("authority_wait_deadline_ms"),
                     }),
                 }),
             )
@@ -1780,6 +1817,32 @@ fn exit_authority_is_current(action: &ClaimedAction, now_ms: u64) -> bool {
     })
 }
 
+fn authority_wait_deadline_ms(action: &ClaimedAction) -> Result<u64, WorkerError> {
+    let Some(command_id) = action
+        .payload
+        .get("control_command_id")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(action.intent.emergency_deadline_ms);
+    };
+    let command_id = command_id.as_str().ok_or(WorkerError::InvalidPayload)?;
+    let valid_command_id = (8..=64).contains(&command_id.len())
+        && command_id.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || (byte == b'-' && index > 0)
+        });
+    if !valid_command_id
+        || action.payload.get("exit_reason").and_then(Value::as_str) != Some("operator_exit")
+    {
+        return Err(WorkerError::InvalidPayload);
+    }
+    action
+        .payload
+        .get("authority_wait_deadline_ms")
+        .and_then(Value::as_u64)
+        .filter(|deadline| *deadline > 0)
+        .ok_or(WorkerError::InvalidPayload)
+}
+
 fn unwind_minimum_out(action: &ClaimedAction, spot_amount: u128) -> Result<u128, WorkerError> {
     let authority = exit_authority(action)?;
     if authority
@@ -2096,6 +2159,29 @@ mod tests {
         let request = lighter_request(&recovery, 4, true).unwrap();
         assert_eq!(request.client_order_index, 8_000_000_000_000_000_001_i64);
         assert!(request.reduce_only);
+    }
+
+    #[test]
+    fn control_unwind_uses_fresh_authority_wait_deadline() {
+        let deadline = 1_800_000_900_000;
+        let mut recovery = action(
+            ActionKind::UnwindPerp,
+            json!({
+                "filled_base": 500_000,
+                "exit_reason": "operator_exit",
+                "control_command_id": "close-command-1",
+                "authority_wait_deadline_ms": deadline,
+            }),
+        );
+        recovery.intent.emergency_deadline_ms = 1;
+        assert_eq!(authority_wait_deadline_ms(&recovery).unwrap(), deadline);
+
+        recovery
+            .payload
+            .as_object_mut()
+            .unwrap()
+            .remove("authority_wait_deadline_ms");
+        assert!(authority_wait_deadline_ms(&recovery).is_err());
     }
 
     #[test]

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ExecutionBindingRecord, OwnerAction } from "./app-types";
-import { canonicalDeploymentAction, canonicalOwnerActionSet } from "./mainnet-actions";
+import {
+  canonicalDeploymentAction,
+  canonicalOwnerActionSet,
+  executeConfirmedOwnerActions,
+} from "./mainnet-actions";
 
 const owner = "0x1111111111111111111111111111111111111111";
 const factory = "0x2222222222222222222222222222222222222222";
@@ -81,9 +85,9 @@ describe("mainnet owner actions", () => {
       data: `0x142834dd${"0".repeat(63)}1`,
       value: "0",
     };
-    expect(canonicalOwnerActionSet([withdraw], owner, vault)).toBe(true);
-    expect(canonicalOwnerActionSet([{ ...withdraw, to: factory }], owner, vault)).toBe(false);
-    expect(canonicalOwnerActionSet([{ ...withdraw, data: "0x51755334" }], owner, vault)).toBe(false);
+    expect(canonicalOwnerActionSet([withdraw], owner, vault, "withdraw")).toBe(true);
+    expect(canonicalOwnerActionSet([{ ...withdraw, to: factory }], owner, vault, "withdraw")).toBe(false);
+    expect(canonicalOwnerActionSet([{ ...withdraw, data: "0x51755334" }], owner, vault, "withdraw")).toBe(false);
   });
 
   it("accepts halt followed by withdrawal, in that order", () => {
@@ -98,7 +102,79 @@ describe("mainnet owner actions", () => {
       ...halt,
       data: `0x142834dd${"0".repeat(63)}1`,
     };
-    expect(canonicalOwnerActionSet([halt, withdraw], owner, vault)).toBe(true);
-    expect(canonicalOwnerActionSet([withdraw, halt], owner, vault)).toBe(false);
+    expect(canonicalOwnerActionSet([halt, withdraw], owner, vault, "withdraw")).toBe(true);
+    expect(canonicalOwnerActionSet([withdraw, halt], owner, vault, "withdraw")).toBe(false);
+  });
+
+  it("accepts exactly one emergency halt for close", () => {
+    const halt: OwnerAction = {
+      chain_id: 4663,
+      from: owner,
+      to: vault,
+      data: "0x51755334",
+      value: "0",
+    };
+    expect(canonicalOwnerActionSet([halt], owner, vault, "close")).toBe(true);
+    expect(canonicalOwnerActionSet([{ ...halt, data: `0x142834dd${"0".repeat(63)}1` }], owner, vault, "close")).toBe(false);
+    expect(canonicalOwnerActionSet([halt, halt], owner, vault, "close")).toBe(false);
+  });
+
+  it("records owner transactions only after a successful receipt", async () => {
+    const halt: OwnerAction = {
+      chain_id: 4663,
+      from: owner,
+      to: vault,
+      data: "0x51755334",
+      value: "0",
+    };
+    const snapshots: string[][] = [];
+    await expect(executeConfirmedOwnerActions(
+      [halt],
+      [],
+      async () => { throw new Error("The mainnet transaction reverted."); },
+      (hashes) => snapshots.push(hashes),
+    )).rejects.toThrow("reverted");
+    expect(snapshots).toEqual([]);
+  });
+
+  it("retries only the owner action whose receipt failed", async () => {
+    const halt: OwnerAction = {
+      chain_id: 4663,
+      from: owner,
+      to: vault,
+      data: "0x51755334",
+      value: "0",
+    };
+    const withdraw: OwnerAction = {
+      ...halt,
+      data: `0x142834dd${"0".repeat(63)}1`,
+    };
+    const firstHash = `0x${"aa".repeat(32)}`;
+    const secondHash = `0x${"bb".repeat(32)}`;
+    const snapshots: string[][] = [];
+    let calls = 0;
+    await expect(executeConfirmedOwnerActions(
+      [halt, withdraw],
+      [],
+      async () => {
+        calls += 1;
+        if (calls === 2) throw new Error("User rejected the transaction.");
+        return firstHash;
+      },
+      (hashes) => snapshots.push(hashes),
+    )).rejects.toThrow("rejected");
+    expect(snapshots).toEqual([[firstHash]]);
+
+    const retried = await executeConfirmedOwnerActions(
+      [halt, withdraw],
+      snapshots.at(-1)!,
+      async () => {
+        calls += 1;
+        return secondHash;
+      },
+      (hashes) => snapshots.push(hashes),
+    );
+    expect(calls).toBe(3);
+    expect(retried).toEqual([firstHash, secondHash]);
   });
 });

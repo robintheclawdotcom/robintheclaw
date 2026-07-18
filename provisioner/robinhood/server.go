@@ -40,10 +40,54 @@ func (value *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", value.livez)
 	mux.HandleFunc("GET /readyz", value.readyz)
-	mux.Handle("POST /v1/graphs/prepare", value.authorize(value.config.APIHMACKey, value.config.CallerID, http.HandlerFunc(value.prepare)))
-	mux.Handle("POST /v1/graphs/status", value.authorize(value.config.APIHMACKey, value.config.CallerID, http.HandlerFunc(value.status)))
-	mux.Handle("POST /v1/graphs/confirm", value.authorize(value.config.APIHMACKey, value.config.CallerID, http.HandlerFunc(value.confirm)))
-	mux.Handle("POST /v1/signer/resolve", value.authorize(value.config.SignerHMACKey, value.config.SignerCallerID, value.signResponse(http.HandlerFunc(value.resolve))))
+	mux.Handle(
+		"POST /v1/graphs/prepare",
+		value.signResponse(
+			value.config.APIHMACKey,
+			value.config.CallerID,
+			value.authorize(
+				value.config.APIHMACKey,
+				value.config.CallerID,
+				http.HandlerFunc(value.prepare),
+			),
+		),
+	)
+	mux.Handle(
+		"POST /v1/graphs/status",
+		value.signResponse(
+			value.config.APIHMACKey,
+			value.config.CallerID,
+			value.authorize(
+				value.config.APIHMACKey,
+				value.config.CallerID,
+				http.HandlerFunc(value.status),
+			),
+		),
+	)
+	mux.Handle(
+		"POST /v1/graphs/confirm",
+		value.signResponse(
+			value.config.APIHMACKey,
+			value.config.CallerID,
+			value.authorize(
+				value.config.APIHMACKey,
+				value.config.CallerID,
+				http.HandlerFunc(value.confirm),
+			),
+		),
+	)
+	mux.Handle(
+		"POST /v1/signer/resolve",
+		value.signResponse(
+			value.config.SignerHMACKey,
+			value.config.SignerCallerID,
+			value.authorize(
+				value.config.SignerHMACKey,
+				value.config.SignerCallerID,
+				http.HandlerFunc(value.resolve),
+			),
+		),
+	)
 	return securityHeaders(mux)
 }
 
@@ -88,14 +132,14 @@ func (value *server) authorize(key []byte, caller string, next http.Handler) htt
 	})
 }
 
-func (value *server) signResponse(next http.Handler) http.Handler {
+func (value *server) signResponse(key []byte, caller string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		captured := &signedResponse{header: make(http.Header), status: http.StatusOK}
 		next.ServeHTTP(captured, request)
 		body := captured.body.Bytes()
 		digest := sha256.Sum256(body)
-		canonical := fmt.Sprintf("RESPONSE\n%s\n%s\n%s\n%d\n%x", request.URL.Path, value.config.SignerCallerID, request.Header.Get("X-RTC-Nonce"), captured.status, digest)
-		mac := hmac.New(sha256.New, value.config.SignerHMACKey)
+		canonical := fmt.Sprintf("RESPONSE\n%s\n%s\n%s\n%d\n%x", request.URL.Path, caller, request.Header.Get("X-RTC-Nonce"), captured.status, digest)
+		mac := hmac.New(sha256.New, key)
 		_, _ = mac.Write([]byte(canonical))
 		for key, values := range captured.header {
 			for _, item := range values {

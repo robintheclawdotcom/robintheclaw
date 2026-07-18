@@ -56,6 +56,9 @@ func (value *server) handler() http.Handler {
 	mux.Handle("POST /v1/links/prepare", value.authorize(http.HandlerFunc(value.prepare)))
 	mux.Handle("POST /v1/links/status", value.authorize(http.HandlerFunc(value.status)))
 	mux.Handle("POST /v1/links/confirm", value.authorize(http.HandlerFunc(value.confirm)))
+	mux.Handle("POST /v1/links/revoke/prepare", value.authorize(http.HandlerFunc(value.prepareRevocation)))
+	mux.Handle("POST /v1/links/revoke/status", value.authorize(http.HandlerFunc(value.revocationStatus)))
+	mux.Handle("POST /v1/links/revoke/confirm", value.authorize(http.HandlerFunc(value.confirmRevocation)))
 	mux.Handle("POST /v1/signer/create-order", value.authorizeSigner(http.HandlerFunc(value.createOrder)))
 	mux.Handle("POST /v1/signer/cancel-order", value.authorizeSigner(http.HandlerFunc(value.cancelOrder)))
 	mux.Handle("POST /v1/signer/cancel-all", value.authorizeSigner(http.HandlerFunc(value.cancelAll)))
@@ -96,31 +99,7 @@ func (value *server) authorizePrivate(next http.Handler, key []byte, caller stri
 		}
 		next.ServeHTTP(w, request)
 	})
-	signed := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		response := newSigningResponse()
-		limited.ServeHTTP(response, request)
-		body := response.body.Bytes()
-		digest := sha256.Sum256(body)
-		canonical := fmt.Sprintf(
-			"RESPONSE\n%s\n%s\n%s\n%d\n%x",
-			request.URL.Path,
-			caller,
-			request.Header.Get("X-RTC-Nonce"),
-			response.status,
-			digest,
-		)
-		mac := hmac.New(sha256.New, key)
-		_, _ = mac.Write([]byte(canonical))
-		for key, values := range response.header {
-			for _, item := range values {
-				w.Header().Add(key, item)
-			}
-		}
-		w.Header().Set("X-RTC-Response-Signature", hex.EncodeToString(mac.Sum(nil)))
-		w.WriteHeader(response.status)
-		_, _ = w.Write(body)
-	})
-	return value.authorizeWith(key, caller, signed)
+	return value.authorizeWith(key, caller, signResponse(key, caller, limited))
 }
 
 func (value *server) authorizeWith(key []byte, caller string, next http.Handler) http.Handler {
@@ -161,7 +140,38 @@ func (value *server) readyz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (value *server) authorize(next http.Handler) http.Handler {
-	return value.authorizeWith(value.config.HMACKey, value.config.CallerID, next)
+	return value.authorizeWith(
+		value.config.HMACKey,
+		value.config.CallerID,
+		signResponse(value.config.HMACKey, value.config.CallerID, next),
+	)
+}
+
+func signResponse(key []byte, caller string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		response := newSigningResponse()
+		next.ServeHTTP(response, request)
+		body := response.body.Bytes()
+		digest := sha256.Sum256(body)
+		canonical := fmt.Sprintf(
+			"RESPONSE\n%s\n%s\n%s\n%d\n%x",
+			request.URL.Path,
+			caller,
+			request.Header.Get("X-RTC-Nonce"),
+			response.status,
+			digest,
+		)
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write([]byte(canonical))
+		for header, values := range response.header {
+			for _, item := range values {
+				w.Header().Add(header, item)
+			}
+		}
+		w.Header().Set("X-RTC-Response-Signature", hex.EncodeToString(mac.Sum(nil)))
+		w.WriteHeader(response.status)
+		_, _ = w.Write(body)
+	})
 }
 
 func (value *provisionerRate) allow(now time.Time, limit uint16) bool {
@@ -216,6 +226,53 @@ func (value *server) confirm(w http.ResponseWriter, request *http.Request) {
 	}
 	status := http.StatusAccepted
 	if linked {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, result)
+}
+
+func (value *server) prepareRevocation(w http.ResponseWriter, request *http.Request) {
+	var body revocationRequest
+	if err := decodeBody(w, request, &body); err != nil {
+		return
+	}
+	result, err := value.service.prepareRevocation(request.Context(), body)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (value *server) revocationStatus(w http.ResponseWriter, request *http.Request) {
+	var body revocationRequest
+	if err := decodeBody(w, request, &body); err != nil {
+		return
+	}
+	result, revoked, err := value.service.revocationStatus(request.Context(), body)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	status := http.StatusAccepted
+	if revoked {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, result)
+}
+
+func (value *server) confirmRevocation(w http.ResponseWriter, request *http.Request) {
+	var body confirmRevocationRequest
+	if err := decodeBody(w, request, &body); err != nil {
+		return
+	}
+	result, revoked, err := value.service.confirmRevocation(request.Context(), body)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	status := http.StatusAccepted
+	if revoked {
 		status = http.StatusOK
 	}
 	writeJSON(w, status, result)

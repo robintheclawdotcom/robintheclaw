@@ -14,24 +14,26 @@ import (
 )
 
 const (
-	StrategyVersion             = "basis-aapl-v1"
-	StrategyManifestSHA256      = "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f"
-	SourceConfigSHA256          = "59106a18758a95af45e6ac1a8257843cfbd2a45fd09b5b3c3f429d3dedb56c2a"
-	RouteSHA256                 = "77d59f5e80e76ed507522b27ee6b7ddd1f8395f0337f0b230c5bba64bb335590"
-	OraclePolicySHA256          = "7f0d306267da767869c0bc5951ce911ac1cb9060294edfa8eeefa884e0ddf937"
-	RiskPolicySHA256            = "a34ebfd2104eb062c9102f6fe68ad74d09a6e02f5c626fd17314228ae9bc398d"
-	RiskVersion                 = StrategyVersion
-	ChainID                     = uint64(4663)
-	Symbol                      = "AAPL"
-	SpotVenue                   = "robinhood-chain-mainnet"
-	PerpVenue                   = "lighter-mainnet"
-	SettlementToken             = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
-	StockToken                  = "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9"
-	Router                      = "0x8876789976decbfcbbbe364623c63652db8c0904"
-	EntryNotionalMicros         = uint64(25_000_000)
-	MaximumQuoteLifetimeMS      = uint64(5_000)
-	MaximumExitReconciliationMS = uint64(24 * 60 * 60 * 1_000)
-	QuoteSchemaVersion          = uint8(3)
+	StrategyVersion                = "basis-aapl-v1"
+	StrategyManifestSHA256         = "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937"
+	PreviousStrategyManifestSHA256 = "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f"
+	LegacyStrategyManifestSHA256   = "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a"
+	SourceConfigSHA256             = "59106a18758a95af45e6ac1a8257843cfbd2a45fd09b5b3c3f429d3dedb56c2a"
+	RouteSHA256                    = "77d59f5e80e76ed507522b27ee6b7ddd1f8395f0337f0b230c5bba64bb335590"
+	OraclePolicySHA256             = "7f0d306267da767869c0bc5951ce911ac1cb9060294edfa8eeefa884e0ddf937"
+	RiskPolicySHA256               = "a5f01d41a420d3b077ad75814dd26356a1431acea18593d3f2d359c1f686104e"
+	RiskVersion                    = StrategyVersion
+	ChainID                        = uint64(4663)
+	Symbol                         = "AAPL"
+	SpotVenue                      = "robinhood-chain-mainnet"
+	PerpVenue                      = "lighter-mainnet"
+	SettlementToken                = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+	StockToken                     = "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9"
+	Router                         = "0x8876789976decbfcbbbe364623c63652db8c0904"
+	EntryNotionalMicros            = uint64(25_000_000)
+	MaximumQuoteLifetimeMS         = uint64(5_000)
+	MaximumExitReconciliationMS    = uint64(24 * 60 * 60 * 1_000)
+	QuoteSchemaVersion             = uint8(4)
 )
 
 var (
@@ -47,13 +49,14 @@ const (
 )
 
 type QuoteRequest struct {
-	RequestID          string `json:"request_id"`
-	ExecutionAccountID string `json:"execution_account_id"`
-	SourceEvaluationID string `json:"source_evaluation_id"`
-	MarketManifest     string `json:"market_manifest"`
-	IntentID           string `json:"intent_id,omitempty"`
-	Action             Action `json:"action"`
-	RequestedAtMS      uint64 `json:"requested_at_ms"`
+	RequestID                    string `json:"request_id"`
+	ExecutionAccountID           string `json:"execution_account_id"`
+	SourceEvaluationID           string `json:"source_evaluation_id"`
+	MarketManifest               string `json:"market_manifest"`
+	IntentID                     string `json:"intent_id,omitempty"`
+	TargetStrategyManifestSHA256 string `json:"target_strategy_manifest_sha256,omitempty"`
+	Action                       Action `json:"action"`
+	RequestedAtMS                uint64 `json:"requested_at_ms"`
 }
 
 type SourceIdentity struct {
@@ -110,30 +113,31 @@ type ExitQuoteAuthority struct {
 }
 
 type MarketQuotePublication struct {
-	Source                      string `json:"source"`
-	SourceSession               string `json:"source_session"`
-	SourceEventID               string `json:"source_event_id"`
-	SourceSequence              int64  `json:"source_sequence"`
-	ExecutionAccountID          string `json:"execution_account_id,omitempty"`
-	MarketManifest              string `json:"market_manifest"`
-	StrategyManifestSHA256      string `json:"strategy_manifest_sha256,omitempty"`
-	RouteSHA256                 string `json:"route_sha256,omitempty"`
-	LighterMarketIndex          uint32 `json:"lighter_market_index,omitempty"`
-	QuoteBlockHash              string `json:"quote_block_hash"`
-	MarkPrice                   uint32 `json:"mark_price"`
-	ExpectedUIMultiplier        string `json:"expected_ui_multiplier"`
-	MinOracleRoundID            string `json:"min_oracle_round_id"`
-	PublisherAtMS               int64  `json:"publisher_at_ms"`
-	ReceivedAtMS                int64  `json:"received_at_ms"`
-	ExpiresAtMS                 int64  `json:"expires_at_ms"`
-	IntentID                    string `json:"intent_id,omitempty"`
-	SpotUnwindAmountIn          string `json:"spot_unwind_amount_in,omitempty"`
-	SpotUnwindExpectedAmountOut string `json:"spot_unwind_expected_amount_out,omitempty"`
-	UnwindPhase                 string `json:"unwind_phase,omitempty"`
-	PerpUnwindBaseAmount        uint64 `json:"perp_unwind_base_amount,omitempty"`
-	PerpUnwindLimitPrice        uint32 `json:"perp_unwind_limit_price,omitempty"`
-	SubmissionDeadlineMS        int64  `json:"submission_deadline_ms,omitempty"`
-	ReconciliationDeadlineMS    int64  `json:"reconciliation_deadline_ms,omitempty"`
+	Source                       string  `json:"source"`
+	SourceSession                string  `json:"source_session"`
+	SourceEventID                string  `json:"source_event_id"`
+	SourceSequence               int64   `json:"source_sequence"`
+	ExecutionAccountID           string  `json:"execution_account_id,omitempty"`
+	MarketManifest               string  `json:"market_manifest"`
+	StrategyManifestSHA256       string  `json:"strategy_manifest_sha256,omitempty"`
+	TargetStrategyManifestSHA256 string  `json:"target_strategy_manifest_sha256,omitempty"`
+	RouteSHA256                  string  `json:"route_sha256,omitempty"`
+	LighterMarketIndex           uint32  `json:"lighter_market_index,omitempty"`
+	QuoteBlockHash               string  `json:"quote_block_hash"`
+	MarkPrice                    uint32  `json:"mark_price"`
+	ExpectedUIMultiplier         string  `json:"expected_ui_multiplier"`
+	MinOracleRoundID             string  `json:"min_oracle_round_id"`
+	PublisherAtMS                int64   `json:"publisher_at_ms"`
+	ReceivedAtMS                 int64   `json:"received_at_ms"`
+	ExpiresAtMS                  int64   `json:"expires_at_ms"`
+	IntentID                     string  `json:"intent_id,omitempty"`
+	SpotUnwindAmountIn           string  `json:"spot_unwind_amount_in,omitempty"`
+	SpotUnwindExpectedAmountOut  string  `json:"spot_unwind_expected_amount_out,omitempty"`
+	UnwindPhase                  string  `json:"unwind_phase,omitempty"`
+	PerpUnwindBaseAmount         *uint64 `json:"perp_unwind_base_amount,omitempty"`
+	PerpUnwindLimitPrice         uint32  `json:"perp_unwind_limit_price,omitempty"`
+	SubmissionDeadlineMS         int64   `json:"submission_deadline_ms,omitempty"`
+	ReconciliationDeadlineMS     int64   `json:"reconciliation_deadline_ms,omitempty"`
 }
 
 type MarketQuoteReceipt struct {
@@ -144,27 +148,28 @@ type MarketQuoteReceipt struct {
 }
 
 type QuoteBundle struct {
-	SchemaVersion          uint8               `json:"schema_version"`
-	ID                     string              `json:"id"`
-	RequestID              string              `json:"request_id"`
-	ExecutionAccountID     string              `json:"execution_account_id"`
-	SourceEvaluationID     string              `json:"source_evaluation_id"`
-	MarketManifest         string              `json:"market_manifest"`
-	StrategyVersion        string              `json:"strategy_version"`
-	StrategyManifestSHA256 string              `json:"strategy_manifest_sha256"`
-	SourceConfigSHA256     string              `json:"source_config_sha256"`
-	RouteSHA256            string              `json:"route_sha256"`
-	OraclePolicySHA256     string              `json:"oracle_policy_sha256"`
-	RiskPolicySHA256       string              `json:"risk_policy_sha256"`
-	Action                 Action              `json:"action"`
-	Source                 SourceIdentity      `json:"source"`
-	Spot                   SpotQuote           `json:"spot"`
-	Perp                   PerpQuote           `json:"perp"`
-	ExitAuthority          *ExitQuoteAuthority `json:"exit_authority,omitempty"`
-	ObservedAtMS           uint64              `json:"observed_at_ms"`
-	ExpiresAtMS            uint64              `json:"expires_at_ms"`
-	PublicKey              string              `json:"public_key"`
-	Signature              string              `json:"signature"`
+	SchemaVersion                uint8               `json:"schema_version"`
+	ID                           string              `json:"id"`
+	RequestID                    string              `json:"request_id"`
+	ExecutionAccountID           string              `json:"execution_account_id"`
+	SourceEvaluationID           string              `json:"source_evaluation_id"`
+	MarketManifest               string              `json:"market_manifest"`
+	StrategyVersion              string              `json:"strategy_version"`
+	StrategyManifestSHA256       string              `json:"strategy_manifest_sha256"`
+	TargetStrategyManifestSHA256 string              `json:"target_strategy_manifest_sha256,omitempty"`
+	SourceConfigSHA256           string              `json:"source_config_sha256"`
+	RouteSHA256                  string              `json:"route_sha256"`
+	OraclePolicySHA256           string              `json:"oracle_policy_sha256"`
+	RiskPolicySHA256             string              `json:"risk_policy_sha256"`
+	Action                       Action              `json:"action"`
+	Source                       SourceIdentity      `json:"source"`
+	Spot                         SpotQuote           `json:"spot"`
+	Perp                         PerpQuote           `json:"perp"`
+	ExitAuthority                *ExitQuoteAuthority `json:"exit_authority,omitempty"`
+	ObservedAtMS                 uint64              `json:"observed_at_ms"`
+	ExpiresAtMS                  uint64              `json:"expires_at_ms"`
+	PublicKey                    string              `json:"public_key"`
+	Signature                    string              `json:"signature"`
 }
 
 func (q *QuoteBundle) Sign(privateKey ed25519.PrivateKey) error {
@@ -234,10 +239,11 @@ func (q QuoteBundle) validateCanonical(expectedMarketIndex uint32) error {
 	if q.Action != ActionEntry && q.Action != ActionUnwind {
 		return errors.New("quote action is invalid")
 	}
-	if q.Action == ActionEntry && q.ExitAuthority != nil {
-		return errors.New("entry quote contains exit authority")
+	if q.Action == ActionEntry && (q.TargetStrategyManifestSHA256 != "" || q.ExitAuthority != nil) {
+		return errors.New("entry quote contains an unwind binding")
 	}
-	if q.Action == ActionUnwind && !q.validExitAuthority() {
+	if q.Action == ActionUnwind &&
+		(!IsAllowedUnwindTargetStrategyManifest(q.TargetStrategyManifestSHA256) || !q.validExitAuthority()) {
 		return errors.New("exit quote authority is invalid")
 	}
 	if q.Spot.Venue != SpotVenue || q.Spot.ChainID != ChainID || q.Spot.SettlementToken != SettlementToken ||
@@ -259,7 +265,8 @@ func (q QuoteBundle) validateCanonical(expectedMarketIndex uint32) error {
 	}
 	spotOnly := q.Action == ActionUnwind && q.Perp.Phase == "spot_only"
 	if q.Spot.SettlementAmount == "" || q.Spot.StockAmount == "" || q.Spot.MinimumAmountOut == "" ||
-		q.Spot.ReferencePriceMicros == 0 || (!spotOnly && q.Perp.BaseAmount == 0) || q.Perp.LimitPrice == 0 || q.Perp.MarkPrice == 0 ||
+		q.Spot.ReferencePriceMicros == 0 || (!spotOnly && q.Perp.BaseAmount == 0) || (spotOnly && q.Perp.BaseAmount != 0) ||
+		q.Perp.LimitPrice == 0 || q.Perp.MarkPrice == 0 ||
 		q.Perp.MarketIndex != expectedMarketIndex || q.Perp.BaseDecimals > 18 || q.Perp.PriceDecimals > 18 {
 		return errors.New("quote amounts are invalid")
 	}
@@ -279,6 +286,12 @@ func (q QuoteBundle) validateCanonical(expectedMarketIndex uint32) error {
 		return errors.New("quote lifetime is invalid")
 	}
 	return nil
+}
+
+func IsAllowedUnwindTargetStrategyManifest(value string) bool {
+	return value == StrategyManifestSHA256 ||
+		value == PreviousStrategyManifestSHA256 ||
+		value == LegacyStrategyManifestSHA256
 }
 
 func (q QuoteBundle) validExitAuthority() bool {

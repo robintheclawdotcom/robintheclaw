@@ -60,7 +60,9 @@ func run() error {
 	service := aaplrelay.NewService(config, target, source, feed, journal, metrics)
 	server := &http.Server{
 		Addr: config.ListenAddress, Handler: aaplrelay.MetricsHandler(metrics, config.Interval),
-		ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second,
+		WriteTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
+		MaxHeaderBytes: 16 << 10,
 	}
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

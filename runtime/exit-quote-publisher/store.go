@@ -33,20 +33,14 @@ func (store *PGStore) Candidates(ctx context.Context, now time.Time, limit int) 
 		return nil, errors.New("candidate limit is invalid")
 	}
 	rows, err := store.pool.Query(ctx, `
-SELECT action.id, intent.execution_account_id, intent.id,
-       intent.payload #>> '{evidence,market_manifest}', intent.saga_version,
+SELECT action.id, candidate.execution_account_id, intent.id,
+       intent.payload #>> '{evidence,market_manifest}',
+       candidate.target_strategy_manifest_sha256, intent.saga_version,
        intent.saga, action.kind, action.payload
-FROM execution_actions action
-JOIN execution_intents intent ON intent.id = action.intent_id AND intent.active
-JOIN execution_accounts account USING (execution_account_id)
-JOIN execution_account_commands command
-  ON command.command_id = action.payload->>'control_command_id'
- AND command.execution_account_id = intent.execution_account_id
- AND command.command IN ('pause', 'close') AND command.status = 'reducing'
-WHERE action.kind IN ('unwind_perp', 'unwind_spot')
-  AND action.status IN ('pending', 'leased') AND action.available_at <= $1
-  AND account.status = 'active'
-  AND action.payload->>'exit_reason' = 'operator_exit'
+FROM execution_exit_quote_candidates_v1 candidate
+JOIN execution_actions action ON action.id = candidate.action_id
+JOIN execution_intents intent ON intent.id = candidate.intent_id
+WHERE action.available_at <= $1
   AND NOT (COALESCE(action.result, '{}'::jsonb) ?| ARRAY['send_authorized','signed','request','submission'])
   AND CASE
         WHEN action.payload #>> '{exit_authority,submission_deadline_ms}' ~ '^[0-9]{1,20}$'
@@ -59,8 +53,9 @@ WHERE action.kind IN ('unwind_perp', 'unwind_spot')
         AND quote.intent_id = intent.id
         AND quote.execution_account_id = intent.execution_account_id
         AND quote.market_manifest = intent.payload #>> '{evidence,market_manifest}'
+        AND quote.strategy_manifest_sha256 = candidate.target_strategy_manifest_sha256
         AND quote.spot_unwind_amount_in = intent.saga->>'spot_received_raw'
-        AND quote.exit_binding_version = 2
+        AND quote.exit_binding_version = 3
         AND quote.unwind_phase = CASE action.kind
               WHEN 'unwind_perp' THEN 'perp_and_spot' ELSE 'spot_only' END
         AND quote.perp_unwind_base_amount = CASE action.kind
@@ -79,10 +74,10 @@ LIMIT $2`, now, limit)
 	defer rows.Close()
 	var candidates []Candidate
 	for rows.Next() {
-		var actionID, accountID, intentID, manifest, kind string
+		var actionID, accountID, intentID, marketManifest, targetManifest, kind string
 		var sagaVersion int64
 		var sagaBody, payloadBody []byte
-		if err := rows.Scan(&actionID, &accountID, &intentID, &manifest, &sagaVersion, &sagaBody, &kind, &payloadBody); err != nil {
+		if err := rows.Scan(&actionID, &accountID, &intentID, &marketManifest, &targetManifest, &sagaVersion, &sagaBody, &kind, &payloadBody); err != nil {
 			return nil, err
 		}
 		var saga sagaRecord
@@ -93,7 +88,8 @@ LIMIT $2`, now, limit)
 		}
 		remaining := saga.PerpFilledBase - saga.PerpUnwoundBase
 		candidate := Candidate{ActionID: actionID, ExecutionAccountID: accountID, IntentID: intentID,
-			MarketManifest: manifest, SagaVersion: saga.Version, SpotAmount: saga.SpotReceivedRaw,
+			MarketManifest: marketManifest, TargetStrategyManifestSHA256: targetManifest,
+			SagaVersion: saga.Version, SpotAmount: saga.SpotReceivedRaw,
 			PerpBaseAmount: remaining, Phase: PhasePerpAndSpot}
 		if kind == "unwind_spot" {
 			candidate.Phase = PhaseSpotOnly
@@ -132,15 +128,17 @@ SELECT EXISTS (
   WHERE source = 'execution-authority' AND source_session = $1 AND source_event_id = $2
     AND payload_sha256 = $3 AND execution_account_id = $4 AND intent_id = $5
     AND market_manifest = $6 AND spot_unwind_amount_in = $7 AND mark_price = $8
-    AND expected_ui_multiplier = $9 AND min_oracle_round_id = $10
-    AND (EXTRACT(EPOCH FROM received_at) * 1000)::bigint = $11
-    AND submission_deadline_ms = $12 AND reconciliation_deadline_ms = $13
-    AND exit_binding_version = 2 AND unwind_phase = $14
-    AND perp_unwind_base_amount = $15 AND perp_unwind_limit_price = $16
-    AND received_at <= $17 AND expires_at > $17
+    AND strategy_manifest_sha256 = $9
+    AND expected_ui_multiplier = $10 AND min_oracle_round_id = $11
+    AND (EXTRACT(EPOCH FROM received_at) * 1000)::bigint = $12
+    AND submission_deadline_ms = $13 AND reconciliation_deadline_ms = $14
+    AND exit_binding_version = 3 AND unwind_phase = $15
+    AND perp_unwind_base_amount = $16 AND perp_unwind_limit_price = $17
+    AND received_at <= $18 AND expires_at > $18
 )`, evidence.SourceSession, evidence.SourceEventID, evidence.PayloadSHA256,
 		candidate.ExecutionAccountID, candidate.IntentID, candidate.MarketManifest, candidate.SpotAmount,
-		int64(evidence.MarkPrice), evidence.ExpectedUIMultiplier, evidence.MinOracleRoundID,
+		int64(evidence.MarkPrice), candidate.TargetStrategyManifestSHA256,
+		evidence.ExpectedUIMultiplier, evidence.MinOracleRoundID,
 		int64(evidence.ReceivedAtMS), int64(evidence.SubmissionDeadlineMS),
 		int64(evidence.ReconciliationDeadlineMS), evidence.UnwindPhase, int64(evidence.PerpBaseAmount),
 		int64(evidence.PerpLimitPrice), now).Scan(&persisted)

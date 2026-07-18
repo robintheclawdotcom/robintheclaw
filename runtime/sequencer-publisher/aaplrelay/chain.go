@@ -18,6 +18,7 @@ import (
 const sourceABIJSON = `[
   {"type":"function","name":"decimals","stateMutability":"view","inputs":[],"outputs":[{"type":"uint8"}]},
   {"type":"function","name":"description","stateMutability":"view","inputs":[],"outputs":[{"type":"string"}]},
+  {"type":"function","name":"aggregator","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
   {"type":"function","name":"latestRoundData","stateMutability":"view","inputs":[],"outputs":[{"type":"uint80"},{"type":"int256"},{"type":"uint256"},{"type":"uint256"},{"type":"uint80"}]}
 ]`
 
@@ -71,6 +72,8 @@ type SourceReader struct {
 	second      Chain
 	feed        common.Address
 	codeHash    common.Hash
+	aggregator  common.Address
+	aggCodeHash common.Hash
 	contract    abi.ABI
 	maxBlockAge time.Duration
 	clock       func() time.Time
@@ -83,6 +86,7 @@ func NewSourceReader(first, second Chain, config Config) (*SourceReader, error) 
 	}
 	return &SourceReader{
 		first: first, second: second, feed: config.SourceFeed, codeHash: config.SourceCodeHash,
+		aggregator: config.SourceAggregator, aggCodeHash: config.AggregatorCodeHash,
 		contract: contract, maxBlockAge: config.FinalizedMaxAge, clock: time.Now,
 	}, nil
 }
@@ -122,11 +126,11 @@ func (reader *SourceReader) Observe(ctx context.Context) (PriceObservation, erro
 	if blockTime.After(now.Add(5*time.Second)) || now.Sub(blockTime) > reader.maxBlockAge {
 		return PriceObservation{}, errors.New("Arbitrum common finalized block is stale")
 	}
-	for _, chain := range []Chain{reader.first, reader.second} {
-		code, err := chain.CodeAt(ctx, reader.feed, commonNumber)
-		if err != nil || len(code) == 0 || crypto.Keccak256Hash(code) != reader.codeHash {
-			return PriceObservation{}, errors.New("AAPL source runtime code mismatch")
-		}
+	if err := reader.verifyIdentity(ctx, commonNumber); err != nil {
+		return PriceObservation{}, err
+	}
+	if err := reader.verifyIdentity(ctx, nil); err != nil {
+		return PriceObservation{}, err
 	}
 	first, err := reader.read(ctx, reader.first, commonNumber, firstHeader)
 	if err != nil {
@@ -140,6 +144,37 @@ func (reader *SourceReader) Observe(ctx context.Context) (PriceObservation, erro
 		return PriceObservation{}, errors.New("AAPL source RPC response disagreement")
 	}
 	return first, nil
+}
+
+func (reader *SourceReader) verifyIdentity(ctx context.Context, block *big.Int) error {
+	chains := []Chain{reader.first, reader.second}
+	aggregators := make([]common.Address, 0, 2)
+	for _, chain := range chains {
+		values, err := reader.call(ctx, chain, block, "aggregator")
+		if err != nil || len(values) != 1 {
+			return errors.New("read AAPL source aggregator")
+		}
+		aggregator, ok := values[0].(common.Address)
+		if !ok || aggregator == (common.Address{}) {
+			return errors.New("invalid AAPL source aggregator")
+		}
+		aggregators = append(aggregators, aggregator)
+	}
+	if aggregators[0] != aggregators[1] || aggregators[0] != reader.aggregator {
+		return errors.New("AAPL source aggregator mismatch")
+	}
+	for index, chain := range chains {
+		proxyCode, err := chain.CodeAt(ctx, reader.feed, block)
+		if err != nil || len(proxyCode) == 0 || crypto.Keccak256Hash(proxyCode) != reader.codeHash {
+			return errors.New("AAPL source runtime code mismatch")
+		}
+		aggregatorCode, err := chain.CodeAt(ctx, aggregators[index], block)
+		if err != nil || len(aggregatorCode) == 0 ||
+			crypto.Keccak256Hash(aggregatorCode) != reader.aggCodeHash {
+			return errors.New("AAPL source aggregator runtime code mismatch")
+		}
+	}
+	return nil
 }
 
 func (reader *SourceReader) read(

@@ -1,17 +1,22 @@
 use coordinator::store::{
-    AccountCommandRequest, AccountCommandStatusRequest, AccountRegistrationRequest, ActionKind,
-    ExitRequest, ExitStatusRequest, IntentStatusRequest, NewAccountSnapshot, NewMarketQuote,
-    NewVenueEvent, NextAction, ObservationOutcome, RecoveryRequest, Store, StoreError,
+    calculate_intent_payload_sha256, AccountCommandRequest, AccountCommandStatusRequest,
+    AccountRegistrationRequest, ActionKind, ExitRequest, ExitStatusRequest, IntentStatusRequest,
+    NewAccountSnapshot, NewMarketQuote, NewVenueEvent, NextAction, ObservationOutcome,
+    RecoveryRequest, Store, StoreError,
 };
 use execution::{
     ExecutionEvent, ExecutionSaga, ExecutionState, FrozenEvidence, PairIntent, PerpSide, SpotSide,
-    CANARY_RISK_VERSION, PAIR_INTENT_VERSION,
+    BASIS_AAPL_V1_LEGACY_MANIFEST_SHA256, BASIS_AAPL_V1_MANIFEST_SHA256, CANARY_RISK_VERSION,
+    PAIR_INTENT_VERSION,
 };
 use research::PromotionEvidence;
 use sqlx::PgPool;
+use std::time::Duration;
 
 const BASIS_AAPL_V1_ROUTE_SHA256: &str =
     "77d59f5e80e76ed507522b27ee6b7ddd1f8395f0337f0b230c5bba64bb335590";
+const PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256: &str =
+    "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f";
 
 #[tokio::test]
 #[ignore = "requires a disposable PostgreSQL database"]
@@ -87,6 +92,24 @@ async fn migration_and_promotion_gate_are_enforced() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0019_robinhood_snapshot_source_blocks.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0020_release_blocked_exit_quotes.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0021_require_runtime_readiness.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
     for migration in [
         include_str!("../../runtime/live-scheduler/migrations/0001_live_scheduler.sql"),
         include_str!("../../runtime/live-scheduler/migrations/0002_natural_strategy_exit.sql"),
@@ -101,6 +124,20 @@ async fn migration_and_promotion_gate_are_enforced() {
     .await
     .unwrap();
     assert_eq!(legacy, ("singleton-mainnet-canary".into(), false, false));
+    let rollout = sqlx::query_as::<_, (bool, bool)>(
+        "SELECT alerting_ready, safe_rotation_ready FROM execution_rollout_readiness WHERE singleton",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rollout, (false, false));
+    let activation_trigger = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'execution_promoted_canary_activation' AND NOT tgisinternal)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!activation_trigger);
 
     let evidence = approved_evidence();
     let digest = evidence.calculate_hash();
@@ -179,7 +216,7 @@ async fn migration_and_promotion_gate_are_enforced() {
     .await
     .unwrap();
     sqlx::query(
-        "UPDATE execution_account_control SET mode = 'ACTIVE', reason = 'integration test'",
+        "UPDATE execution_account_control SET mode = 'REDUCE_ONLY', reason = 'integration test awaiting launch'",
     )
     .execute(&pool)
     .await
@@ -190,6 +227,17 @@ async fn migration_and_promotion_gate_are_enforced() {
         SET venue_approved = TRUE, oracle_healthy = TRUE, sequencer_healthy = TRUE,
             reconciliation_ready = TRUE, exit_authority_ready = TRUE,
             alerting_ready = TRUE, safe_rotation_ready = TRUE
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE execution_rollout_readiness
+        SET alerting_ready = TRUE, safe_rotation_ready = TRUE,
+            version = version + 1, updated_at = now()
+        WHERE singleton
         "#,
     )
     .execute(&pool)
@@ -221,6 +269,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         execution_account_id: None,
         market_manifest: intent().evidence.market_manifest,
         strategy_manifest_sha256: None,
+        target_strategy_manifest_sha256: None,
         route_sha256: None,
         lighter_market_index: None,
         quote_block_hash: intent().evidence.quote_block_hash,
@@ -263,9 +312,58 @@ async fn migration_and_promotion_gate_are_enforced() {
             .unwrap()
             .created
     );
-    for snapshot in account_snapshots() {
-        assert!(store.record_account_snapshot(&snapshot).await.unwrap());
+    let mut snapshots = account_snapshots();
+    for snapshot in &snapshots {
+        assert!(store.record_account_snapshot(snapshot).await.unwrap());
     }
+    let robinhood = snapshots
+        .iter_mut()
+        .find(|snapshot| snapshot.source == "robinhood-chain")
+        .unwrap();
+    robinhood.source_sequence = 2;
+    robinhood.payload["global_mode"] = serde_json::json!("REDUCE_ONLY");
+    assert!(store.record_account_snapshot(robinhood).await.unwrap());
+    assert!(matches!(
+        store
+            .submit_account_command(
+                &AccountCommandRequest {
+                    command_id: "command-launch-global-race".into(),
+                    execution_account_id: "singleton-mainnet-canary".into(),
+                    agent_id: "singleton-mainnet-canary".into(),
+                    command: "launch".into(),
+                    requested_at_ms: 1_200,
+                },
+                1_200,
+            )
+            .await,
+        Err(StoreError::AccountCommandBlocked)
+    ));
+
+    robinhood.source_sequence = 3;
+    robinhood.payload["global_mode"] = serde_json::json!("ACTIVE");
+    robinhood.payload["finalized_agent_address"] =
+        serde_json::json!("0x0000000000000000000000000000000000000005");
+    assert!(store.record_account_snapshot(robinhood).await.unwrap());
+    assert!(matches!(
+        store
+            .submit_account_command(
+                &AccountCommandRequest {
+                    command_id: "command-launch-finalized-signer-race".into(),
+                    execution_account_id: "singleton-mainnet-canary".into(),
+                    agent_id: "singleton-mainnet-canary".into(),
+                    command: "launch".into(),
+                    requested_at_ms: 1_200,
+                },
+                1_200,
+            )
+            .await,
+        Err(StoreError::AccountCommandBlocked)
+    ));
+
+    robinhood.source_sequence = 4;
+    robinhood.payload["finalized_agent_address"] =
+        serde_json::json!("0x0000000000000000000000000000000000000003");
+    assert!(store.record_account_snapshot(robinhood).await.unwrap());
     let launch = store
         .submit_account_command(
             &AccountCommandRequest {
@@ -288,10 +386,11 @@ async fn migration_and_promotion_gate_are_enforced() {
         store.create_intent(&mismatched_market, 1_200).await,
         Err(StoreError::InvalidIntent(_))
     ));
-    assert!(matches!(
-        store.create_intent(&intent(), 1_200).await,
-        Err(StoreError::MissingEvidence)
-    ));
+    let prepromotion = store.create_intent(&intent(), 1_200).await;
+    assert!(
+        matches!(&prepromotion, Err(StoreError::MissingEvidence)),
+        "pre-promotion admission returned {prepromotion:?}"
+    );
 
     let skipped =
         insert_transition(&pool, CANARY_RISK_VERSION, "registered", "shadow", &digest).await;
@@ -971,6 +1070,25 @@ async fn migration_and_promotion_gate_are_enforced() {
         store.record_venue_event(&conflicting_event).await,
         Err(StoreError::VenueEventConflict)
     ));
+    sqlx::query(
+        "UPDATE execution_control SET mode = 'ACTIVE', reason = 'exit test' WHERE singleton",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_accounts SET status = 'active' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_account_control SET mode = 'ACTIVE', reason = 'exit test' \
+         WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let mut hedged = ExecutionSaga::new(intent().id).unwrap();
     for event in [
@@ -1002,7 +1120,8 @@ async fn migration_and_promotion_gate_are_enforced() {
         source_sequence: 1,
         execution_account_id: Some("singleton-mainnet-canary".into()),
         market_manifest: intent().evidence.market_manifest,
-        strategy_manifest_sha256: Some(intent().strategy_manifest_sha256),
+        strategy_manifest_sha256: Some(BASIS_AAPL_V1_MANIFEST_SHA256.into()),
+        target_strategy_manifest_sha256: Some(intent().strategy_manifest_sha256),
         route_sha256: Some(BASIS_AAPL_V1_ROUTE_SHA256.into()),
         lighter_market_index: Some(101),
         quote_block_hash: "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
@@ -1153,7 +1272,8 @@ async fn migration_and_promotion_gate_are_enforced() {
         source_sequence: 1,
         execution_account_id: Some("singleton-mainnet-canary".into()),
         market_manifest: intent().evidence.market_manifest,
-        strategy_manifest_sha256: Some(intent().strategy_manifest_sha256),
+        strategy_manifest_sha256: Some(BASIS_AAPL_V1_MANIFEST_SHA256.into()),
+        target_strategy_manifest_sha256: Some(intent().strategy_manifest_sha256),
         route_sha256: Some(BASIS_AAPL_V1_ROUTE_SHA256.into()),
         lighter_market_index: Some(101),
         quote_block_hash: "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
@@ -1330,9 +1450,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         "0x0000000000000000000000000000000000000014",
     );
     for snapshot in &mut snapshots {
-        snapshot.observed_at_ms = 4_998;
-        snapshot.received_at_ms = 4_999;
-        snapshot.expires_at_ms = 8_000;
+        set_snapshot_times(snapshot, 4_000, 4_999, 8_000);
         store.record_account_snapshot(snapshot).await.unwrap();
     }
     let command = |command_id: &str, command: &str, requested_at_ms| AccountCommandRequest {
@@ -1352,19 +1470,60 @@ async fn migration_and_promotion_gate_are_enforced() {
         .submit_account_command(&command("command-close-control", "close", 5_100), 5_100)
         .await
         .unwrap();
-    assert_eq!(closed.status, "completed");
-    assert_eq!(closed.control_mode, "HALTED");
+    assert_eq!(closed.status, "awaiting_owner_signature");
+    assert!(closed.reconciled_flat);
+    assert!(!closed.agent_revoked);
+    assert_eq!(closed.owner_actions.len(), 1);
+    assert_eq!(closed.owner_actions[0].data, "0x51755334");
 
     for snapshot in &mut snapshots {
         snapshot.source_sequence = 2;
-        snapshot.observed_at_ms = 5_198;
-        snapshot.received_at_ms = 5_199;
+        set_snapshot_times(snapshot, 5_000, 5_199, 8_000);
         if snapshot.source == "robinhood-chain" {
             snapshot.payload["agent_enabled"] = serde_json::json!(false);
             snapshot.payload["risk_mode"] = serde_json::json!("HALTED");
         }
         store.record_account_snapshot(snapshot).await.unwrap();
     }
+    let latest_only = store
+        .account_command_status(
+            &AccountCommandStatusRequest {
+                command_id: "command-close-control".into(),
+                execution_account_id: "account-control-test".into(),
+            },
+            5_200,
+        )
+        .await
+        .unwrap();
+    assert_eq!(latest_only.status, "awaiting_owner_signature");
+    assert!(!latest_only.agent_revoked);
+    assert_eq!(latest_only.owner_actions.len(), 1);
+
+    for snapshot in &mut snapshots {
+        snapshot.source_sequence = 3;
+        set_snapshot_times(snapshot, 5_000, 5_299, 8_000);
+        if snapshot.source == "robinhood-chain" {
+            snapshot.payload["finalized_agent_address"] =
+                serde_json::json!("0x0000000000000000000000000000000000000000");
+            snapshot.payload["finalized_agent_enabled"] = serde_json::json!(false);
+            snapshot.payload["finalized_agent_revoked"] = serde_json::json!(true);
+            snapshot.payload["finalized_risk_mode"] = serde_json::json!("HALTED");
+        }
+        store.record_account_snapshot(snapshot).await.unwrap();
+    }
+    let closed = store
+        .account_command_status(
+            &AccountCommandStatusRequest {
+                command_id: "command-close-control".into(),
+                execution_account_id: "account-control-test".into(),
+            },
+            5_300,
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed.status, "completed");
+    assert_eq!(closed.control_mode, "HALTED");
+    assert!(closed.agent_revoked);
     let withdrawal = store
         .submit_account_command(
             &command("command-withdraw-control", "withdraw", 5_300),
@@ -1381,9 +1540,8 @@ async fn migration_and_promotion_gate_are_enforced() {
     assert!(withdrawal.owner_actions[0].data.starts_with("0x142834dd"));
 
     for snapshot in &mut snapshots {
-        snapshot.source_sequence = 3;
-        snapshot.observed_at_ms = 5_398;
-        snapshot.received_at_ms = 5_399;
+        snapshot.source_sequence = 4;
+        set_snapshot_times(snapshot, 5_000, 5_399, 8_000);
         if snapshot.source == "robinhood-chain" {
             snapshot.payload["settlement_balance_raw"] = serde_json::json!("0");
         }
@@ -1428,7 +1586,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         .unwrap();
     assert!(first.created);
     assert_eq!(first.response.account_status, "active");
-    assert_eq!(first.response.control_mode, "HALTED");
+    assert_eq!(first.response.control_mode, "REDUCE_ONLY");
     assert_eq!(
         first.response.readiness,
         coordinator::store::AccountRegistrationReadiness {
@@ -1437,8 +1595,8 @@ async fn migration_and_promotion_gate_are_enforced() {
             sequencer_healthy: false,
             reconciliation_ready: false,
             exit_authority_ready: false,
-            alerting_ready: false,
-            safe_rotation_ready: false,
+            alerting_ready: true,
+            safe_rotation_ready: true,
         }
     );
     let retry = store
@@ -1492,7 +1650,7 @@ async fn migration_and_promotion_gate_are_enforced() {
         .await
         .unwrap();
     assert_eq!(second.binding_sha256, second_registration.binding_sha256);
-    assert_eq!(second.control_mode, "HALTED");
+    assert_eq!(second.control_mode, "REDUCE_ONLY");
 
     sqlx::query("UPDATE execution_accounts SET status = 'closed' WHERE execution_account_id = $1")
         .bind(&second_registration.execution_account_id)
@@ -1642,6 +1800,12 @@ async fn migration_and_promotion_gate_are_enforced() {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query(
+        "UPDATE execution_accounts SET status = 'active' WHERE execution_account_id = 'singleton-mainnet-canary'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut colliding_quote = exit_quote.clone();
     colliding_quote.mark_price += 1;
     assert!(matches!(
@@ -1696,6 +1860,1074 @@ async fn migration_and_promotion_gate_are_enforced() {
     .await
     .unwrap();
     assert_eq!(payload_incidents, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL database"]
+async fn prior_manifest_registration_does_not_consume_current_canary_capacity() {
+    let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
+    let pool = PgPool::connect(&url).await.unwrap();
+    for migration in [
+        include_str!("../migrations/0001_execution.sql"),
+        include_str!("../migrations/0002_execution_actions.sql"),
+        include_str!("../migrations/0003_venue_event_binding.sql"),
+        include_str!("../migrations/0004_market_authority.sql"),
+        include_str!("../migrations/0005_exit_authority.sql"),
+        include_str!("../migrations/0006_multi_account_execution.sql"),
+        include_str!("../migrations/0007_account_commands.sql"),
+        include_str!("../migrations/0008_account_registration.sql"),
+        include_str!("../migrations/0009_intent_idempotency.sql"),
+        include_str!("../migrations/0010_exit_dispatch.sql"),
+        include_str!("../migrations/0011_operator_restrictions.sql"),
+        include_str!("../migrations/0012_internal_canary_promotion.sql"),
+        include_str!("../migrations/0013_derived_canary_readiness.sql"),
+        include_str!("../migrations/0014_open_episode_resolution.sql"),
+        include_str!("../migrations/0015_exit_execution_policy.sql"),
+        include_str!("../migrations/0016_enable_basis_aapl_canary.sql"),
+        include_str!("../migrations/0017_refresh_basis_aapl_canary.sql"),
+        include_str!("../../runtime/live-scheduler/migrations/0001_live_scheduler.sql"),
+        include_str!("../../runtime/live-scheduler/migrations/0002_natural_strategy_exit.sql"),
+        include_str!("../../runtime/live-scheduler/migrations/0003_repin_strategy_manifest.sql"),
+    ] {
+        sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    }
+
+    let mut prior = registration(
+        "prior-basis-account",
+        "prior-basis-agent",
+        81,
+        "0x0000000000000000000000000000000000000081",
+        "0x0000000000000000000000000000000000000082",
+        "0x0000000000000000000000000000000000000083",
+    );
+    prior.strategy_manifest_sha256 = PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256.into();
+    prior.binding_sha256 = prior.calculate_binding_sha256();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_accounts (
+            execution_account_id, agent_id, strategy_version, risk_version, status,
+            lighter_account_index, lighter_api_key_index, robinhood_vault,
+            robinhood_signer, owner_address, strategy_manifest_sha256, binding_sha256
+        ) VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(&prior.execution_account_id)
+    .bind(&prior.agent_id)
+    .bind(&prior.strategy_version)
+    .bind(&prior.risk_version)
+    .bind(prior.lighter_account_index)
+    .bind(prior.lighter_api_key_index)
+    .bind(&prior.robinhood_vault)
+    .bind(&prior.robinhood_signer)
+    .bind(&prior.robinhood_owner)
+    .bind(&prior.strategy_manifest_sha256)
+    .bind(&prior.binding_sha256)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_account_registrations (
+            execution_account_id, agent_id, strategy_version, risk_version,
+            strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+            robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(&prior.execution_account_id)
+    .bind(&prior.agent_id)
+    .bind(&prior.strategy_version)
+    .bind(&prior.risk_version)
+    .bind(&prior.strategy_manifest_sha256)
+    .bind(prior.lighter_account_index)
+    .bind(prior.lighter_api_key_index)
+    .bind(&prior.robinhood_owner)
+    .bind(&prior.robinhood_vault)
+    .bind(&prior.robinhood_signer)
+    .bind(&prior.binding_sha256)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO execution_account_control (execution_account_id, mode, reason) \
+         VALUES ($1, 'ACTIVE', 'prior release')",
+    )
+    .bind(&prior.execution_account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO execution_account_readiness (execution_account_id) VALUES ($1)")
+        .bind(&prior.execution_account_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_strategy_control (
+            strategy_version, strategy_manifest_sha256, mode, reason
+        ) VALUES ($1, $2, 'ACTIVE', 'prior release')
+        "#,
+    )
+    .bind(&prior.strategy_version)
+    .bind(&prior.strategy_manifest_sha256)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let scheduler_evaluation_id =
+        "0x8181818181818181818181818181818181818181818181818181818181818181";
+    sqlx::query(
+        r#"
+        INSERT INTO live_scheduler_approvals (
+            evaluation_id, execution_account_id, agent_id, evaluation, readiness,
+            account_state, approval_sha256, expires_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, repeat('8', 64), now() + interval '1 day')
+        "#,
+    )
+    .bind(scheduler_evaluation_id)
+    .bind(&prior.execution_account_id)
+    .bind(&prior.agent_id)
+    .bind(serde_json::json!({
+        "id": scheduler_evaluation_id,
+        "strategy_version": "basis-aapl-v1",
+        "strategy_manifest_sha256": PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256,
+        "source_config_sha256":
+            "59106a18758a95af45e6ac1a8257843cfbd2a45fd09b5b3c3f429d3dedb56c2a",
+        "dataset_manifest":
+            "0x8181818181818181818181818181818181818181818181818181818181818181",
+        "market_manifest":
+            "0x8282828282828282828282828282828282828282828282828282828282828282",
+        "status": "approved",
+        "action": "entry",
+        "observed_at_ms": 1,
+        "estimated_cost_micros": 1,
+        "source_episode_id": "81818181-8181-4181-8181-818181818181",
+        "paper_evaluation_id": "82828282-8282-4282-8282-828282828282",
+        "pair_intent_id": "",
+    }))
+    .bind(serde_json::json!({
+        "execution_account_id": prior.execution_account_id,
+        "agent_id": prior.agent_id,
+        "strategy_version": "basis-aapl-v1",
+        "strategy_manifest_sha256": PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256,
+        "lifecycle": "running",
+        "global_control": "ACTIVE",
+        "strategy_control": "ACTIVE",
+        "account_control": "ACTIVE",
+        "fully_verified": true,
+        "vault_wired": true,
+        "vault_funded": true,
+        "execution_signer_funded": true,
+        "lighter_linked": true,
+        "lighter_funded": true,
+        "route_healthy": true,
+        "oracle_healthy": true,
+        "sequencer_healthy": true,
+        "observed_at_ms": 1,
+    }))
+    .bind(serde_json::json!({
+        "execution_account_id": prior.execution_account_id,
+        "agent_id": prior.agent_id,
+        "strategy_manifest_sha256": PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256,
+        "lighter_account_index": prior.lighter_account_index,
+        "lighter_api_key_index": prior.lighter_api_key_index,
+        "lighter_market_index": 101,
+        "lighter_nonce_aligned": true,
+        "unknown_lighter_orders": 0,
+        "unknown_lighter_positions": 0,
+        "collateral_micros": 100_000_000,
+        "maintenance_margin_micros": 25_000_000,
+        "robinhood_vault": prior.robinhood_vault,
+        "robinhood_signer": prior.robinhood_signer,
+        "robinhood_nonce_aligned": true,
+        "unknown_robinhood_position": false,
+        "nav_micros": 100_000_000,
+        "daily_turnover_micros": 0,
+        "active_episodes": 0,
+        "flat": true,
+        "spot_decimals": 6,
+        "spot_config_version": 1,
+        "ui_multiplier_e18": "500000000000000000",
+        "next_client_order_index": 1,
+        "next_unwind_order_index": 2,
+        "observed_at_ms": 1,
+    }))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE live_scheduler_work
+        SET state = 'running',
+            lease_owner = 'pre-release-worker',
+            lease_until = now() + interval '1 hour'
+        WHERE evaluation_id = $1
+        "#,
+    )
+    .bind(scheduler_evaluation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut prior_intent = intent();
+    prior_intent.execution_account_id = prior.execution_account_id.clone();
+    prior_intent.agent_id = prior.agent_id.clone();
+    prior_intent.strategy_manifest_sha256 = prior.strategy_manifest_sha256.clone();
+    prior_intent.lighter_account_index = u64::try_from(prior.lighter_account_index).unwrap();
+    prior_intent.lighter_api_key_index = u8::try_from(prior.lighter_api_key_index).unwrap();
+    prior_intent.robinhood_vault = prior.robinhood_vault.clone();
+    prior_intent.robinhood_signer = prior.robinhood_signer.clone();
+    prior_intent.derive_identifiers().unwrap();
+    prior_intent.validate_for_unwind().unwrap();
+    let prior_payload_sha256 = calculate_intent_payload_sha256(&prior_intent).unwrap();
+    let mut prior_saga = ExecutionSaga::new(&prior_intent.id).unwrap();
+    for event in [
+        ExecutionEvent::PrecheckPassed,
+        ExecutionEvent::PerpSubmitted,
+        ExecutionEvent::PerpFilled {
+            filled_base: prior_intent.perp_base_amount,
+        },
+        ExecutionEvent::SpotSubmitted,
+        ExecutionEvent::SpotConfirmed {
+            received_raw: prior_intent.raw_spot_amount,
+        },
+    ] {
+        prior_saga.apply(event).unwrap();
+    }
+    let mut prior_status_saga = ExecutionSaga::new(&prior_intent.id).unwrap();
+    prior_status_saga
+        .apply(ExecutionEvent::PrecheckPassed)
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_intents (
+            id, execution_account_id, agent_id, source_evaluation_id, risk_version,
+            strategy_version, symbol, direction, payload, payload_sha256,
+            saga, saga_version, active
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, 'long_spot_short_perp',
+            $8, $9, $10, $11, TRUE
+        )
+        "#,
+    )
+    .bind(&prior_intent.id)
+    .bind(&prior_intent.execution_account_id)
+    .bind(&prior_intent.agent_id)
+    .bind(&prior_intent.source_evaluation_id)
+    .bind(&prior_intent.risk_version)
+    .bind(&prior_intent.evidence.strategy_version)
+    .bind(&prior_intent.symbol)
+    .bind(sqlx::types::Json(&prior_intent))
+    .bind(&prior_payload_sha256)
+    .bind(sqlx::types::Json(&prior_status_saga))
+    .bind(i64::try_from(prior_status_saga.version).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let current = registration(
+        "current-basis-account",
+        "current-basis-agent",
+        82,
+        "0x0000000000000000000000000000000000000091",
+        "0x0000000000000000000000000000000000000092",
+        "0x0000000000000000000000000000000000000093",
+    );
+    let store = Store::from_pool(pool.clone());
+    assert!(matches!(
+        store.register_execution_account(&current).await,
+        Err(StoreError::AccountCapacityExceeded)
+    ));
+
+    for (index, (command_id, command, status)) in [
+        ("pre-release-launch", "launch", "processing"),
+        ("pre-release-pause", "pause", "reducing"),
+        ("pre-release-resume", "resume", "processing"),
+        ("pre-release-close", "close", "reducing"),
+        (
+            "pre-release-withdraw",
+            "withdraw",
+            "awaiting_owner_signature",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sqlx::query(
+            r#"
+            INSERT INTO execution_account_commands
+                (command_id, execution_account_id, agent_id, command, request_sha256, status)
+            VALUES ($1, $2, $3, $4, repeat($5, 64), $6)
+            "#,
+        )
+        .bind(command_id)
+        .bind(&prior.execution_account_id)
+        .bind(&prior.agent_id)
+        .bind(command)
+        .bind(char::from(b'a' + u8::try_from(index).unwrap()).to_string())
+        .bind(status)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    sqlx::raw_sql(include_str!(
+        "../migrations/0018_repin_private_strategy_policy.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0019_robinhood_snapshot_source_blocks.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0020_release_blocked_exit_quotes.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/0021_require_runtime_readiness.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../runtime/live-scheduler/migrations/0004_repin_private_strategy_policy.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let prior_state = sqlx::query_as::<_, (String, String, String, String)>(
+        r#"
+        SELECT account.status, control.mode, account.strategy_manifest_sha256,
+               registration.strategy_manifest_sha256
+        FROM execution_accounts account
+        JOIN execution_account_control control USING (execution_account_id)
+        JOIN execution_account_registrations registration USING (execution_account_id)
+        WHERE account.execution_account_id = $1
+        "#,
+    )
+    .bind(&prior.execution_account_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        prior_state,
+        (
+            "blocked".into(),
+            "HALTED".into(),
+            PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256.into(),
+            PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256.into(),
+        )
+    );
+    let migrated_commands = sqlx::query_as::<_, (String, String, String, String)>(
+        r#"
+        SELECT command, status, result->>'reason', result->>'control_mode'
+        FROM execution_account_commands
+        WHERE command_id LIKE 'pre-release-%'
+        ORDER BY command
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(migrated_commands.len(), 5);
+    assert!(migrated_commands.iter().all(|row| {
+        row.1 == "blocked"
+            && row.2 == "strategy release changed; reconcile and reprovision"
+            && row.3 == "HALTED"
+    }));
+    assert!(migrated_commands
+        .iter()
+        .any(|row| row.0 == "close" && row.1 == "blocked"));
+    let old_close_completion = sqlx::query(
+        r#"
+        UPDATE execution_account_commands
+        SET status = 'completed',
+            result = jsonb_build_object(
+                'control_mode', 'HALTED',
+                'reconciled_flat', true,
+                'owner_actions', jsonb_build_array()
+            )
+        WHERE command_id = 'pre-release-close'
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        old_close_completion
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some(std::borrow::Cow::Borrowed("23514"))
+    );
+    let migration_events = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM execution_account_command_events
+        WHERE command_id LIKE 'pre-release-%'
+          AND status = 'blocked'
+          AND details->>'reason' =
+              'strategy release changed; reconcile and reprovision'
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(migration_events, 5);
+
+    let scheduler_work = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+        r#"
+        SELECT state, last_error, lease_owner, lease_until::text
+        FROM live_scheduler_work
+        WHERE evaluation_id = $1
+        "#,
+    )
+    .bind(scheduler_evaluation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        scheduler_work,
+        (
+            "blocked".into(),
+            "strategy release changed; resubmit under current strategy release".into(),
+            None,
+            None,
+        )
+    );
+    let scheduler_events = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM live_scheduler_events
+        WHERE evaluation_id = $1
+          AND kind = 'blocked'
+          AND details->>'reason' =
+              'strategy release changed; resubmit under current strategy release'
+          AND details_sha256 =
+              '3e8fdc2161decbb8db3d498a087b2b87040b9929b9447098535a6ae124b019f2'
+        "#,
+    )
+    .bind(scheduler_evaluation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(scheduler_events, 1);
+
+    sqlx::query(
+        r#"
+        INSERT INTO execution_account_commands
+            (command_id, execution_account_id, agent_id, command, request_sha256, status)
+        VALUES ($1, $2, $3, 'pause', repeat('e', 64), 'processing')
+        "#,
+    )
+    .bind("post-release-pause-probe")
+    .bind(&prior.execution_account_id)
+    .bind(&prior.agent_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        store
+            .account_command_status(
+                &AccountCommandStatusRequest {
+                    command_id: "post-release-pause-probe".into(),
+                    execution_account_id: prior.execution_account_id.clone(),
+                },
+                1,
+            )
+            .await,
+        Err(StoreError::AccountCommandBlocked)
+    ));
+    let release_control = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT control.mode, control.reason
+        FROM execution_account_control control
+        WHERE control.execution_account_id = $1
+        "#,
+    )
+    .bind(&prior.execution_account_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        release_control,
+        (
+            "HALTED".into(),
+            "strategy release changed; reconcile and reprovision".into(),
+        )
+    );
+    let probe_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM execution_account_commands WHERE command_id = $1",
+    )
+    .bind("post-release-pause-probe")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(probe_status, "processing");
+    sqlx::query("UPDATE execution_account_commands SET status = 'blocked' WHERE command_id = $1")
+        .bind("post-release-pause-probe")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let predecessor_status = store
+        .account_execution_status(&prior.execution_account_id)
+        .await
+        .unwrap();
+    assert!(predecessor_status.active);
+    assert!(!predecessor_status.flat);
+    assert_eq!(
+        predecessor_status.strategy_manifest_sha256,
+        PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256
+    );
+    sqlx::query(
+        "UPDATE execution_intents SET saga = $2, saga_version = $3, updated_at = now() \
+         WHERE id = $1",
+    )
+    .bind(&prior_intent.id)
+    .bind(sqlx::types::Json(&prior_saga))
+    .bind(i64::try_from(prior_saga.version).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let rejected_pause = AccountCommandRequest {
+        command_id: "prior-basis-pause".into(),
+        execution_account_id: prior.execution_account_id.clone(),
+        agent_id: prior.agent_id.clone(),
+        command: "pause".into(),
+        requested_at_ms: 1,
+    };
+    assert!(matches!(
+        store.submit_account_command(&rejected_pause, 1).await,
+        Err(StoreError::AccountCommandBlocked)
+    ));
+    sqlx::query(
+        "UPDATE execution_account_control SET reason = 'wrong release reason' \
+         WHERE execution_account_id = $1",
+    )
+    .bind(&prior.execution_account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let wrong_reason_close = AccountCommandRequest {
+        command_id: "prior-wrong-reason-close".into(),
+        execution_account_id: prior.execution_account_id.clone(),
+        agent_id: prior.agent_id.clone(),
+        command: "close".into(),
+        requested_at_ms: 1,
+    };
+    assert!(matches!(
+        store.submit_account_command(&wrong_reason_close, 1).await,
+        Err(StoreError::AccountCommandBlocked)
+    ));
+    sqlx::query(
+        "UPDATE execution_account_control \
+         SET reason = 'strategy release changed; reconcile and reprovision' \
+         WHERE execution_account_id = $1",
+    )
+    .bind(&prior.execution_account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let rejected_commands = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM execution_account_commands \
+         WHERE command_id IN ('prior-basis-pause', 'prior-wrong-reason-close')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rejected_commands, 0);
+
+    let mut legacy = registration(
+        "legacy-basis-account",
+        "legacy-basis-agent",
+        83,
+        "0x00000000000000000000000000000000000000a1",
+        "0x00000000000000000000000000000000000000a2",
+        "0x00000000000000000000000000000000000000a3",
+    );
+    legacy.strategy_manifest_sha256 = BASIS_AAPL_V1_LEGACY_MANIFEST_SHA256.into();
+    legacy.binding_sha256 = legacy.calculate_binding_sha256();
+    sqlx::query(
+        r#"
+        INSERT INTO execution_accounts (
+            execution_account_id, agent_id, strategy_version, risk_version, status,
+            lighter_account_index, lighter_api_key_index, robinhood_vault,
+            robinhood_signer, owner_address, strategy_manifest_sha256, binding_sha256
+        ) VALUES ($1, $2, $3, $4, 'blocked', $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(&legacy.execution_account_id)
+    .bind(&legacy.agent_id)
+    .bind(&legacy.strategy_version)
+    .bind(&legacy.risk_version)
+    .bind(legacy.lighter_account_index)
+    .bind(legacy.lighter_api_key_index)
+    .bind(&legacy.robinhood_vault)
+    .bind(&legacy.robinhood_signer)
+    .bind(&legacy.robinhood_owner)
+    .bind(&legacy.strategy_manifest_sha256)
+    .bind(&legacy.binding_sha256)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO execution_account_control (execution_account_id, mode, reason) \
+         VALUES ($1, 'HALTED', 'strategy release changed; reconcile and reprovision')",
+    )
+    .bind(&legacy.execution_account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let missing_registration_close = AccountCommandRequest {
+        command_id: "legacy-missing-registration-close".into(),
+        execution_account_id: legacy.execution_account_id.clone(),
+        agent_id: legacy.agent_id.clone(),
+        command: "close".into(),
+        requested_at_ms: 1,
+    };
+    assert!(matches!(
+        store
+            .submit_account_command(&missing_registration_close, 1)
+            .await,
+        Err(StoreError::AccountCommandBlocked)
+    ));
+    sqlx::query(
+        r#"
+        INSERT INTO execution_account_registrations (
+            execution_account_id, agent_id, strategy_version, risk_version,
+            strategy_manifest_sha256, lighter_account_index, lighter_api_key_index,
+            robinhood_owner, robinhood_vault, robinhood_signer, binding_sha256
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(&legacy.execution_account_id)
+    .bind(&legacy.agent_id)
+    .bind(&legacy.strategy_version)
+    .bind(&legacy.risk_version)
+    .bind(&legacy.strategy_manifest_sha256)
+    .bind(legacy.lighter_account_index)
+    .bind(legacy.lighter_api_key_index)
+    .bind(&legacy.robinhood_owner)
+    .bind(&legacy.robinhood_vault)
+    .bind(&legacy.robinhood_signer)
+    .bind(&legacy.binding_sha256)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let legacy_status = store
+        .account_execution_status(&legacy.execution_account_id)
+        .await
+        .unwrap();
+    assert!(!legacy_status.active);
+    assert!(legacy_status.flat);
+    assert_eq!(
+        legacy_status.strategy_manifest_sha256,
+        BASIS_AAPL_V1_LEGACY_MANIFEST_SHA256
+    );
+    let legacy_close = store
+        .submit_account_command(
+            &AccountCommandRequest {
+                command_id: "legacy-basis-close".into(),
+                execution_account_id: legacy.execution_account_id.clone(),
+                agent_id: legacy.agent_id.clone(),
+                command: "close".into(),
+                requested_at_ms: 1,
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(legacy_close.status, "reducing");
+
+    let registered = store.register_execution_account(&current).await.unwrap();
+    assert!(registered.created);
+    assert_eq!(registered.response.account_status, "active");
+    assert_eq!(registered.response.control_mode, "REDUCE_ONLY");
+
+    let now_ms = sqlx::query_scalar::<_, i64>(
+        "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut snapshots = account_snapshots_for(
+        &current.execution_account_id,
+        u64::try_from(current.lighter_account_index).unwrap(),
+        &current.robinhood_vault,
+        &current.robinhood_signer,
+        &current.robinhood_owner,
+    );
+    for snapshot in &mut snapshots {
+        let observed_at_ms = now_ms / 1_000 * 1_000;
+        set_snapshot_times(snapshot, observed_at_ms, now_ms, observed_at_ms + 5_000);
+        store.record_account_snapshot(snapshot).await.unwrap();
+    }
+    sqlx::query(
+        r#"
+        UPDATE execution_account_readiness
+        SET venue_approved = TRUE, oracle_healthy = TRUE, sequencer_healthy = TRUE,
+            reconciliation_ready = TRUE, exit_authority_ready = TRUE, updated_at = now()
+        WHERE execution_account_id = $1
+        "#,
+    )
+    .bind(&current.execution_account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_control \
+         SET mode = 'ACTIVE', reason = 'integration test runtime readiness' \
+         WHERE singleton",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_strategy_control \
+         SET mode = 'ACTIVE', reason = 'integration test runtime readiness' \
+         WHERE strategy_version = $1",
+    )
+    .bind(&current.strategy_version)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_rollout_readiness \
+         SET alerting_ready = TRUE, safe_rotation_ready = TRUE, \
+             version = version + 1, updated_at = now() \
+         WHERE singleton",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let launch_ms = sqlx::query_scalar::<_, i64>(
+        "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let launched = store
+        .submit_account_command(
+            &AccountCommandRequest {
+                command_id: "current-basis-launch".into(),
+                execution_account_id: current.execution_account_id,
+                agent_id: current.agent_id,
+                command: "launch".into(),
+                requested_at_ms: u64::try_from(launch_ms).unwrap(),
+            },
+            u64::try_from(launch_ms).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(launched.status, "completed");
+    assert_eq!(launched.control_mode, "ACTIVE");
+
+    let recovery_now = sqlx::query_scalar::<_, i64>(
+        "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let recovery_now = u64::try_from(recovery_now).unwrap();
+    let observed_at = i64::try_from(recovery_now / 1_000 * 1_000).unwrap();
+    let mut recovery_snapshots = account_snapshots_for(
+        &prior.execution_account_id,
+        u64::try_from(prior.lighter_account_index).unwrap(),
+        &prior.robinhood_vault,
+        &prior.robinhood_signer,
+        &prior.robinhood_owner,
+    );
+    for snapshot in &mut recovery_snapshots {
+        snapshot.payload["flat"] = serde_json::json!(false);
+        set_snapshot_times(
+            snapshot,
+            observed_at,
+            i64::try_from(recovery_now).unwrap(),
+            observed_at + 5_000,
+        );
+        store.record_account_snapshot(snapshot).await.unwrap();
+    }
+
+    let close = store
+        .submit_account_command(
+            &AccountCommandRequest {
+                command_id: "prior-basis-close".into(),
+                execution_account_id: prior.execution_account_id.clone(),
+                agent_id: prior.agent_id.clone(),
+                command: "close".into(),
+                requested_at_ms: recovery_now,
+            },
+            recovery_now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(close.status, "reducing");
+    assert_eq!(close.control_mode, "HALTED");
+
+    let observation_candidate = sqlx::query_as::<_, (bool, String)>(
+        r#"
+        SELECT release_recovery, target_strategy_manifest_sha256
+        FROM execution_account_observation_candidates_v1
+        WHERE execution_account_id = $1
+        "#,
+    )
+    .bind(&prior.execution_account_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        observation_candidate,
+        (true, PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256.into())
+    );
+    let open = store
+        .open_episode(&prior.execution_account_id, &prior_intent.id, recovery_now)
+        .await
+        .unwrap();
+    assert_eq!(open.schema_version, 2);
+    assert_eq!(
+        open.target_strategy_manifest_sha256,
+        PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256
+    );
+    assert_eq!(open.phase, "perp_and_spot");
+
+    sqlx::query(
+        r#"
+        INSERT INTO execution_market_configs
+            (manifest_id, symbol, spot_token, lighter_market_index, spot_decimals,
+             perp_base_decimals, perp_price_decimals, spot_config_version,
+             ui_multiplier_e18, max_price_deviation_bps, max_spot_slippage_bps,
+             max_unwind_price_deviation_bps, review_record_sha256, valid_from, valid_until)
+        VALUES ($1, 'AAPL', $2, 101, 6, 6, 3, 1, $3, 100, 500, 2500, $4,
+                TIMESTAMPTZ 'epoch',
+                TIMESTAMPTZ 'epoch' + $5 * interval '1 millisecond')
+        "#,
+    )
+    .bind(&prior_intent.evidence.market_manifest)
+    .bind(&prior_intent.spot_token)
+    .bind(prior_intent.expected_ui_multiplier.to_string())
+    .bind("abababababababababababababababababababababababababababababababab")
+    .bind(i64::try_from(recovery_now + 86_400_000).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let quote = NewMarketQuote {
+        source: "execution-authority".into(),
+        source_session: "prior-close-session".into(),
+        source_event_id: "prior-close-quote".into(),
+        source_sequence: 1,
+        execution_account_id: Some(prior.execution_account_id.clone()),
+        market_manifest: prior_intent.evidence.market_manifest.clone(),
+        strategy_manifest_sha256: Some(BASIS_AAPL_V1_MANIFEST_SHA256.into()),
+        target_strategy_manifest_sha256: Some(prior.strategy_manifest_sha256.clone()),
+        route_sha256: Some(BASIS_AAPL_V1_ROUTE_SHA256.into()),
+        lighter_market_index: Some(prior_intent.lighter_market_index),
+        quote_block_hash: prior_intent.evidence.quote_block_hash.clone(),
+        mark_price: 25_000,
+        expected_ui_multiplier: prior_intent.expected_ui_multiplier.to_string(),
+        min_oracle_round_id: prior_intent.min_oracle_round_id.to_string(),
+        publisher_at_ms: i64::try_from(recovery_now).unwrap(),
+        received_at_ms: i64::try_from(recovery_now).unwrap(),
+        expires_at_ms: i64::try_from(recovery_now + 60_000).unwrap(),
+        intent_id: Some(prior_intent.id.clone()),
+        spot_unwind_amount_in: Some(prior_saga.spot_received_raw.to_string()),
+        spot_unwind_expected_amount_out: Some("25000000".into()),
+        unwind_phase: Some("perp_and_spot".into()),
+        perp_unwind_base_amount: Some(prior_saga.perp_filled_base),
+        perp_unwind_limit_price: Some(30_000),
+        submission_deadline_ms: Some(i64::try_from(recovery_now + 60_000).unwrap()),
+        reconciliation_deadline_ms: Some(i64::try_from(recovery_now + 120_000).unwrap()),
+    };
+    store.record_market_quote(&quote).await.unwrap();
+
+    let perp_action = store
+        .claim_action("prior-close-worker", Duration::from_secs(30))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(perp_action.kind, ActionKind::UnwindPerp);
+    assert_eq!(
+        perp_action.intent.strategy_manifest_sha256,
+        PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256
+    );
+    assert!(store
+        .bind_exit_authority(
+            &perp_action.id,
+            "prior-close-worker",
+            &perp_action.lease_token,
+            recovery_now,
+        )
+        .await
+        .unwrap());
+    let bound_payload = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT payload FROM execution_actions WHERE id = $1",
+    )
+    .bind(&perp_action.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    store
+        .complete_action(
+            &perp_action.id,
+            "prior-close-worker",
+            &perp_action.lease_token,
+            Some(ExecutionEvent::PerpUnwindCompleted {
+                unwound_base: prior_saga.perp_filled_base,
+            }),
+            serde_json::json!({"filled_base": prior_saga.perp_filled_base}),
+            Some(NextAction {
+                kind: ActionKind::UnwindSpot,
+                key: "prior-release-unwind-spot".into(),
+                payload: serde_json::json!({
+                    "spot_amount": prior_saga.spot_received_raw.to_string(),
+                    "exit_authority": bound_payload.get("exit_authority"),
+                    "exit_reason": "operator_exit",
+                    "control_command_id": "prior-basis-close",
+                    "authority_wait_deadline_ms": recovery_now + 900_000,
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+    let spot_action = store
+        .claim_action("prior-close-worker", Duration::from_secs(30))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(spot_action.kind, ActionKind::UnwindSpot);
+    assert_eq!(
+        spot_action.intent.strategy_manifest_sha256,
+        PRIOR_BASIS_AAPL_V1_MANIFEST_SHA256
+    );
+    store
+        .complete_action(
+            &spot_action.id,
+            "prior-close-worker",
+            &spot_action.lease_token,
+            Some(ExecutionEvent::Closed),
+            serde_json::json!({"amount_in": prior_saga.spot_received_raw.to_string()}),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let completion_now = recovery_now + 1_000;
+    for snapshot in &mut recovery_snapshots {
+        snapshot.source_sequence = 2;
+        snapshot.payload["flat"] = serde_json::json!(true);
+        set_snapshot_times(
+            snapshot,
+            i64::try_from(completion_now / 1_000 * 1_000).unwrap(),
+            i64::try_from(completion_now).unwrap(),
+            i64::try_from(completion_now / 1_000 * 1_000 + 5_000).unwrap(),
+        );
+        store.record_account_snapshot(snapshot).await.unwrap();
+    }
+    let awaiting_revocation = store
+        .account_command_status(
+            &AccountCommandStatusRequest {
+                command_id: "prior-basis-close".into(),
+                execution_account_id: prior.execution_account_id.clone(),
+            },
+            completion_now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(awaiting_revocation.status, "awaiting_owner_signature");
+    assert!(awaiting_revocation.reconciled_flat);
+    assert!(!awaiting_revocation.agent_revoked);
+    assert_eq!(awaiting_revocation.owner_actions.len(), 1);
+    assert_eq!(awaiting_revocation.owner_actions[0].data, "0x51755334");
+
+    let revoked_now = completion_now + 1_000;
+    for snapshot in &mut recovery_snapshots {
+        snapshot.source_sequence = 3;
+        if snapshot.source == "robinhood-chain" {
+            snapshot.payload["agent_enabled"] = serde_json::json!(false);
+            snapshot.payload["risk_mode"] = serde_json::json!("HALTED");
+        }
+        set_snapshot_times(
+            snapshot,
+            i64::try_from(revoked_now / 1_000 * 1_000).unwrap(),
+            i64::try_from(revoked_now).unwrap(),
+            i64::try_from(revoked_now / 1_000 * 1_000 + 5_000).unwrap(),
+        );
+        store.record_account_snapshot(snapshot).await.unwrap();
+    }
+    let latest_only = store
+        .account_command_status(
+            &AccountCommandStatusRequest {
+                command_id: "prior-basis-close".into(),
+                execution_account_id: prior.execution_account_id.clone(),
+            },
+            revoked_now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(latest_only.status, "awaiting_owner_signature");
+    assert!(!latest_only.agent_revoked);
+
+    let finalized_now = revoked_now + 1_000;
+    for snapshot in &mut recovery_snapshots {
+        snapshot.source_sequence = 4;
+        if snapshot.source == "robinhood-chain" {
+            snapshot.payload["finalized_agent_address"] =
+                serde_json::json!("0x0000000000000000000000000000000000000000");
+            snapshot.payload["finalized_agent_enabled"] = serde_json::json!(false);
+            snapshot.payload["finalized_agent_revoked"] = serde_json::json!(true);
+            snapshot.payload["finalized_risk_mode"] = serde_json::json!("HALTED");
+        }
+        set_snapshot_times(
+            snapshot,
+            i64::try_from(finalized_now / 1_000 * 1_000).unwrap(),
+            i64::try_from(finalized_now).unwrap(),
+            i64::try_from(finalized_now / 1_000 * 1_000 + 5_000).unwrap(),
+        );
+        store.record_account_snapshot(snapshot).await.unwrap();
+    }
+    let closed = store
+        .account_command_status(
+            &AccountCommandStatusRequest {
+                command_id: "prior-basis-close".into(),
+                execution_account_id: prior.execution_account_id.clone(),
+            },
+            finalized_now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed.status, "completed");
+    assert!(closed.reconciled_flat);
+    assert!(closed.agent_revoked);
+    let prior_account_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM execution_accounts WHERE execution_account_id = $1",
+    )
+    .bind(&prior.execution_account_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(prior_account_status, "closed");
+
+    let mut replacement = registration(
+        "replacement-basis-account",
+        "replacement-basis-agent",
+        84,
+        &prior.robinhood_owner,
+        "0x00000000000000000000000000000000000000b2",
+        "0x00000000000000000000000000000000000000b3",
+    );
+    replacement.binding_sha256 = replacement.calculate_binding_sha256();
+    assert!(matches!(
+        store.register_execution_account(&replacement).await,
+        Err(StoreError::AccountOwnerRotationRequired)
+    ));
 }
 
 async fn insert_transition(
@@ -1857,6 +3089,12 @@ fn account_snapshots_for(
                 "owner_address": owner,
                 "agent_enabled": true,
                 "risk_mode": "ACTIVE",
+                "finalized_agent_address": signer,
+                "finalized_agent_enabled": true,
+                "finalized_agent_revoked": false,
+                "global_mode": "ACTIVE",
+                "finalized_global_mode": "ACTIVE",
+                "finalized_risk_mode": "ACTIVE",
                 "settlement_balance_raw": "25000000",
                 "nonce_aligned": true,
                 "spot_config_version": 1,
@@ -1867,12 +3105,36 @@ fn account_snapshots_for(
                 "oracle_healthy": true,
                 "sequencer_healthy": true,
                 "signer_gas_ready": true,
+                "finalized_number": 100,
+                "finalized_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "finalized_timestamp": 1,
+                "source_block_number": 110,
+                "source_block_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_block_timestamp": 1,
             }),
-            observed_at_ms: 1_198,
+            observed_at_ms: 1_000,
             received_at_ms: 1_199,
             expires_at_ms: 1_500,
         },
     ]
+}
+
+fn set_snapshot_times(
+    snapshot: &mut NewAccountSnapshot,
+    observed_at_ms: i64,
+    received_at_ms: i64,
+    expires_at_ms: i64,
+) {
+    assert_eq!(observed_at_ms % 1_000, 0);
+    snapshot.observed_at_ms = observed_at_ms;
+    snapshot.received_at_ms = received_at_ms;
+    snapshot.expires_at_ms = expires_at_ms;
+    if snapshot.source == "robinhood-chain" {
+        let source_timestamp = observed_at_ms / 1_000;
+        snapshot.payload["source_block_timestamp"] = serde_json::json!(source_timestamp);
+        snapshot.payload["finalized_timestamp"] =
+            serde_json::json!(source_timestamp.saturating_sub(900).max(1));
+    }
 }
 
 async fn register_account(

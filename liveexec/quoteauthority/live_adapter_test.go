@@ -207,14 +207,16 @@ func TestLiveAdapterBuildsMatchedEntryBelowEveryCap(t *testing.T) {
 func TestLiveAdapterUnwindUsesStockInputForExposureAndUSDGOutputForMinimum(t *testing.T) {
 	intentID := testHash("open-intent")
 	resolver := episodeStub{episode: OpenEpisode{
-		SchemaVersion: 1, ExecutionAccountID: "account-canary-1", IntentID: intentID,
-		Phase: "perp_and_spot", SpotAmount: "1000000000000000000", PerpBaseAmount: 10_000,
+		SchemaVersion: 2, ExecutionAccountID: "account-canary-1", IntentID: intentID,
+		TargetStrategyManifestSHA256: protocol.PreviousStrategyManifestSHA256,
+		Phase:                        "perp_and_spot", SpotAmount: "1000000000000000000", PerpBaseAmount: 10_000,
 		ObservedAtMS: uint64(testAdapterTime.UnixMilli()),
 	}}
 	adapter := testLiveAdapter(t, &adapterTransport{now: testAdapterTime}, resolver)
 	result, err := adapter.Quote(context.Background(), AdapterRequest{
 		RequestID: testHash("live-unwind"), ExecutionAccountID: "account-canary-1", IntentID: intentID,
-		MarketManifest: testHash("market"), Action: protocol.ActionUnwind,
+		MarketManifest: testHash("market"), TargetStrategyManifestSHA256: protocol.PreviousStrategyManifestSHA256,
+		Action: protocol.ActionUnwind,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -228,20 +230,57 @@ func TestLiveAdapterUnwindUsesStockInputForExposureAndUSDGOutputForMinimum(t *te
 func TestLiveAdapterSupportsSpotOnlyRefresh(t *testing.T) {
 	intentID := testHash("spot-only-intent")
 	resolver := episodeStub{episode: OpenEpisode{
-		SchemaVersion: 1, ExecutionAccountID: "account-canary-1", IntentID: intentID,
-		Phase: "spot_only", SpotAmount: "1000000000000000000", PerpBaseAmount: 0,
+		SchemaVersion: 2, ExecutionAccountID: "account-canary-1", IntentID: intentID,
+		TargetStrategyManifestSHA256: protocol.StrategyManifestSHA256,
+		Phase:                        "spot_only", SpotAmount: "1000000000000000000", PerpBaseAmount: 0,
 		ObservedAtMS: uint64(testAdapterTime.UnixMilli()),
 	}}
 	adapter := testLiveAdapter(t, &adapterTransport{now: testAdapterTime}, resolver)
 	result, err := adapter.Quote(context.Background(), AdapterRequest{
 		RequestID: testHash("spot-only-refresh"), ExecutionAccountID: "account-canary-1", IntentID: intentID,
-		MarketManifest: testHash("market"), Action: protocol.ActionUnwind,
+		MarketManifest: testHash("market"), TargetStrategyManifestSHA256: protocol.StrategyManifestSHA256,
+		Action: protocol.ActionUnwind,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Perp.Phase != "spot_only" || result.Perp.BaseAmount != 0 || result.Perp.LimitPrice == 0 {
 		t.Fatalf("spot-only refresh lost phase evidence: %+v", result.Perp)
+	}
+}
+
+func TestLiveAdapterBindsOpenEpisodeTargetManifest(t *testing.T) {
+	intentID := testHash("target-bound-intent")
+	request := AdapterRequest{
+		RequestID: testHash("target-bound-request"), ExecutionAccountID: "account-canary-1",
+		IntentID: intentID, MarketManifest: testHash("market"),
+		TargetStrategyManifestSHA256: protocol.LegacyStrategyManifestSHA256,
+		Action:                       protocol.ActionUnwind,
+	}
+	episode := OpenEpisode{
+		SchemaVersion: 2, ExecutionAccountID: request.ExecutionAccountID, IntentID: intentID,
+		TargetStrategyManifestSHA256: request.TargetStrategyManifestSHA256,
+		Phase:                        "perp_and_spot", SpotAmount: "1000000000000000000", PerpBaseAmount: 10_000,
+		ObservedAtMS: uint64(testAdapterTime.UnixMilli()),
+	}
+	if err := validateEpisode(episode, request, uint64(testAdapterTime.UnixMilli())); err != nil {
+		t.Fatalf("valid predecessor episode was rejected: %v", err)
+	}
+
+	episode.SchemaVersion = 1
+	if err := validateEpisode(episode, request, uint64(testAdapterTime.UnixMilli())); err == nil {
+		t.Fatal("open episode schema v1 was accepted")
+	}
+	episode.SchemaVersion = 2
+	episode.TargetStrategyManifestSHA256 = protocol.StrategyManifestSHA256
+	if err := validateEpisode(episode, request, uint64(testAdapterTime.UnixMilli())); err == nil {
+		t.Fatal("open episode target substitution was accepted")
+	}
+
+	adapter := testLiveAdapter(t, &adapterTransport{now: testAdapterTime}, episodeStub{episode: episode})
+	request.TargetStrategyManifestSHA256 = ""
+	if _, err := adapter.Quote(context.Background(), request); err == nil {
+		t.Fatal("unwind request without a target manifest was accepted")
 	}
 }
 

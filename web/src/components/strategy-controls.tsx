@@ -7,7 +7,7 @@ import { agentAction, agentStatusLabel } from "../lib/agent-lifecycle";
 import { depositCalls, mandateCall, parseTokenAmount, withdrawalCall } from "../lib/strategy-calls";
 import { formatAddress, formatAmount } from "../lib/format";
 import { robinhoodMainnetExplorer, robinhoodMainnetUSDG } from "../lib/chain";
-import { canonicalDeploymentAction, canonicalOwnerActionSet } from "../lib/mainnet-actions";
+import { canonicalDeploymentAction, canonicalOwnerActionSet, executeConfirmedOwnerActions } from "../lib/mainnet-actions";
 import { useAppApi, useRobinAuth, useSmartWallet } from "./app-providers";
 import { ErrorNotice } from "./app-ui";
 
@@ -313,6 +313,17 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
     refetchInterval: (query) => terminalCommand(query.state.data?.status) ? false : 2_000,
   });
   const currentCommand = commandStatus.data ?? lifecycleCommand ?? activeLifecycleCommand.data ?? undefined;
+  const lighterRevocation = useQuery({
+    queryKey: ["lighter-revocation", agent?.id, currentCommand?.id],
+    queryFn: () => api.lighterRevocation(agent!.id),
+    enabled: Boolean(
+      agent
+      && currentCommand?.command === "close"
+      && !terminalCommand(currentCommand.status),
+    ),
+    retry: false,
+    refetchInterval: (query) => query.state.data?.status === "revoked" ? false : 2_000,
+  });
   useEffect(() => {
     if (!currentCommand) {
       setSubmittedOwnerActions([]);
@@ -344,33 +355,59 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
   const ownerAction = useMutation({
     mutationFn: async () => {
       if (!currentCommand || currentCommand.status !== "awaiting_signature" || !currentCommand.ownerActions.length) {
-        throw new Error("The reconciled withdrawal action is not ready.");
+        throw new Error("The reconciled owner action is not ready.");
       }
       if (!state?.robinhoodOwnerAddress || !state.robinhoodVaultAddress) {
         throw new Error("The canonical Robinhood owner and vault are unavailable.");
       }
-      if (!canonicalOwnerActionSet(currentCommand.ownerActions, state.robinhoodOwnerAddress, state.robinhoodVaultAddress)) {
-        throw new Error("The prepared withdrawal actions do not match the canonical vault.");
+      if (!canonicalOwnerActionSet(currentCommand.ownerActions, state.robinhoodOwnerAddress, state.robinhoodVaultAddress, currentCommand.command)) {
+        throw new Error("The prepared owner actions do not match the canonical vault.");
       }
       const key = ownerActionStorageKey(currentCommand.id);
       const hashes = readTransactionHashes(key);
-      for (const [index, action] of currentCommand.ownerActions.entries()) {
-        if (hashes[index]) continue;
-        await smartWallet.executeMainnetCall(
+      await executeConfirmedOwnerActions(
+        currentCommand.ownerActions,
+        hashes,
+        (action) => smartWallet.executeMainnetCall(
           { to: action.to, data: action.data, value: action.value },
           action.from,
-          (submitted) => {
-            hashes[index] = submitted;
-            window.localStorage.setItem(key, JSON.stringify(hashes));
-            setSubmittedOwnerActions([...hashes]);
-          },
-        );
-      }
+        ),
+        (confirmed) => {
+          storeTransactionHashes(key, confirmed);
+          setSubmittedOwnerActions(confirmed);
+        },
+      );
     },
     onSuccess: () => {
       void commandStatus.refetch();
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       void queryClient.invalidateQueries({ queryKey: ["agent-readiness"] });
+    },
+  });
+  const lighterRevocationConfirm = useMutation({
+    mutationFn: async () => {
+      const revocation = lighterRevocation.data;
+      if (!agent || !revocation?.messageToSign || revocation.status !== "pending") {
+        throw new Error("The Lighter revocation signature payload is not ready.");
+      }
+      const signature = await auth.signMessage(
+        revocation.messageToSign,
+        revocation.ownerAddress,
+      );
+      return api.confirmLighterRevocation(agent.id, {
+        revocationId: revocation.revocationId,
+        l1Signature: signature,
+      });
+    },
+    onSuccess: (revocation) => {
+      queryClient.setQueryData(
+        ["lighter-revocation", agent?.id, currentCommand?.id],
+        revocation,
+      );
+      void commandStatus.refetch();
+    },
+    onError: () => {
+      void lighterRevocation.refetch();
     },
   });
 
@@ -432,15 +469,18 @@ export function MainnetReadinessPanel({ dashboard }: { dashboard: DashboardSnaps
             {!matchesTerminal(agent.status) && !lifecycleInFlight && !checkingLifecycle && <button className="button button-quiet danger" disabled={lifecycle.isPending || agentCommandMutations > 0} onClick={() => lifecycle.mutate("close")}>Close agent</button>}
             {agent.status === "closed" && !lifecycleInFlight && !checkingLifecycle && !withdrawalInFlight && <button className="button button-secondary" disabled={lifecycle.isPending || agentCommandMutations > 0 || !state?.reconciled} onClick={() => lifecycle.mutate("withdraw")}>Prepare owner withdrawal</button>}
           </div>
-          {currentCommand?.status === "awaiting_signature" && currentCommand.ownerActions.length > 0 && <button className="button button-primary" disabled={ownerAction.isPending || smartWallet.pending || submittedOwnerActions.length === currentCommand.ownerActions.length} onClick={() => ownerAction.mutate()}>{ownerAction.isPending ? "Submitting…" : submittedOwnerActions.length === currentCommand.ownerActions.length ? "Awaiting reconciliation" : "Sign owner withdrawal"}</button>}
+          {currentCommand?.status === "awaiting_signature" && currentCommand.ownerActions.length > 0 && <button className="button button-primary" disabled={ownerAction.isPending || smartWallet.pending || submittedOwnerActions.length === currentCommand.ownerActions.length} onClick={() => ownerAction.mutate()}>{ownerAction.isPending ? "Submitting…" : submittedOwnerActions.length === currentCommand.ownerActions.length ? "Awaiting reconciliation" : currentCommand.command === "close" ? "Revoke execution agent" : "Sign owner withdrawal"}</button>}
+          {lighterRevocation.data?.status === "pending" && lighterRevocation.data.messageToSign && <button className="button button-primary" disabled={lighterRevocationConfirm.isPending} onClick={() => lighterRevocationConfirm.mutate()}>{lighterRevocationConfirm.isPending ? "Signing Lighter revocation…" : "Sign Lighter revocation"}</button>}
+          {lighterRevocation.data?.status === "verifying" && <small role="status">Lighter revocation submitted. Verifying the registered venue key.</small>}
+          {lighterRevocation.data?.status === "revoked" && <small role="status">{currentCommand?.status === "completed" ? "Lighter execution key revoked." : "Lighter execution key revoked. Finalizing close."}</small>}
           {currentCommand?.command === "withdraw" && currentCommand.status === "completed" && <small role="status">Owner withdrawal completed.</small>}
           {completedOwnerTransactions.map((hash) => <small key={hash}><a href={`${robinhoodMainnetExplorer}/tx/${hash}`} target="_blank" rel="noreferrer">Submitted owner transaction {formatAddress(hash)} ↗</a></small>)}
         </>
       )}
       {lighterBinding && <small>Lighter request {lighterBinding.requestId}: {lighterBinding.status}. The user-owned L1 wallet must sign the association payload before verification can complete.</small>}
       {robinhoodBinding && <small>Robinhood request {robinhoodBinding.requestId}: {robinhoodBinding.status}. Deployment and deposit remain owner-controlled transactions.</small>}
-      <small>The product API stores only public binding references. Wallet private keys and secret Lighter API keys are never accepted here. Commands stay pending until execution and reconciliation services return evidence. Withdrawals require an owner signature.</small>
-      {(readiness.error || execution.error || mainnetDeposit.error || lighter.error || lighterConfirm.error || robinhood.error || robinhoodDeploy.error || lifecycle.error || activeLifecycleCommand.error || commandStatus.error || ownerAction.error) && <ErrorNotice error={readiness.error ?? execution.error ?? mainnetDeposit.error ?? lighter.error ?? lighterConfirm.error ?? robinhood.error ?? robinhoodDeploy.error ?? lifecycle.error ?? activeLifecycleCommand.error ?? commandStatus.error ?? ownerAction.error} />}
+      <small>The product API stores only public binding references. Wallet private keys and secret Lighter API keys are never accepted here. Commands stay pending until execution and reconciliation services return evidence. Closing revokes the execution agent and withdrawals require owner signatures.</small>
+      {(readiness.error || execution.error || mainnetDeposit.error || lighter.error || lighterConfirm.error || robinhood.error || robinhoodDeploy.error || lifecycle.error || activeLifecycleCommand.error || commandStatus.error || ownerAction.error || lighterRevocation.error || lighterRevocationConfirm.error) && <ErrorNotice error={readiness.error ?? execution.error ?? mainnetDeposit.error ?? lighter.error ?? lighterConfirm.error ?? robinhood.error ?? robinhoodDeploy.error ?? lifecycle.error ?? activeLifecycleCommand.error ?? commandStatus.error ?? ownerAction.error ?? lighterRevocation.error ?? lighterRevocationConfirm.error} />}
     </section>
   );
 }

@@ -20,17 +20,21 @@ func TestDisabledServerFailsClosed(t *testing.T) {
 	handler := server.Handler()
 
 	ready := httptest.NewRecorder()
-	handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	readyRequest := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	handler.ServeHTTP(ready, readyRequest)
 	if ready.Code != http.StatusServiceUnavailable {
 		t.Fatalf("unexpected readiness status: %d", ready.Code)
 	}
+	assertResponseSignature(t, server.config, readyRequest, ready)
 
 	execute := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/spot-intents", strings.NewReader("{}"))
+	request.Header.Set("X-RTC-Nonce", strings.Repeat("n", 32))
 	handler.ServeHTTP(execute, request)
 	if execute.Code != http.StatusServiceUnavailable {
 		t.Fatalf("unexpected execution status: %d", execute.Code)
 	}
+	assertResponseSignature(t, server.config, request, execute)
 }
 
 func TestUnknownJSONFieldsAreRejected(t *testing.T) {
@@ -56,6 +60,7 @@ func TestUnknownJSONFieldsAreRejected(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field was not rejected: %d", response.Code)
 	}
+	assertResponseSignature(t, config, request, response)
 }
 
 func TestAuthorizationNonceCannotBeReplayed(t *testing.T) {
@@ -202,4 +207,23 @@ func authenticatedRequest(config Config, body []byte, nonce string) *http.Reques
 	_, _ = mac.Write([]byte(canonical))
 	request.Header.Set("X-RTC-Signature", hex.EncodeToString(mac.Sum(nil)))
 	return request
+}
+
+func assertResponseSignature(t *testing.T, config Config, request *http.Request, response *httptest.ResponseRecorder) {
+	t.Helper()
+	digest := sha256.Sum256(response.Body.Bytes())
+	canonical := fmt.Sprintf(
+		"RESPONSE\n%s\n%s\n%s\n%d\n%x",
+		request.URL.Path,
+		config.CallerID,
+		request.Header.Get("X-RTC-Nonce"),
+		response.Code,
+		digest,
+	)
+	mac := hmac.New(sha256.New, config.APIHMACKey)
+	_, _ = mac.Write([]byte(canonical))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if response.Header().Get("X-RTC-Response-Signature") != expected {
+		t.Fatal("response signature is missing or invalid")
+	}
 }

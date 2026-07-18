@@ -12,17 +12,23 @@ describe("same-origin requests", () => {
     expect(isSameOriginRequest(request())).toBe(true);
   });
 
-  it("uses proxy host and protocol on Render", () => {
-    expect(isSameOriginRequest(request("https://robintheclaw.com", {
-      host: "internal:10000",
-      "x-forwarded-host": "robintheclaw.com",
-      "x-forwarded-proto": "https",
-    }))).toBe(true);
+  it("uses the configured public origin on Render", () => {
+    process.env.APP_ORIGIN = "https://robintheclaw.com";
+    try {
+      expect(isSameOriginRequest(request("https://robintheclaw.com", {
+        host: "internal:10000",
+      }))).toBe(true);
+    } finally {
+      delete process.env.APP_ORIGIN;
+    }
   });
 
-  it("rejects foreign and malformed origins", () => {
-    const headers = { host: "robintheclaw.com", "x-forwarded-proto": "https" };
-    expect(isSameOriginRequest(request("https://example.com", headers))).toBe(false);
-    expect(isSameOriginRequest(request("not-a-url", headers))).toBe(false);
+  it("rejects foreign, malformed, and spoofed forwarded origins", () => {
+    expect(isSameOriginRequest(request("https://example.com"))).toBe(false);
+    expect(isSameOriginRequest(request("not-a-url"))).toBe(false);
+    expect(isSameOriginRequest(request("https://evil.example", {
+      "x-forwarded-host": "evil.example",
+      "x-forwarded-proto": "https",
+    }))).toBe(false);
   });
 });

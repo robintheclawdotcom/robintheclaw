@@ -34,6 +34,10 @@ function fixture() {
       route: readFileSync(join(strategyDir, "basis-aapl-v1.route.json")),
       oraclePolicy: readFileSync(join(strategyDir, "basis-aapl-v1.oracle-policy.json")),
       riskPolicy: readFileSync(join(strategyDir, "basis-aapl-v1.risk-policy.json")),
+      policyConsumers: {
+        liveEvaluation: readFileSync(join(root, "runtime", "live-evaluation", "strategy_policy.go"), "utf8"),
+        paperAgent: readFileSync(join(root, "runtime", "src", "paper.rs"), "utf8"),
+      },
     },
   };
 }
@@ -204,4 +208,12 @@ test("rejects manifest limits outside basis-aapl-v1", () => {
   const input = fixture();
   input.strategyManifest.max_leverage_ppm += 1;
   assert.throws(() => validateLivePolicy(input), /manifest limits differ/);
+});
+
+test("rejects a strategy policy consumer with a different commitment", () => {
+  const input = fixture();
+  const commitment = JSON.parse(input.strategyArtifacts.riskPolicy).minimumNetEdgePolicyCommitmentSha256;
+  input.strategyArtifacts.policyConsumers.liveEvaluation =
+    input.strategyArtifacts.policyConsumers.liveEvaluation.replace(commitment, "0".repeat(64));
+  assert.throws(() => validateLivePolicy(input), /liveEvaluation strategy policy commitment/);
 });

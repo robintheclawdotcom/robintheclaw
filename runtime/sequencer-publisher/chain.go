@@ -31,6 +31,7 @@ type Chain interface {
 	ChainID(context.Context) (*big.Int, error)
 	HeaderByNumber(context.Context, *big.Int) (*types.Header, error)
 	CodeAt(context.Context, common.Address, *big.Int) ([]byte, error)
+	StorageAt(context.Context, common.Address, common.Hash, *big.Int) ([]byte, error)
 	CallContract(context.Context, ethereum.CallMsg, *big.Int) ([]byte, error)
 	EstimateGas(context.Context, ethereum.CallMsg) (uint64, error)
 	SuggestGasTipCap(context.Context) (*big.Int, error)
@@ -173,6 +174,7 @@ type Prober struct {
 	latestMaxAge    time.Duration
 	finalizedMaxAge time.Duration
 	maxFinalizedLag uint64
+	dependencies    DependencyPins
 	clock           func() time.Time
 }
 
@@ -180,7 +182,7 @@ func NewProber(source, transaction Chain, config Config) *Prober {
 	return &Prober{
 		source: source, transaction: transaction,
 		latestMaxAge: config.LatestMaxAge, finalizedMaxAge: config.FinalizedMaxAge,
-		maxFinalizedLag: config.MaxFinalizedLag, clock: time.Now,
+		maxFinalizedLag: config.MaxFinalizedLag, dependencies: config.Dependencies, clock: time.Now,
 	}
 }
 
@@ -197,45 +199,141 @@ func (prober *Prober) Probe(ctx context.Context, previous HeadState) Observation
 	if err != nil || !validHeader(latest) {
 		return fail("latest_unavailable")
 	}
-	finalized, err := prober.source.HeaderByNumber(ctx, big.NewInt(-3))
-	if err != nil || !validHeader(finalized) {
+	sourceFinalized, err := prober.source.HeaderByNumber(ctx, big.NewInt(-3))
+	if err != nil || !validHeader(sourceFinalized) {
 		return fail("finalized_unavailable")
 	}
 	if latest.Time > uint64(now.Add(5*time.Second).Unix()) || now.Sub(time.Unix(int64(latest.Time), 0)) > prober.latestMaxAge {
 		return fail("latest_stale")
 	}
-	if finalized.Time > uint64(now.Add(5*time.Second).Unix()) || now.Sub(time.Unix(int64(finalized.Time), 0)) > prober.finalizedMaxAge {
+	transactionFinalized, err := prober.transaction.HeaderByNumber(ctx, big.NewInt(-3))
+	if err != nil || !validHeader(transactionFinalized) {
+		return fail("transaction_finalized_unavailable")
+	}
+	transactionLatest, err := prober.transaction.HeaderByNumber(ctx, nil)
+	if err != nil || !validHeader(transactionLatest) {
+		return fail("transaction_latest_unavailable")
+	}
+	if sourceFinalized.Number.Cmp(latest.Number) > 0 ||
+		transactionFinalized.Number.Cmp(transactionLatest.Number) > 0 {
+		return fail("finalized_rpc_disagreement")
+	}
+	finalizedSkew := new(big.Int).Sub(sourceFinalized.Number, transactionFinalized.Number)
+	finalizedSkew.Abs(finalizedSkew)
+	if !finalizedSkew.IsUint64() || finalizedSkew.Uint64() > prober.maxFinalizedLag {
+		return fail("finalized_rpc_skew")
+	}
+	commonFinalizedNumber := new(big.Int).Set(sourceFinalized.Number)
+	if transactionFinalized.Number.Cmp(commonFinalizedNumber) < 0 {
+		commonFinalizedNumber.Set(transactionFinalized.Number)
+	}
+	sourceCommonFinalized, err := headerAt(
+		ctx,
+		prober.source,
+		sourceFinalized,
+		commonFinalizedNumber,
+	)
+	if err != nil || !validHeader(sourceCommonFinalized) {
+		return fail("finalized_common_unavailable")
+	}
+	transactionCommonFinalized, err := headerAt(
+		ctx,
+		prober.transaction,
+		transactionFinalized,
+		commonFinalizedNumber,
+	)
+	if err != nil || !validHeader(transactionCommonFinalized) ||
+		transactionCommonFinalized.Hash() != sourceCommonFinalized.Hash() {
+		return fail("finalized_rpc_disagreement")
+	}
+	commonLatestNumber := new(big.Int).Set(latest.Number)
+	if transactionLatest.Number.Cmp(commonLatestNumber) < 0 {
+		commonLatestNumber.Set(transactionLatest.Number)
+	}
+	sourceCommonLatest, err := headerAt(ctx, prober.source, latest, commonLatestNumber)
+	if err != nil || !validHeader(sourceCommonLatest) {
+		return fail("latest_common_unavailable")
+	}
+	transactionCommonLatest, err := headerAt(
+		ctx,
+		prober.transaction,
+		transactionLatest,
+		commonLatestNumber,
+	)
+	if err != nil || !validHeader(transactionCommonLatest) ||
+		transactionCommonLatest.Hash() != sourceCommonLatest.Hash() {
+		return fail("latest_rpc_disagreement")
+	}
+	commonLatestTime := time.Unix(int64(sourceCommonLatest.Time), 0)
+	if sourceCommonLatest.Time > uint64(now.Add(5*time.Second).Unix()) ||
+		now.Sub(commonLatestTime) > prober.latestMaxAge {
+		return fail("latest_common_stale")
+	}
+	commonFinalizedTime := time.Unix(int64(sourceCommonFinalized.Time), 0)
+	if sourceCommonFinalized.Time > uint64(now.Add(5*time.Second).Unix()) ||
+		now.Sub(commonFinalizedTime) > prober.finalizedMaxAge {
 		return fail("finalized_stale")
 	}
-	if finalized.Number.Cmp(latest.Number) > 0 || latest.Number.Uint64()-finalized.Number.Uint64() > prober.maxFinalizedLag {
+	if commonFinalizedNumber.Cmp(commonLatestNumber) > 0 ||
+		commonLatestNumber.Uint64()-commonFinalizedNumber.Uint64() > prober.maxFinalizedLag {
 		return fail("finalized_lag")
 	}
-	if latest.Number.Cmp(finalized.Number) == 0 && latest.Hash() != finalized.Hash() {
-		return fail("source_hash_mismatch")
+	if commonLatestNumber.Cmp(commonFinalizedNumber) == 0 &&
+		sourceCommonLatest.Hash() != sourceCommonFinalized.Hash() {
+		return fail("head_hash_mismatch")
 	}
-	if previous.LatestNumber != 0 && (latest.Number.Uint64() < previous.LatestNumber ||
-		(latest.Number.Uint64() == previous.LatestNumber && latest.Hash() != previous.LatestHash)) {
+	if previous.LatestNumber != 0 && (commonLatestNumber.Uint64() < previous.LatestNumber ||
+		(commonLatestNumber.Uint64() == previous.LatestNumber &&
+			sourceCommonLatest.Hash() != previous.LatestHash)) {
 		return fail("latest_regression")
 	}
-	if previous.FinalizedNumber != 0 && (finalized.Number.Uint64() < previous.FinalizedNumber ||
-		(finalized.Number.Uint64() == previous.FinalizedNumber && finalized.Hash() != previous.FinalizedHash)) {
+	if previous.FinalizedNumber != 0 &&
+		(commonFinalizedNumber.Uint64() < previous.FinalizedNumber ||
+			(commonFinalizedNumber.Uint64() == previous.FinalizedNumber &&
+				sourceCommonFinalized.Hash() != previous.FinalizedHash)) {
 		return fail("finalized_regression")
 	}
-	transactionView, err := prober.transaction.HeaderByNumber(ctx, finalized.Number)
-	if err != nil || !validHeader(transactionView) || transactionView.Hash() != finalized.Hash() {
-		return fail("rpc_disagreement")
+	if reason := verifyDependencies(
+		ctx,
+		prober.source,
+		prober.transaction,
+		commonFinalizedNumber,
+		prober.dependencies,
+	); reason != "" {
+		return fail(reason)
+	}
+	if reason := verifyDependencies(
+		ctx,
+		prober.source,
+		prober.transaction,
+		commonLatestNumber,
+		prober.dependencies,
+	); reason != "" {
+		return fail(reason)
 	}
 	return Observation{
 		Healthy: true,
 		Reason:  "healthy",
 		Heads: HeadState{
-			LatestNumber: latest.Number.Uint64(), LatestHash: latest.Hash(),
-			FinalizedNumber: finalized.Number.Uint64(), FinalizedHash: finalized.Hash(),
+			LatestNumber: commonLatestNumber.Uint64(), LatestHash: sourceCommonLatest.Hash(),
+			FinalizedNumber: commonFinalizedNumber.Uint64(), FinalizedHash: sourceCommonFinalized.Hash(),
 		},
 		At: now,
 	}
 }
 
+func headerAt(
+	ctx context.Context,
+	chain Chain,
+	known *types.Header,
+	number *big.Int,
+) (*types.Header, error) {
+	if known.Number.Cmp(number) == 0 {
+		return known, nil
+	}
+	return chain.HeaderByNumber(ctx, number)
+}
+
 func validHeader(header *types.Header) bool {
-	return header != nil && header.Number != nil && header.Number.Sign() >= 0 && header.Time != 0
+	return header != nil && header.Number != nil && header.Number.IsUint64() && header.Time != 0
 }

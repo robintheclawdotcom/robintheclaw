@@ -1,24 +1,27 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/json"
 	"errors"
+	"io"
+	"regexp"
 
-	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
-	"github.com/aws/aws-sdk-go-v2/service/kms/types"
-	"github.com/aws/smithy-go"
+	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-type kmsAPI interface {
-	CreateKey(context.Context, *awskms.CreateKeyInput, ...func(*awskms.Options)) (*awskms.CreateKeyOutput, error)
-	CreateAlias(context.Context, *awskms.CreateAliasInput, ...func(*awskms.Options)) (*awskms.CreateAliasOutput, error)
-	DescribeKey(context.Context, *awskms.DescribeKeyInput, ...func(*awskms.Options)) (*awskms.DescribeKeyOutput, error)
-	GetPublicKey(context.Context, *awskms.GetPublicKeyInput, ...func(*awskms.Options)) (*awskms.GetPublicKeyOutput, error)
-	ListResourceTags(context.Context, *awskms.ListResourceTagsInput, ...func(*awskms.Options)) (*awskms.ListResourceTagsOutput, error)
+const executionAliasPrefix = "alias/robinhood/execution/"
+
+var kmsKeyARN = regexp.MustCompile(`^arn:(aws|aws-cn|aws-us-gov):kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+type lambdaAPI interface {
+	Invoke(context.Context, *awslambda.InvokeInput, ...func(*awslambda.Options)) (*awslambda.InvokeOutput, error)
 }
 
 type kmsKey struct {
@@ -27,8 +30,22 @@ type kmsKey struct {
 }
 
 type keyProvisioner struct {
-	client      kmsAPI
-	aliasPrefix string
+	client      lambdaAPI
+	functionARN string
+}
+
+type keyProvisionRequest struct {
+	ExecutionAccountID string `json:"executionAccountId"`
+}
+
+type keyProvisionResponse struct {
+	ExecutionAccountID string `json:"executionAccountId"`
+	KeyARN             string `json:"keyArn"`
+	Alias              string `json:"alias"`
+	KeySpec            string `json:"keySpec"`
+	KeyUsage           string `json:"keyUsage"`
+	Origin             string `json:"origin"`
+	PublicKey          []byte `json:"publicKey"`
 }
 
 type subjectPublicKeyInfo struct {
@@ -36,78 +53,86 @@ type subjectPublicKeyInfo struct {
 	PublicKey asn1.BitString
 }
 
+var (
+	ecPublicKeyOID = asn1.ObjectIdentifier{1, 2, 840, 10045, 2, 1}
+	secp256k1OID   = asn1.ObjectIdentifier{1, 3, 132, 0, 10}
+)
+
 func (value *keyProvisioner) ensure(ctx context.Context, executionID string) (kmsKey, error) {
-	alias := value.aliasPrefix + executionID
-	described, err := value.client.DescribeKey(ctx, &awskms.DescribeKeyInput{KeyId: &alias})
+	payload, err := json.Marshal(keyProvisionRequest{ExecutionAccountID: executionID})
 	if err != nil {
-		var apiError smithy.APIError
-		if !errors.As(err, &apiError) || apiError.ErrorCode() != "NotFoundException" {
-			return kmsKey{}, errors.New("resolve Robinhood execution key")
-		}
-		created, err := value.client.CreateKey(ctx, &awskms.CreateKeyInput{
-			Description: stringsPtr("Robinhood Chain execution key"),
-			KeySpec:     types.KeySpecEccSecgP256k1,
-			KeyUsage:    types.KeyUsageTypeSignVerify,
-			Origin:      types.OriginTypeAwsKms,
-			Tags: []types.Tag{
-				{TagKey: stringsPtr("service"), TagValue: stringsPtr("robinhood-provisioner")},
-				{TagKey: stringsPtr("executionAccountId"), TagValue: &executionID},
-			},
-		})
-		if err != nil || created.KeyMetadata == nil || created.KeyMetadata.KeyId == nil {
-			return kmsKey{}, errors.New("create Robinhood execution key")
-		}
-		keyID := *created.KeyMetadata.KeyId
-		if _, err := value.client.CreateAlias(ctx, &awskms.CreateAliasInput{AliasName: &alias, TargetKeyId: &keyID}); err != nil {
-			return kmsKey{}, errors.New("bind Robinhood execution key alias")
-		}
-		described, err = value.client.DescribeKey(ctx, &awskms.DescribeKeyInput{KeyId: &alias})
-		if err != nil {
-			return kmsKey{}, errors.New("verify Robinhood execution key alias")
-		}
+		return kmsKey{}, errors.New("encode Robinhood execution key request")
 	}
-	if described.KeyMetadata == nil || described.KeyMetadata.KeyId == nil || described.KeyMetadata.Arn == nil ||
-		described.KeyMetadata.KeySpec != types.KeySpecEccSecgP256k1 ||
-		described.KeyMetadata.KeyUsage != types.KeyUsageTypeSignVerify ||
-		described.KeyMetadata.Origin != types.OriginTypeAwsKms ||
-		described.KeyMetadata.KeyManager != types.KeyManagerTypeCustomer ||
-		described.KeyMetadata.KeyState != types.KeyStateEnabled {
-		return kmsKey{}, errors.New("Robinhood execution key metadata mismatch")
+	output, err := value.client.Invoke(ctx, &awslambda.InvokeInput{
+		FunctionName:   &value.functionARN,
+		InvocationType: types.InvocationTypeRequestResponse,
+		LogType:        types.LogTypeNone,
+		Payload:        payload,
+	})
+	if err != nil || output == nil || output.StatusCode != 200 || output.FunctionError != nil || len(output.Payload) > 16<<10 {
+		return kmsKey{}, errors.New("provision Robinhood execution key")
 	}
-	keyID := *described.KeyMetadata.Arn
-	tags, err := value.client.ListResourceTags(ctx, &awskms.ListResourceTagsInput{KeyId: &keyID})
-	if err != nil || !hasTag(tags, "service", "robinhood-provisioner") || !hasTag(tags, "executionAccountId", executionID) {
-		return kmsKey{}, errors.New("Robinhood execution key ownership mismatch")
+	var binding keyProvisionResponse
+	decoder := json.NewDecoder(bytes.NewReader(output.Payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&binding); err != nil {
+		return kmsKey{}, errors.New("decode Robinhood execution key binding")
 	}
-	output, err := value.client.GetPublicKey(ctx, &awskms.GetPublicKeyInput{KeyId: &keyID})
-	if err != nil || output.KeySpec != types.KeySpecEccSecgP256k1 || output.KeyUsage != types.KeyUsageTypeSignVerify {
-		return kmsKey{}, errors.New("read Robinhood execution public key")
+	if err := ensureJSONEnd(decoder); err != nil {
+		return kmsKey{}, errors.New("decode Robinhood execution key binding")
 	}
+	if binding.ExecutionAccountID != executionID ||
+		binding.Alias != executionAliasPrefix+executionID ||
+		!kmsKeyARN.MatchString(binding.KeyARN) ||
+		!sameAWSAuthority(value.functionARN, binding.KeyARN) ||
+		binding.KeySpec != "ECC_SECG_P256K1" ||
+		binding.KeyUsage != "SIGN_VERIFY" ||
+		binding.Origin != "AWS_KMS" {
+		return kmsKey{}, errors.New("Robinhood execution key binding mismatch")
+	}
+	address, err := publicKeyAddress(binding.PublicKey)
+	if err != nil {
+		return kmsKey{}, err
+	}
+	return kmsKey{ID: binding.KeyARN, Address: address}, nil
+}
+
+func sameAWSAuthority(functionARN, keyARN string) bool {
+	function := bytes.Split([]byte(functionARN), []byte(":"))
+	key := bytes.Split([]byte(keyARN), []byte(":"))
+	return len(function) == 8 && len(key) == 6 &&
+		bytes.Equal(function[1], key[1]) &&
+		bytes.Equal(function[3], key[3]) &&
+		bytes.Equal(function[4], key[4])
+}
+
+func ensureJSONEnd(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("trailing JSON value")
+	}
+	return nil
+}
+
+func publicKeyAddress(encoded []byte) (common.Address, error) {
 	var info subjectPublicKeyInfo
-	if rest, err := asn1.Unmarshal(output.PublicKey, &info); err != nil || len(rest) != 0 {
-		return kmsKey{}, errors.New("decode Robinhood execution public key")
+	if rest, err := asn1.Unmarshal(encoded, &info); err != nil || len(rest) != 0 {
+		return common.Address{}, errors.New("decode Robinhood execution public key")
+	}
+	if !info.Algorithm.Algorithm.Equal(ecPublicKeyOID) || info.PublicKey.BitLength != len(info.PublicKey.Bytes)*8 {
+		return common.Address{}, errors.New("Robinhood execution public key algorithm mismatch")
+	}
+	var curve asn1.ObjectIdentifier
+	if rest, err := asn1.Unmarshal(info.Algorithm.Parameters.FullBytes, &curve); err != nil || len(rest) != 0 || !curve.Equal(secp256k1OID) {
+		return common.Address{}, errors.New("Robinhood execution public key curve mismatch")
 	}
 	public, err := crypto.UnmarshalPubkey(info.PublicKey.Bytes)
 	if err != nil {
-		return kmsKey{}, errors.New("parse Robinhood execution public key")
+		return common.Address{}, errors.New("parse Robinhood execution public key")
 	}
 	address := crypto.PubkeyToAddress(*public)
 	if address == (common.Address{}) {
-		return kmsKey{}, errors.New("Robinhood execution public key produced zero address")
+		return common.Address{}, errors.New("Robinhood execution public key produced zero address")
 	}
-	return kmsKey{ID: keyID, Address: address}, nil
+	return address, nil
 }
-
-func hasTag(output *awskms.ListResourceTagsOutput, key, value string) bool {
-	if output == nil {
-		return false
-	}
-	for _, tag := range output.Tags {
-		if tag.TagKey != nil && tag.TagValue != nil && *tag.TagKey == key && *tag.TagValue == value {
-			return true
-		}
-	}
-	return false
-}
-
-func stringsPtr(value string) *string { return &value }

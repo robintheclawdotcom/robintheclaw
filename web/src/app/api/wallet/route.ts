@@ -5,12 +5,17 @@ import {
   SessionValidationError,
   verifyPrivySession,
 } from "../../../lib/server-auth";
+import {
+  BodyTooLargeError,
+  readBoundedBody,
+  validateContentLength,
+} from "../../../lib/server-body";
 import { isSameOriginRequest } from "../../../lib/server-origin";
 import { takeRateLimit } from "../../../lib/server-rate-limit";
 import {
   authorizePreparedCalls,
-  configureSponsorship,
   parseWalletRpc,
+  removeSponsorship,
   WalletProxyError,
 } from "../../../lib/wallet-proxy";
 
@@ -68,8 +73,14 @@ export async function POST(request: NextRequest) {
     if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
       throw new WalletProxyError(415, "unsupported_media_type", "JSON is required.");
     }
-    const declaredLength = Number(request.headers.get("content-length") ?? "0");
-    if (declaredLength > maxBodyBytes) throw new WalletProxyError(413, "request_too_large", "Wallet request is too large.");
+    try {
+      validateContentLength(request.headers.get("content-length"), maxBodyBytes);
+    } catch (error) {
+      if (error instanceof BodyTooLargeError) {
+        throw new WalletProxyError(413, "request_too_large", "Wallet request is too large.");
+      }
+      throw error;
+    }
 
     const token = request.cookies.get("privy-token")?.value;
     if (!token) throw new WalletProxyError(401, "authentication_required", "Sign in to continue.");
@@ -79,8 +90,16 @@ export async function POST(request: NextRequest) {
       return jsonError(429, "rate_limited", "Too many wallet requests.", requestId, limit.retryAfter);
     }
 
-    const text = await request.text();
-    if (Buffer.byteLength(text) > maxBodyBytes) throw new WalletProxyError(413, "request_too_large", "Wallet request is too large.");
+    let bytes: Uint8Array | undefined;
+    try {
+      bytes = await readBoundedBody(request.body, maxBodyBytes);
+    } catch (error) {
+      if (error instanceof BodyTooLargeError) {
+        throw new WalletProxyError(413, "request_too_large", "Wallet request is too large.");
+      }
+      throw error;
+    }
+    const text = Buffer.from(bytes ?? []).toString("utf8");
     const rpc = parseWalletRpc(JSON.parse(text));
     if (rpc.method === "wallet_sendPreparedCalls") {
       const sendLimit = takeRateLimit("wallet-send", session.sessionId, 12, 60_000);
@@ -90,7 +109,7 @@ export async function POST(request: NextRequest) {
     const apiKey = process.env.ALCHEMY_API_KEY;
     if (!apiKey) throw new WalletProxyError(503, "wallet_unavailable", "Wallet operations are not configured.");
     await authorizePreparedCalls(rpc, token, requestId);
-    const upstreamRequest = configureSponsorship(rpc, process.env.ALCHEMY_POLICY_ID);
+    const upstreamRequest = removeSponsorship(rpc);
     const response = await fetch(walletRpcUrl(apiKey), {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json" },

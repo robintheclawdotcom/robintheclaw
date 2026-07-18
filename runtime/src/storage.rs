@@ -999,25 +999,35 @@ fn parse_db_uint(value: &str) -> anyhow::Result<U256> {
 
 async fn runtime_pool() -> anyhow::Result<PgPool> {
     let database_url = env::var("DATABASE_URL").context("DATABASE_URL is required")?;
-    let migrations_url =
-        env::var("DATABASE_MIGRATIONS_URL").unwrap_or_else(|_| database_url.clone());
-    let migration_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_secs(15))
-        .connect(&migrations_url)
-        .await
-        .context("connect to migration database")?;
-    MIGRATOR
-        .run(&migration_pool)
-        .await
-        .context("apply runtime migrations")?;
-    migration_pool.close().await;
+    if parse_migration_mode(env::var("RUNTIME_RUN_MIGRATIONS").ok().as_deref())? {
+        let migrations_url =
+            env::var("DATABASE_MIGRATIONS_URL").unwrap_or_else(|_| database_url.clone());
+        let migration_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(15))
+            .connect(&migrations_url)
+            .await
+            .context("connect to migration database")?;
+        MIGRATOR
+            .run(&migration_pool)
+            .await
+            .context("apply runtime migrations")?;
+        migration_pool.close().await;
+    }
     PgPoolOptions::new()
         .max_connections(12)
         .acquire_timeout(Duration::from_secs(10))
         .connect(&database_url)
         .await
         .context("connect to runtime database")
+}
+
+fn parse_migration_mode(value: Option<&str>) -> anyhow::Result<bool> {
+    match value {
+        None | Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(_) => anyhow::bail!("RUNTIME_RUN_MIGRATIONS must be true or false"),
+    }
 }
 
 fn event_from_row(row: &sqlx::postgres::PgRow, raw: Vec<u8>) -> anyhow::Result<RawMarketEvent> {
@@ -1106,6 +1116,14 @@ mod tests {
         );
         assert_eq!(finality("l1_posted").unwrap(), Finality::L1Posted);
         assert!(market_event_kind("unknown").is_err());
+    }
+
+    #[test]
+    fn runtime_migration_mode_is_strict() {
+        assert!(parse_migration_mode(None).unwrap());
+        assert!(parse_migration_mode(Some("true")).unwrap());
+        assert!(!parse_migration_mode(Some("false")).unwrap());
+        assert!(parse_migration_mode(Some("FALSE")).is_err());
     }
 
     #[test]

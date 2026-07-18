@@ -50,26 +50,77 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      postgres16:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: robin_app_test
+          POSTGRES_USER: robin
+          POSTGRES_PASSWORD: robin_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U robin -d robin_app_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      postgres17:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: robin_runtime_test
+          POSTGRES_USER: robin
+          POSTGRES_PASSWORD: robin_test
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U robin -d robin_runtime_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
-      TEST_DATABASE_URL: postgres://robin:robin_test@127.0.0.1:5432/robin_runtime_test?sslmode=disable
-      APP_TEST_DATABASE_URL: postgres://robin:robin_test@127.0.0.1:5432/robin_app_test?sslmode=disable
+      TEST_DATABASE_URL: postgres://robin:robin_test@127.0.0.1:5434/robin_runtime_test?sslmode=disable
+      APP_TEST_DATABASE_URL: postgres://robin:robin_test@127.0.0.1:5433/robin_app_test?sslmode=disable
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
       - name: Validate application migrations
-        run: |
-          PGPASSWORD=robin_test createdb --host=127.0.0.1 --username=robin robin_app_test
-          for migration in app/migrations/*.sql; do
-            psql "$APP_TEST_DATABASE_URL" --set ON_ERROR_STOP=1 --file "$migration"
-          done
-          cargo test --locked --manifest-path app/Cargo.toml --test postgres -- --ignored --test-threads=1
+        run: cargo test --locked --manifest-path app/Cargo.toml --test postgres -- --ignored --test-threads=1
       - name: Validate runtime migrations
         run: |
           for migration in runtime/migrations/*.sql; do
             psql "$TEST_DATABASE_URL" --set ON_ERROR_STOP=1 --file "$migration"
           done
       - name: Validate coordinator promotion gates
-        run: cargo test --locked --manifest-path coordinator/Cargo.toml --test postgres -- --ignored
+        run: |
+          PGPASSWORD=robin_test createdb --host=127.0.0.1 --username=robin robin_coordinator_test
+          TEST_DATABASE_URL=postgres://robin:robin_test@127.0.0.1:5432/robin_coordinator_test?sslmode=disable \
+            cargo test --locked --manifest-path coordinator/Cargo.toml --test postgres \
+              migration_and_promotion_gate_are_enforced -- --ignored --exact
+          PGPASSWORD=robin_test createdb --host=127.0.0.1 --username=robin robin_coordinator_upgrade_test
+          TEST_DATABASE_URL=postgres://robin:robin_test@127.0.0.1:5432/robin_coordinator_upgrade_test?sslmode=disable \
+            cargo test --locked --manifest-path coordinator/Cargo.toml --test postgres \
+              prior_manifest_registration_does_not_consume_current_canary_capacity -- --ignored --exact
+      - name: Validate migration checksum failures
+        run: |
+          PGPASSWORD=robin_test createdb --host=127.0.0.1 --username=robin robin_execution_migration_test
+          PGPASSWORD=robin_test createdb --host=127.0.0.1 --username=robin robin_signer_migration_test
+          EXECUTION_MIGRATION_TEST_DATABASE_URL=postgres://robin:robin_test@127.0.0.1:5432/robin_execution_migration_test?sslmode=disable \
+          SIGNER_MIGRATION_TEST_DATABASE_URL=postgres://robin:robin_test@127.0.0.1:5432/robin_signer_migration_test?sslmode=disable \
+            bash scripts/migrate-checksums.test.sh
+      - name: Validate database authority separation
+        run: |
+          PGPASSWORD=robin_test createdb --host=127.0.0.1 --port=5433 --username=robin robin_authority_app
+          PGPASSWORD=robin_test createdb --host=127.0.0.1 --port=5434 --username=robin robin_authority_research
+          for database in robin_authority_execution robin_authority_lighter robin_authority_custody robin_database_role_test; do
+            PGPASSWORD=robin_test createdb --host=127.0.0.1 --username=robin "$database"
+          done
+          APP_DATABASE_AUTHORITY_TEST_URL=postgres://robin:robin_test@127.0.0.1:5433/robin_authority_app?sslmode=disable \
+          RESEARCH_DATABASE_AUTHORITY_TEST_URL=postgres://robin:robin_test@127.0.0.1:5434/robin_authority_research?sslmode=disable \
+          EXECUTION_DATABASE_AUTHORITY_TEST_URL=postgres://robin:robin_test@127.0.0.1:5432/robin_authority_execution?sslmode=disable \
+          LIGHTER_DATABASE_AUTHORITY_TEST_URL=postgres://robin:robin_test@127.0.0.1:5432/robin_authority_lighter?sslmode=disable \
+          CUSTODY_DATABASE_AUTHORITY_TEST_URL=postgres://robin:robin_test@127.0.0.1:5432/robin_authority_custody?sslmode=disable \
+            bash scripts/database-authority.integration.test.sh
+          DATABASE_ROLE_TEST_URL=postgres://robin:robin_test@127.0.0.1:5432/robin_database_role_test?sslmode=disable \
+            bash scripts/provision-database-roles.test.sh
 
   node:
     runs-on: ubuntu-latest
@@ -110,10 +161,12 @@ jobs:
           go-version: "1.26.5"
           cache-dependency-path: |
             liveexec/go.mod
+            ops/mainnet-live/restrictctl/go.sum
             provisioner/robinhood/go.sum
             provisioner/lighter/go.sum
             publisher/go.mod
             runtime/exit-quote-publisher/go.sum
+            runtime/live-control/go.mod
             runtime/live-evaluation/go.sum
             runtime/live-scheduler/go.sum
             runtime/sequencer-publisher/go.sum
@@ -121,7 +174,7 @@ jobs:
             signer/robinhood/go.sum
       - name: Verify private service modules
         run: |
-          for module in liveexec publisher provisioner/lighter provisioner/robinhood runtime/exit-quote-publisher runtime/live-evaluation runtime/live-scheduler runtime/sequencer-publisher signer/lighter signer/robinhood; do
+          for module in liveexec ops/mainnet-live/restrictctl publisher provisioner/lighter provisioner/robinhood runtime/exit-quote-publisher runtime/live-control runtime/live-evaluation runtime/live-scheduler runtime/sequencer-publisher signer/lighter signer/robinhood; do
             test -z "$(gofmt -l "$module")"
             (cd "$module" && go mod verify)
             (cd "$module" && go vet ./...)
@@ -130,7 +183,7 @@ jobs:
       - name: Scan private service dependencies
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
-          for module in liveexec publisher provisioner/lighter provisioner/robinhood runtime/exit-quote-publisher runtime/live-evaluation runtime/live-scheduler runtime/sequencer-publisher signer/lighter signer/robinhood; do
+          for module in liveexec ops/mainnet-live/restrictctl publisher provisioner/lighter provisioner/robinhood runtime/exit-quote-publisher runtime/live-control runtime/live-evaluation runtime/live-scheduler runtime/sequencer-publisher signer/lighter signer/robinhood; do
             (cd "$module" && govulncheck ./...)
           done
 
@@ -184,10 +237,23 @@ jobs:
       - uses: crytic/slither-action@b52cc1cbfee9ca3e8722dd5224299d16c9a6b80f # v0.4.2
         with:
           target: contracts
+          slither-args: --exclude-dependencies
           fail-on: high
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
       - name: Install Aderyn
-        run: cargo install aderyn --version 0.3.4 --locked
+        run: |
+          archive="$RUNNER_TEMP/aderyn-v0.6.8-x86_64-unknown-linux-gnu.tar.xz"
+          curl --fail --location --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 \
+            https://github.com/Cyfrin/aderyn/releases/download/aderyn-v0.6.8/aderyn-x86_64-unknown-linux-gnu.tar.xz \
+            --output "$archive"
+          echo "ffd6ca658962e211a3ac821c646f69c8e14bf1b1001cbfe091bcd4535a691e46  $archive" \
+            | sha256sum --check --strict
+          mkdir -p "$HOME/.local/bin" "$RUNNER_TEMP/aderyn"
+          tar --extract --xz --file "$archive" --directory "$RUNNER_TEMP/aderyn" --no-same-owner \
+            aderyn-x86_64-unknown-linux-gnu/aderyn
+          install -m 0755 "$RUNNER_TEMP/aderyn/aderyn-x86_64-unknown-linux-gnu/aderyn" \
+            "$HOME/.local/bin/aderyn"
+          "$HOME/.local/bin/aderyn" --version
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run Aderyn
         run: aderyn contracts --output /tmp/aderyn.md
 
@@ -223,23 +289,39 @@ jobs:
   zk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
       - name: Install Noir
         run: |
-          curl -L https://raw.githubusercontent.com/noir-lang/noirup/main/install | bash
+          archive="$RUNNER_TEMP/nargo-v1.0.0-beta.22-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail --location --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 \
+            https://github.com/noir-lang/noir/releases/download/v1.0.0-beta.22/nargo-x86_64-unknown-linux-gnu.tar.gz \
+            --output "$archive"
+          echo "384c4fc800905b213e26aabd738a96a4a85b1a76ffc27fb19aeb6d33494a787b  $archive" \
+            | sha256sum --check --strict
+          test "$(tar --list --gzip --file "$archive")" = "nargo"
+          mkdir -p "$HOME/.nargo/bin"
+          tar --extract --gzip --file "$archive" --directory "$HOME/.nargo/bin" --no-same-owner nargo
+          chmod 0755 "$HOME/.nargo/bin/nargo"
+          "$HOME/.nargo/bin/nargo" --version
           echo "$HOME/.nargo/bin" >> "$GITHUB_PATH"
-      - name: Select Noir version
-        run: noirup --version 1.0.0-beta.22
       - name: Install Barretenberg
         run: |
-          curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/master/barretenberg/bbup/install | bash
+          archive="$RUNNER_TEMP/barretenberg-v5.0.0-nightly.20260522-amd64-linux.tar.gz"
+          curl --fail --location --retry 3 --retry-all-errors --proto '=https' --tlsv1.2 \
+            https://github.com/AztecProtocol/barretenberg/releases/download/v5.0.0-nightly.20260522/barretenberg-amd64-linux.tar.gz \
+            --output "$archive"
+          echo "d207ec90fbfa2fba24d7a47b7a75892ee052b7984252b866a4a0c1b5296e1571  $archive" \
+            | sha256sum --check --strict
+          test "$(tar --list --gzip --file "$archive")" = "bb"
+          mkdir -p "$HOME/.bb"
+          tar --extract --gzip --file "$archive" --directory "$HOME/.bb" --no-same-owner bb
+          chmod 0755 "$HOME/.bb/bb"
+          "$HOME/.bb/bb" --version
           echo "$HOME/.bb" >> "$GITHUB_PATH"
-      - name: Select bb version
-        run: bbup --version 2.0.0 || bbup
-      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
       - name: Circuit tests
         working-directory: zk/circuits/proof-of-pnl
         run: nargo test

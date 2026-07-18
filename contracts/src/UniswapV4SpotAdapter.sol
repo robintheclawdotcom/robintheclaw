@@ -192,6 +192,8 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
         uint256 inputBefore = input.balanceOf(address(this));
         uint256 outputBefore = output.balanceOf(address(this));
 
+        // Only the bound vault can pull its own execution input.
+        // slither-disable-next-line arbitrary-send-erc20
         input.safeTransferFrom(vault, address(this), intent.amountIn);
         if (input.balanceOf(address(this)) - inputBefore != intent.amountIn) {
             revert InvalidBalanceDelta();

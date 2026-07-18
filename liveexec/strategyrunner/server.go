@@ -43,49 +43,65 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) run(w http.ResponseWriter, request *http.Request) {
 	if !s.enabled || s.service == nil || s.auth == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "strategy runner is disabled"})
+		s.writeRunJSON(w, request, http.StatusServiceUnavailable, map[string]string{"error": "strategy runner is disabled"})
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, request.Body, maximumBodyBytes))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		s.writeRunJSON(w, request, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
 	if err := s.auth.Verify(request.Method, request.URL.Path, request.Header.Get("X-Robin-Caller"),
 		request.Header.Get("X-Robin-Timestamp"), request.Header.Get("X-Robin-Nonce"),
 		request.Header.Get("X-Robin-Signature"), body); err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "request authentication failed"})
+		s.writeRunJSON(w, request, http.StatusUnauthorized, map[string]string{"error": "request authentication failed"})
 		return
 	}
 	var input RunRequest
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&input); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid strategy evidence"})
+		s.writeRunJSON(w, request, http.StatusBadRequest, map[string]string{"error": "invalid strategy evidence"})
 		return
 	}
 	output, err := s.service.Run(request.Context(), input)
 	if err != nil {
 		if errors.Is(err, ErrCoordinatorAmbiguous) {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "coordinator persistence is ambiguous"})
+			s.writeRunJSON(w, request, http.StatusBadGateway, map[string]string{"error": "coordinator persistence is ambiguous"})
 			return
 		}
 		if errors.Is(err, ErrCoordinatorDeclined) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "coordinator declined intent"})
+			s.writeRunJSON(w, request, http.StatusConflict, map[string]string{"error": "coordinator declined intent"})
 			return
 		}
 		if errors.Is(err, ErrCoordinatorNotPersisted) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "coordinator did not persist intent"})
+			s.writeRunJSON(w, request, http.StatusConflict, map[string]string{"error": "coordinator did not persist intent"})
 			return
 		}
 		if errors.Is(err, ErrCoordinatorPayloadConflict) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "coordinator payload identity conflicts"})
+			s.writeRunJSON(w, request, http.StatusConflict, map[string]string{"error": "coordinator payload identity conflicts"})
 			return
 		}
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "strategy evidence rejected"})
+		s.writeRunJSON(w, request, http.StatusUnprocessableEntity, map[string]string{"error": "strategy evidence rejected"})
 		return
 	}
-	writeJSON(w, http.StatusOK, output)
+	s.writeRunJSON(w, request, http.StatusOK, output)
+}
+
+func (s *Server) writeRunJSON(w http.ResponseWriter, request *http.Request, status int, value any) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		status = http.StatusInternalServerError
+		body = []byte(`{"error":"response encoding failed"}`)
+	}
+	body = append(body, '\n')
+	if s.auth != nil {
+		signature := s.auth.ResponseSignature(request.URL.Path, request.Header.Get("X-Robin-Nonce"), status, body)
+		w.Header().Set("X-Robin-Response-Signature", signature)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

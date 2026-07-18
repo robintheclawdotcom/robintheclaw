@@ -20,6 +20,7 @@ type fakeChain struct {
 	id       uint64
 	header   *types.Header
 	code     []byte
+	codes    map[common.Address][]byte
 	call     func(ethereum.CallMsg, *big.Int) ([]byte, error)
 	nonce    uint64
 	estimate uint64
@@ -35,7 +36,10 @@ func (chain *fakeChain) HeaderByNumber(context.Context, *big.Int) (*types.Header
 	return chain.header, nil
 }
 
-func (chain *fakeChain) CodeAt(context.Context, common.Address, *big.Int) ([]byte, error) {
+func (chain *fakeChain) CodeAt(_ context.Context, address common.Address, _ *big.Int) ([]byte, error) {
+	if code := chain.codes[address]; len(code) != 0 {
+		return code, nil
+	}
 	return chain.code, nil
 }
 
@@ -94,6 +98,62 @@ func TestSourceReaderRequiresExactDualRPCConsensus(t *testing.T) {
 	if _, err := reader.Observe(context.Background()); err == nil ||
 		!strings.Contains(err.Error(), "response disagreement") {
 		t.Fatalf("expected exact consensus failure, got %v", err)
+	}
+}
+
+func TestSourceReaderAcceptsObservedArbitrumFinalityWindow(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	updatedAt := now.Add(-20*time.Minute - 30*time.Second)
+	first, config := sourceFixture(t, now, 213_456_789_01, updatedAt)
+	second, _ := sourceFixture(t, now, 213_456_789_01, updatedAt)
+	first.header = testSourceHeader(100, now.Add(-20*time.Minute-19*time.Second))
+	second.header = first.header
+	reader, err := NewSourceReader(first, second, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.clock = func() time.Time { return now }
+	if _, err := reader.Observe(context.Background()); err != nil {
+		t.Fatalf("observed Arbitrum finality window was rejected: %v", err)
+	}
+}
+
+func TestSourceReaderRejectsFinalizedBlockOutsideWindow(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	updatedAt := now.Add(-31 * time.Minute)
+	first, config := sourceFixture(t, now, 213_456_789_01, updatedAt)
+	second, _ := sourceFixture(t, now, 213_456_789_01, updatedAt)
+	first.header = testSourceHeader(100, now.Add(-30*time.Minute-time.Second))
+	second.header = first.header
+	reader, err := NewSourceReader(first, second, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.clock = func() time.Time { return now }
+	if _, err := reader.Observe(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "common finalized block is stale") {
+		t.Fatalf("expected stale finalized block failure, got %v", err)
+	}
+}
+
+func TestSourceReaderRejectsAggregatorMismatch(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	first, config := sourceFixture(t, now, 213_456_789_01, now.Add(-time.Minute))
+	second, _ := sourceFixture(t, now, 213_456_789_01, now.Add(-time.Minute))
+	second.call = sourceCallWithAggregator(
+		t,
+		213_456_789_01,
+		now.Add(-time.Minute),
+		common.HexToAddress("0x2222222222222222222222222222222222222222"),
+	)
+	reader, err := NewSourceReader(first, second, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.clock = func() time.Time { return now }
+	if _, err := reader.Observe(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "aggregator mismatch") {
+		t.Fatalf("expected aggregator mismatch, got %v", err)
 	}
 }
 
@@ -236,21 +296,46 @@ func sourceFixture(
 ) (*fakeChain, Config) {
 	t.Helper()
 	code := []byte{0x60, 0x01, 0x60, 0x00}
-	header := &types.Header{
-		Number: big.NewInt(100), Time: uint64(now.Add(-10 * time.Second).Unix()),
-		GasLimit: 30_000_000, Extra: []byte("finalized"),
-	}
+	aggregator := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	aggregatorCode := []byte{0x60, 0x02, 0x60, 0x00}
+	header := testSourceHeader(100, now.Add(-10*time.Second))
 	chain := &fakeChain{
-		id: SourceChainID, header: header, code: code,
-		call: sourceCall(t, answer, updatedAt),
+		id: SourceChainID, header: header,
+		codes: map[common.Address][]byte{
+			common.HexToAddress(SourceFeedHex): code,
+			aggregator:                         aggregatorCode,
+		},
+		call: sourceCallWithAggregator(t, answer, updatedAt, aggregator),
 	}
 	return chain, Config{
 		SourceFeed: common.HexToAddress(SourceFeedHex), SourceCodeHash: crypto.Keccak256Hash(code),
-		FinalizedMaxAge: 20 * time.Minute,
+		SourceAggregator: aggregator, AggregatorCodeHash: crypto.Keccak256Hash(aggregatorCode),
+		FinalizedMaxAge: 30 * time.Minute,
+	}
+}
+
+func testSourceHeader(number uint64, timestamp time.Time) *types.Header {
+	return &types.Header{
+		Number: new(big.Int).SetUint64(number), Time: uint64(timestamp.Unix()),
+		GasLimit: 30_000_000, Extra: []byte("finalized"),
 	}
 }
 
 func sourceCall(t *testing.T, answer int64, updatedAt time.Time) func(ethereum.CallMsg, *big.Int) ([]byte, error) {
+	return sourceCallWithAggregator(
+		t,
+		answer,
+		updatedAt,
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+	)
+}
+
+func sourceCallWithAggregator(
+	t *testing.T,
+	answer int64,
+	updatedAt time.Time,
+	aggregator common.Address,
+) func(ethereum.CallMsg, *big.Int) ([]byte, error) {
 	t.Helper()
 	contract, err := abi.JSON(bytes.NewBufferString(sourceABIJSON))
 	if err != nil {
@@ -266,6 +351,8 @@ func sourceCall(t *testing.T, answer int64, updatedAt time.Time) func(ethereum.C
 				return method.Outputs.Pack(uint8(SourceDecimals))
 			case "description":
 				return method.Outputs.Pack("AAPL / USD")
+			case "aggregator":
+				return method.Outputs.Pack(aggregator)
 			case "latestRoundData":
 				return method.Outputs.Pack(
 					big.NewInt(52), big.NewInt(answer), big.NewInt(updatedAt.Unix()-1),

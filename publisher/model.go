@@ -81,39 +81,69 @@ func (o LighterObservation) Healthy() bool {
 }
 
 type RobinhoodObservation struct {
-	Vault                string
-	Signer               string
-	Owner                string
-	SettlementBalanceRaw string
-	OwnerGasRaw          string
-	SignerGasRaw         string
-	AgentEnabled         bool
-	Flat                 bool
-	WiringVerified       bool
-	FinalityHealthy      bool
-	FundingReady         bool
-	OwnerGasReady        bool
-	SignerGasReady       bool
-	OracleHealthy        bool
-	SequencerHealthy     bool
-	RiskMode             string
-	SignerNonceAligned   bool
-	SpotConfigVersion    uint64
-	StockDecimals        uint8
-	UIMultiplierE18      string
-	NewUIMultiplierE18   string
-	OraclePaused         bool
-	FinalizedNumber      uint64
-	FinalizedHash        string
-	ObservedAt           time.Time
+	Vault                 string
+	Signer                string
+	Owner                 string
+	SettlementBalanceRaw  string
+	OwnerGasRaw           string
+	SignerGasRaw          string
+	AgentEnabled          bool
+	FinalizedAgentAddress string
+	FinalizedAgentEnabled bool
+	FinalizedAgentRevoked bool
+	Flat                  bool
+	WiringVerified        bool
+	FinalityHealthy       bool
+	FundingReady          bool
+	OwnerGasReady         bool
+	SignerGasReady        bool
+	OracleHealthy         bool
+	SequencerHealthy      bool
+	GlobalMode            string
+	FinalizedGlobalMode   string
+	RiskMode              string
+	FinalizedRiskMode     string
+	SignerNonceAligned    bool
+	SpotConfigVersion     uint64
+	StockDecimals         uint8
+	UIMultiplierE18       string
+	NewUIMultiplierE18    string
+	OraclePaused          bool
+	FinalizedNumber       uint64
+	FinalizedHash         string
+	FinalizedTimestamp    uint64
+	SourceBlockNumber     uint64
+	SourceBlockHash       string
+	SourceBlockTimestamp  uint64
+	ObservedAt            time.Time
 }
 
 func (o RobinhoodObservation) Healthy() bool {
 	return o.WiringVerified && o.FinalityHealthy && o.FundingReady &&
+		o.entryAuthorized() &&
 		o.OwnerGasReady && o.SignerGasReady && o.SignerNonceAligned && o.SpotConfigVersion > 0 &&
 		o.StockDecimals <= 18 && o.UIMultiplierE18 != "" &&
 		o.UIMultiplierE18 == o.NewUIMultiplierE18 && !o.OraclePaused && o.OracleHealthy &&
-		o.SequencerHealthy && fresh(o.ObservedAt, time.Now())
+		o.SequencerHealthy && o.sourceBound() && fresh(o.ObservedAt, time.Now())
+}
+
+func (o RobinhoodObservation) entryAuthorized() bool {
+	return o.AgentEnabled && o.FinalizedAgentEnabled && !o.FinalizedAgentRevoked &&
+		strings.EqualFold(o.FinalizedAgentAddress, o.Signer) &&
+		o.GlobalMode == "ACTIVE" && o.FinalizedGlobalMode == "ACTIVE" &&
+		o.RiskMode == "ACTIVE" && o.FinalizedRiskMode == "ACTIVE"
+}
+
+func (o RobinhoodObservation) sourceBound() bool {
+	if o.FinalizedNumber == 0 || !validHash(o.FinalizedHash) || o.FinalizedTimestamp == 0 ||
+		o.SourceBlockNumber < o.FinalizedNumber || !validHash(o.SourceBlockHash) ||
+		o.SourceBlockTimestamp < o.FinalizedTimestamp ||
+		o.SourceBlockTimestamp-o.FinalizedTimestamp > uint64(maxFinalizedEvidenceAge/time.Second) ||
+		o.ObservedAt.Unix() < 0 || uint64(o.ObservedAt.Unix()) != o.SourceBlockTimestamp ||
+		!o.ObservedAt.Equal(time.Unix(o.ObservedAt.Unix(), 0)) {
+		return false
+	}
+	return o.SourceBlockNumber != o.FinalizedNumber || o.SourceBlockHash == o.FinalizedHash
 }
 
 type CoordinatorSnapshot struct {
@@ -142,25 +172,37 @@ type LighterPayload struct {
 }
 
 type RobinhoodPayload struct {
-	VaultAddress         string `json:"vault_address"`
-	SignerAddress        string `json:"signer_address"`
-	FundingReady         bool   `json:"funding_ready"`
-	WiringVerified       bool   `json:"wiring_verified"`
-	FinalityHealthy      bool   `json:"finality_healthy"`
-	Flat                 bool   `json:"flat"`
-	OwnerAddress         string `json:"owner_address"`
-	AgentEnabled         bool   `json:"agent_enabled"`
-	RiskMode             string `json:"risk_mode"`
-	SettlementBalanceRaw string `json:"settlement_balance_raw"`
-	NonceAligned         bool   `json:"nonce_aligned"`
-	SpotConfigVersion    uint64 `json:"spot_config_version"`
-	StockDecimals        uint8  `json:"stock_decimals"`
-	UIMultiplierE18      string `json:"ui_multiplier_e18"`
-	NewUIMultiplierE18   string `json:"new_ui_multiplier_e18"`
-	OraclePaused         bool   `json:"oracle_paused"`
-	OracleHealthy        bool   `json:"oracle_healthy"`
-	SequencerHealthy     bool   `json:"sequencer_healthy"`
-	SignerGasReady       bool   `json:"signer_gas_ready"`
+	VaultAddress          string `json:"vault_address"`
+	SignerAddress         string `json:"signer_address"`
+	FundingReady          bool   `json:"funding_ready"`
+	WiringVerified        bool   `json:"wiring_verified"`
+	FinalityHealthy       bool   `json:"finality_healthy"`
+	Flat                  bool   `json:"flat"`
+	OwnerAddress          string `json:"owner_address"`
+	AgentEnabled          bool   `json:"agent_enabled"`
+	FinalizedAgentAddress string `json:"finalized_agent_address"`
+	FinalizedAgentEnabled bool   `json:"finalized_agent_enabled"`
+	FinalizedAgentRevoked bool   `json:"finalized_agent_revoked"`
+	GlobalMode            string `json:"global_mode"`
+	FinalizedGlobalMode   string `json:"finalized_global_mode"`
+	RiskMode              string `json:"risk_mode"`
+	FinalizedRiskMode     string `json:"finalized_risk_mode"`
+	SettlementBalanceRaw  string `json:"settlement_balance_raw"`
+	NonceAligned          bool   `json:"nonce_aligned"`
+	SpotConfigVersion     uint64 `json:"spot_config_version"`
+	StockDecimals         uint8  `json:"stock_decimals"`
+	UIMultiplierE18       string `json:"ui_multiplier_e18"`
+	NewUIMultiplierE18    string `json:"new_ui_multiplier_e18"`
+	OraclePaused          bool   `json:"oracle_paused"`
+	OracleHealthy         bool   `json:"oracle_healthy"`
+	SequencerHealthy      bool   `json:"sequencer_healthy"`
+	SignerGasReady        bool   `json:"signer_gas_ready"`
+	FinalizedNumber       uint64 `json:"finalized_number"`
+	FinalizedHash         string `json:"finalized_hash"`
+	FinalizedTimestamp    uint64 `json:"finalized_timestamp"`
+	SourceBlockNumber     uint64 `json:"source_block_number"`
+	SourceBlockHash       string `json:"source_block_hash"`
+	SourceBlockTimestamp  uint64 `json:"source_block_timestamp"`
 }
 
 type ReadinessSnapshot struct {

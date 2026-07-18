@@ -19,6 +19,8 @@ import (
 	"time"
 )
 
+const maxAuthenticatedResponseBytes = 64 << 10
+
 type SignedClient struct {
 	baseURL string
 	caller  string
@@ -81,7 +83,9 @@ func (c *SignedClient) Post(ctx context.Context, path string, body []byte) error
 		return err
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if _, err := c.authenticateResponse(resp, path, nonce); err != nil {
+		return err
+	}
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusMethodNotAllowed {
 		return ErrRateLimited
 	}
@@ -116,22 +120,9 @@ func (c *SignedClient) Call(ctx context.Context, path string, body []byte, targe
 		return err
 	}
 	defer response.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 64<<10+1))
-	if err != nil || len(responseBody) > 64<<10 {
-		return errors.New("invalid authenticated response")
-	}
-	provided, err := hex.DecodeString(response.Header.Get("X-RTC-Response-Signature"))
-	if err != nil || len(provided) != sha256.Size {
-		return errors.New("unauthenticated response")
-	}
-	responseDigest := sha256.Sum256(responseBody)
-	responseCanonical := strings.Join([]string{
-		"RESPONSE", path, c.caller, nonce, strconv.Itoa(response.StatusCode), hex.EncodeToString(responseDigest[:]),
-	}, "\n")
-	responseMAC := hmac.New(sha256.New, c.key[:])
-	_, _ = responseMAC.Write([]byte(responseCanonical))
-	if subtle.ConstantTimeCompare(responseMAC.Sum(nil), provided) != 1 {
-		return errors.New("unauthenticated response")
+	responseBody, err := c.authenticateResponse(response, path, nonce)
+	if err != nil {
+		return err
 	}
 	if response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusMethodNotAllowed {
 		return ErrRateLimited
@@ -148,6 +139,34 @@ func (c *SignedClient) Call(ctx context.Context, path string, body []byte, targe
 		return errors.New("invalid authenticated response")
 	}
 	return nil
+}
+
+func (c *SignedClient) authenticateResponse(response *http.Response, path, nonce string) ([]byte, error) {
+	if response.ContentLength > maxAuthenticatedResponseBytes {
+		return nil, errors.New("invalid authenticated response")
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxAuthenticatedResponseBytes+1))
+	if err != nil || len(body) > maxAuthenticatedResponseBytes {
+		return nil, errors.New("invalid authenticated response")
+	}
+	signatures := response.Header.Values("X-RTC-Response-Signature")
+	if len(signatures) != 1 {
+		return nil, errors.New("unauthenticated response")
+	}
+	provided, err := hex.DecodeString(signatures[0])
+	if err != nil || len(provided) != sha256.Size {
+		return nil, errors.New("unauthenticated response")
+	}
+	digest := sha256.Sum256(body)
+	canonical := strings.Join([]string{
+		"RESPONSE", path, c.caller, nonce, strconv.Itoa(response.StatusCode), hex.EncodeToString(digest[:]),
+	}, "\n")
+	mac := hmac.New(sha256.New, c.key[:])
+	_, _ = mac.Write([]byte(canonical))
+	if subtle.ConstantTimeCompare(mac.Sum(nil), provided) != 1 {
+		return nil, errors.New("unauthenticated response")
+	}
+	return body, nil
 }
 
 func validCaller(value string) bool {

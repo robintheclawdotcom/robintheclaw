@@ -66,25 +66,36 @@ type lighterSnapshot struct {
 }
 
 type robinhoodSnapshot struct {
-	VaultAddress         string `json:"vault_address"`
-	SignerAddress        string `json:"signer_address"`
-	FundingReady         bool   `json:"funding_ready"`
-	WiringVerified       bool   `json:"wiring_verified"`
-	FinalityHealthy      bool   `json:"finality_healthy"`
-	Flat                 bool   `json:"flat"`
-	OwnerAddress         string `json:"owner_address"`
-	AgentEnabled         bool   `json:"agent_enabled"`
-	RiskMode             string `json:"risk_mode"`
-	SettlementBalanceRaw string `json:"settlement_balance_raw"`
-	NonceAligned         bool   `json:"nonce_aligned"`
-	SpotConfigVersion    uint64 `json:"spot_config_version"`
-	StockDecimals        uint8  `json:"stock_decimals"`
-	UIMultiplierE18      string `json:"ui_multiplier_e18"`
-	NewUIMultiplierE18   string `json:"new_ui_multiplier_e18"`
-	OraclePaused         bool   `json:"oracle_paused"`
-	OracleHealthy        bool   `json:"oracle_healthy"`
-	SequencerHealthy     bool   `json:"sequencer_healthy"`
-	SignerGasReady       bool   `json:"signer_gas_ready"`
+	VaultAddress          string `json:"vault_address"`
+	SignerAddress         string `json:"signer_address"`
+	FundingReady          bool   `json:"funding_ready"`
+	WiringVerified        bool   `json:"wiring_verified"`
+	FinalityHealthy       bool   `json:"finality_healthy"`
+	Flat                  bool   `json:"flat"`
+	OwnerAddress          string `json:"owner_address"`
+	AgentEnabled          bool   `json:"agent_enabled"`
+	FinalizedAgentAddress string `json:"finalized_agent_address"`
+	FinalizedAgentEnabled bool   `json:"finalized_agent_enabled"`
+	GlobalMode            string `json:"global_mode"`
+	FinalizedGlobalMode   string `json:"finalized_global_mode"`
+	RiskMode              string `json:"risk_mode"`
+	FinalizedRiskMode     string `json:"finalized_risk_mode"`
+	SettlementBalanceRaw  string `json:"settlement_balance_raw"`
+	NonceAligned          bool   `json:"nonce_aligned"`
+	SpotConfigVersion     uint64 `json:"spot_config_version"`
+	StockDecimals         uint8  `json:"stock_decimals"`
+	UIMultiplierE18       string `json:"ui_multiplier_e18"`
+	NewUIMultiplierE18    string `json:"new_ui_multiplier_e18"`
+	OraclePaused          bool   `json:"oracle_paused"`
+	OracleHealthy         bool   `json:"oracle_healthy"`
+	SequencerHealthy      bool   `json:"sequencer_healthy"`
+	SignerGasReady        bool   `json:"signer_gas_ready"`
+	FinalizedNumber       uint64 `json:"finalized_number"`
+	FinalizedHash         string `json:"finalized_hash"`
+	FinalizedTimestamp    uint64 `json:"finalized_timestamp"`
+	SourceBlockNumber     uint64 `json:"source_block_number"`
+	SourceBlockHash       string `json:"source_block_hash"`
+	SourceBlockTimestamp  uint64 `json:"source_block_timestamp"`
 }
 
 type snapshots struct {
@@ -650,9 +661,13 @@ func verifySnapshots(value snapshots, state coordinatorState, market MarketConfi
 	} else if lighter.MaintenanceMarginRatio != 10_000_000 {
 		return errors.New("zero-maintenance Lighter margin evidence is inconsistent")
 	}
-	if robinhood.OwnerAddress != state.Owner || robinhood.VaultAddress != state.Vault || robinhood.SignerAddress != state.Signer ||
+	if !robinhoodSourceBound(robinhood, value.RobinhoodObserved) ||
+		robinhood.OwnerAddress != state.Owner || robinhood.VaultAddress != state.Vault || robinhood.SignerAddress != state.Signer ||
 		!robinhood.FundingReady || !robinhood.WiringVerified || !robinhood.FinalityHealthy || !robinhood.Flat ||
-		!robinhood.AgentEnabled || robinhood.RiskMode != "ACTIVE" || !robinhood.NonceAligned ||
+		!robinhood.AgentEnabled || !robinhood.FinalizedAgentEnabled ||
+		robinhood.FinalizedAgentAddress != state.Signer ||
+		robinhood.GlobalMode != "ACTIVE" || robinhood.FinalizedGlobalMode != "ACTIVE" ||
+		robinhood.RiskMode != "ACTIVE" || robinhood.FinalizedRiskMode != "ACTIVE" || !robinhood.NonceAligned ||
 		robinhood.SpotConfigVersion != market.SpotConfigVersion || robinhood.StockDecimals != market.SpotDecimals ||
 		robinhood.UIMultiplierE18 != market.UIMultiplierE18 || robinhood.NewUIMultiplierE18 != market.UIMultiplierE18 ||
 		robinhood.OraclePaused || !robinhood.OracleHealthy || !robinhood.SequencerHealthy || !robinhood.SignerGasReady {
@@ -673,7 +688,8 @@ func verifyExitSnapshots(value snapshots, state coordinatorState, market MarketC
 		!lighter.NoUnknownPositions || !lighter.CollateralReady || lighter.Flat || lighter.CollateralMicros == 0 {
 		return errors.New("Lighter snapshot is not exit-safe")
 	}
-	if robinhood.OwnerAddress != state.Owner || robinhood.VaultAddress != state.Vault || robinhood.SignerAddress != state.Signer ||
+	if !robinhoodSourceBound(robinhood, value.RobinhoodObserved) ||
+		robinhood.OwnerAddress != state.Owner || robinhood.VaultAddress != state.Vault || robinhood.SignerAddress != state.Signer ||
 		!robinhood.WiringVerified || !robinhood.FinalityHealthy || robinhood.Flat || !robinhood.AgentEnabled ||
 		(robinhood.RiskMode != "ACTIVE" && robinhood.RiskMode != "REDUCE_ONLY") || !robinhood.NonceAligned ||
 		robinhood.SpotConfigVersion != market.SpotConfigVersion || robinhood.StockDecimals != market.SpotDecimals ||
@@ -682,6 +698,20 @@ func verifyExitSnapshots(value snapshots, state coordinatorState, market MarketC
 		return errors.New("Robinhood snapshot is not exit-safe")
 	}
 	return nil
+}
+
+func robinhoodSourceBound(snapshot robinhoodSnapshot, observed time.Time) bool {
+	if observed.IsZero() || observed.Unix() < 0 || snapshot.FinalizedNumber == 0 ||
+		!validHash(snapshot.FinalizedHash) || snapshot.FinalizedTimestamp == 0 ||
+		snapshot.SourceBlockNumber < snapshot.FinalizedNumber || !validHash(snapshot.SourceBlockHash) ||
+		snapshot.SourceBlockTimestamp < snapshot.FinalizedTimestamp ||
+		snapshot.SourceBlockTimestamp-snapshot.FinalizedTimestamp > 30*60 ||
+		uint64(observed.Unix()) != snapshot.SourceBlockTimestamp ||
+		!observed.Equal(time.Unix(int64(snapshot.SourceBlockTimestamp), 0)) {
+		return false
+	}
+	return snapshot.SourceBlockNumber != snapshot.FinalizedNumber ||
+		snapshot.SourceBlockHash == snapshot.FinalizedHash
 }
 
 func loadExposure(ctx context.Context, tx pgx.Tx, accountID string, now time.Time, turnover *uint64, active *uint8) error {

@@ -1,9 +1,10 @@
 use crate::api::error::ApiError;
 use crate::product::ReadinessEvidenceInput;
+use crate::service_auth::{AuthorizedRequest, ServiceAuth};
 use crate::state::AppState;
 use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 const READINESS_PATH: &str = "/internal/v1/readiness";
@@ -77,5 +78,69 @@ pub async fn record_readiness(
         .record_readiness_snapshot(snapshot.execution_account_id, &evidence)
         .await
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    Ok(HttpResponse::Accepted().json(readiness))
+    signed_readiness_response(&state.readiness_auth, &authorized, &readiness)
+}
+
+fn signed_readiness_response<T: Serialize>(
+    auth: &ServiceAuth,
+    request: &AuthorizedRequest,
+    value: &T,
+) -> Result<HttpResponse, ApiError> {
+    let body = serde_json::to_vec(value).map_err(ApiError::internal)?;
+    let signature = auth
+        .sign_response(
+            READINESS_PATH,
+            request,
+            actix_web::http::StatusCode::ACCEPTED.as_u16(),
+            &body,
+        )
+        .map_err(ApiError::internal)?;
+    Ok(HttpResponse::Accepted()
+        .insert_header(("X-RTC-Response-Signature", signature))
+        .content_type("application/json")
+        .body(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::body::to_bytes;
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+
+    #[actix_web::test]
+    async fn readiness_success_response_authenticates_exact_bytes() {
+        let key_hex = "42".repeat(32);
+        let key = hex::decode(&key_hex).unwrap();
+        let auth = ServiceAuth::new("account-publisher", &key_hex).unwrap();
+        let request = AuthorizedRequest {
+            caller: "account-publisher".to_string(),
+            nonce: "n".repeat(48),
+            nonce_expires_at: Utc::now() + chrono::Duration::minutes(1),
+        };
+        let response =
+            signed_readiness_response(&auth, &request, &serde_json::json!({"stored": true}))
+                .unwrap();
+        assert_eq!(response.status(), actix_web::http::StatusCode::ACCEPTED);
+        let signature = response
+            .headers()
+            .get("X-RTC-Response-Signature")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = to_bytes(response.into_body()).await.unwrap();
+        assert_eq!(body.as_ref(), br#"{"stored":true}"#);
+
+        let canonical = format!(
+            "RESPONSE\n{READINESS_PATH}\n{}\n{}\n{}\n{}",
+            request.caller,
+            request.nonce,
+            actix_web::http::StatusCode::ACCEPTED.as_u16(),
+            hex::encode(Sha256::digest(&body))
+        );
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        mac.update(canonical.as_bytes());
+        mac.verify_slice(&hex::decode(signature).unwrap()).unwrap();
+    }
 }

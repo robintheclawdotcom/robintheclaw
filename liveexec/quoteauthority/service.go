@@ -12,12 +12,13 @@ import (
 )
 
 type AdapterRequest struct {
-	RequestID          string
-	ExecutionAccountID string
-	IntentID           string
-	MarketManifest     string
-	Action             protocol.Action
-	EntryNotional      uint64
+	RequestID                    string
+	ExecutionAccountID           string
+	IntentID                     string
+	MarketManifest               string
+	TargetStrategyManifestSHA256 string
+	Action                       protocol.Action
+	EntryNotional                uint64
 }
 
 type DurableSource struct {
@@ -70,8 +71,11 @@ func (s *Service) Quote(ctx context.Context, request protocol.QuoteRequest) (pro
 		nowMS-request.RequestedAtMS > protocol.MaximumQuoteLifetimeMS {
 		return protocol.QuoteBundle{}, errors.New("invalid quote request")
 	}
-	if (request.Action == protocol.ActionEntry && request.IntentID != "") ||
-		(request.Action == protocol.ActionUnwind && !validHash(request.IntentID)) {
+	if (request.Action == protocol.ActionEntry &&
+		(request.IntentID != "" || request.TargetStrategyManifestSHA256 != "")) ||
+		(request.Action == protocol.ActionUnwind &&
+			(!validHash(request.IntentID) ||
+				!protocol.IsAllowedUnwindTargetStrategyManifest(request.TargetStrategyManifestSHA256))) {
 		return protocol.QuoteBundle{}, errors.New("invalid quote intent binding")
 	}
 	entryNotional := uint64(0)
@@ -79,12 +83,13 @@ func (s *Service) Quote(ctx context.Context, request protocol.QuoteRequest) (pro
 		entryNotional = protocol.EntryNotionalMicros
 	}
 	result, err := s.adapter.Quote(ctx, AdapterRequest{
-		RequestID:          request.RequestID,
-		ExecutionAccountID: request.ExecutionAccountID,
-		IntentID:           request.IntentID,
-		MarketManifest:     request.MarketManifest,
-		Action:             request.Action,
-		EntryNotional:      entryNotional,
+		RequestID:                    request.RequestID,
+		ExecutionAccountID:           request.ExecutionAccountID,
+		IntentID:                     request.IntentID,
+		MarketManifest:               request.MarketManifest,
+		TargetStrategyManifestSHA256: request.TargetStrategyManifestSHA256,
+		Action:                       request.Action,
+		EntryNotional:                entryNotional,
 	})
 	if err != nil {
 		return protocol.QuoteBundle{}, err
@@ -93,23 +98,24 @@ func (s *Service) Quote(ctx context.Context, request protocol.QuoteRequest) (pro
 		return protocol.QuoteBundle{}, err
 	}
 	bundle := protocol.QuoteBundle{
-		SchemaVersion:          protocol.QuoteSchemaVersion,
-		RequestID:              request.RequestID,
-		ExecutionAccountID:     request.ExecutionAccountID,
-		SourceEvaluationID:     request.SourceEvaluationID,
-		MarketManifest:         request.MarketManifest,
-		StrategyVersion:        protocol.StrategyVersion,
-		StrategyManifestSHA256: protocol.StrategyManifestSHA256,
-		SourceConfigSHA256:     protocol.SourceConfigSHA256,
-		RouteSHA256:            protocol.RouteSHA256,
-		OraclePolicySHA256:     protocol.OraclePolicySHA256,
-		RiskPolicySHA256:       protocol.RiskPolicySHA256,
-		Action:                 request.Action,
-		Source:                 result.Source,
-		Spot:                   result.Spot,
-		Perp:                   result.Perp,
-		ObservedAtMS:           result.ObservedAtMS,
-		ExpiresAtMS:            result.ExpiresAtMS,
+		SchemaVersion:                protocol.QuoteSchemaVersion,
+		RequestID:                    request.RequestID,
+		ExecutionAccountID:           request.ExecutionAccountID,
+		SourceEvaluationID:           request.SourceEvaluationID,
+		MarketManifest:               request.MarketManifest,
+		StrategyVersion:              protocol.StrategyVersion,
+		StrategyManifestSHA256:       protocol.StrategyManifestSHA256,
+		TargetStrategyManifestSHA256: request.TargetStrategyManifestSHA256,
+		SourceConfigSHA256:           protocol.SourceConfigSHA256,
+		RouteSHA256:                  protocol.RouteSHA256,
+		OraclePolicySHA256:           protocol.OraclePolicySHA256,
+		RiskPolicySHA256:             protocol.RiskPolicySHA256,
+		Action:                       request.Action,
+		Source:                       result.Source,
+		Spot:                         result.Spot,
+		Perp:                         result.Perp,
+		ObservedAtMS:                 result.ObservedAtMS,
+		ExpiresAtMS:                  result.ExpiresAtMS,
 	}
 	reconciliationDeadline := uint64(0)
 	if request.Action == protocol.ActionUnwind {
@@ -201,7 +207,8 @@ func validateAdapterResult(action protocol.Action, result AdapterResult, lighter
 	minimum, ok := positiveDecimal(spot.MinimumAmountOut)
 	if !ok || (action == protocol.ActionEntry && minimum.Cmp(stock) > 0) ||
 		(action == protocol.ActionUnwind && minimum.Cmp(settlement) > 0) ||
-		spot.ReferencePriceMicros == 0 || (!spotOnly && perp.BaseAmount == 0) || perp.LimitPrice == 0 || perp.MarkPrice == 0 {
+		spot.ReferencePriceMicros == 0 || (!spotOnly && perp.BaseAmount == 0) ||
+		(spotOnly && perp.BaseAmount != 0) || perp.LimitPrice == 0 || perp.MarkPrice == 0 {
 		return errors.New("adapter returned invalid executable amounts")
 	}
 	if action == protocol.ActionEntry {
@@ -229,42 +236,45 @@ func marketPublication(request protocol.QuoteRequest, result AdapterResult, reco
 	if !publisherOK || !receivedOK || !expiresOK || (request.Action == protocol.ActionUnwind && !reconciliationOK) {
 		return protocol.MarketQuotePublication{}, false
 	}
+	perpUnwindBaseAmount := result.Perp.BaseAmount
 	publication := protocol.MarketQuotePublication{
-		Source:                      "lighter-auth",
-		SourceSession:               result.DurableSource.Session,
-		SourceEventID:               result.DurableSource.EventID,
-		SourceSequence:              result.DurableSource.Sequence,
-		ExecutionAccountID:          request.ExecutionAccountID,
-		MarketManifest:              request.MarketManifest,
-		StrategyManifestSHA256:      protocol.StrategyManifestSHA256,
-		RouteSHA256:                 protocol.RouteSHA256,
-		LighterMarketIndex:          result.Perp.MarketIndex,
-		QuoteBlockHash:              result.Spot.BlockHash,
-		MarkPrice:                   result.Perp.MarkPrice,
-		ExpectedUIMultiplier:        result.Spot.ExpectedUIMultiplier,
-		MinOracleRoundID:            result.Spot.MinOracleRoundID,
-		PublisherAtMS:               publisherAt,
-		ReceivedAtMS:                receivedAt,
-		ExpiresAtMS:                 expiresAt,
-		IntentID:                    request.IntentID,
-		SpotUnwindAmountIn:          result.Spot.StockAmount,
-		SpotUnwindExpectedAmountOut: result.Spot.SettlementAmount,
-		UnwindPhase:                 result.Perp.Phase,
-		PerpUnwindBaseAmount:        result.Perp.BaseAmount,
-		PerpUnwindLimitPrice:        result.Perp.LimitPrice,
-		SubmissionDeadlineMS:        expiresAt,
-		ReconciliationDeadlineMS:    reconciliation,
+		Source:                       "lighter-auth",
+		SourceSession:                result.DurableSource.Session,
+		SourceEventID:                result.DurableSource.EventID,
+		SourceSequence:               result.DurableSource.Sequence,
+		ExecutionAccountID:           request.ExecutionAccountID,
+		MarketManifest:               request.MarketManifest,
+		StrategyManifestSHA256:       protocol.StrategyManifestSHA256,
+		TargetStrategyManifestSHA256: request.TargetStrategyManifestSHA256,
+		RouteSHA256:                  protocol.RouteSHA256,
+		LighterMarketIndex:           result.Perp.MarketIndex,
+		QuoteBlockHash:               result.Spot.BlockHash,
+		MarkPrice:                    result.Perp.MarkPrice,
+		ExpectedUIMultiplier:         result.Spot.ExpectedUIMultiplier,
+		MinOracleRoundID:             result.Spot.MinOracleRoundID,
+		PublisherAtMS:                publisherAt,
+		ReceivedAtMS:                 receivedAt,
+		ExpiresAtMS:                  expiresAt,
+		IntentID:                     request.IntentID,
+		SpotUnwindAmountIn:           result.Spot.StockAmount,
+		SpotUnwindExpectedAmountOut:  result.Spot.SettlementAmount,
+		UnwindPhase:                  result.Perp.Phase,
+		PerpUnwindBaseAmount:         &perpUnwindBaseAmount,
+		PerpUnwindLimitPrice:         result.Perp.LimitPrice,
+		SubmissionDeadlineMS:         expiresAt,
+		ReconciliationDeadlineMS:     reconciliation,
 	}
 	if request.Action == protocol.ActionEntry {
 		publication.ExecutionAccountID = ""
 		publication.StrategyManifestSHA256 = ""
+		publication.TargetStrategyManifestSHA256 = ""
 		publication.RouteSHA256 = ""
 		publication.LighterMarketIndex = 0
 		publication.IntentID = ""
 		publication.SpotUnwindAmountIn = ""
 		publication.SpotUnwindExpectedAmountOut = ""
 		publication.UnwindPhase = ""
-		publication.PerpUnwindBaseAmount = 0
+		publication.PerpUnwindBaseAmount = nil
 		publication.PerpUnwindLimitPrice = 0
 		publication.SubmissionDeadlineMS = 0
 		publication.ReconciliationDeadlineMS = 0

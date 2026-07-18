@@ -7,12 +7,12 @@
   "source_config_sha256": "59106a18758a95af45e6ac1a8257843cfbd2a45fd09b5b3c3f429d3dedb56c2a",
   "route_sha256": "77d59f5e80e76ed507522b27ee6b7ddd1f8395f0337f0b230c5bba64bb335590",
   "oracle_policy_sha256": "7f0d306267da767869c0bc5951ce911ac1cb9060294edfa8eeefa884e0ddf937",
-  "risk_policy_sha256": "a34ebfd2104eb062c9102f6fe68ad74d09a6e02f5c626fd17314228ae9bc398d",
+  "risk_policy_sha256": "a5f01d41a420d3b077ad75814dd26356a1431acea18593d3f2d359c1f686104e",
   "code_commit": "ae564ea252c88c0f2ef5a4884e849bbc0c315535",
   "max_leg_notional_micros": 25000000,
   "max_gross_notional_micros": 50000000,
   "max_daily_turnover_micros": 50000000,
   "max_leverage_ppm": 1000000,
   "max_active_episodes": 1,
-  "sha256": "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f"
+  "sha256": "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937"
 }

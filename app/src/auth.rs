@@ -39,6 +39,10 @@ impl AuthService {
         Self { app_id, key }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        self.app_id.is_some() && self.key.is_some()
+    }
+
     pub fn authenticate(&self, req: &HttpRequest) -> Result<AuthenticatedUser, AuthError> {
         let token = token_from_request(req).ok_or(AuthError::Missing)?;
         let app_id = self.app_id.as_deref().ok_or(AuthError::Unavailable)?;

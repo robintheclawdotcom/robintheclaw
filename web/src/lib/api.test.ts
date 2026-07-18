@@ -69,6 +69,31 @@ describe("mainnet agent API", () => {
     }));
   });
 
+  it("submits only the owner signature proof for terminal Lighter revocation", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "verifying" }), {
+      status: 202,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetch);
+    const api = new AppApi(async () => "access-token");
+
+    await api.confirmLighterRevocation("agent-id", {
+      revocationId: "revocation-id",
+      l1Signature: `0x${"ab".repeat(65)}`,
+    });
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/app/v1/agents/agent-id/lighter/revocation/confirm",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          revocationId: "revocation-id",
+          l1Signature: `0x${"ab".repeat(65)}`,
+        }),
+      }),
+    );
+  });
+
   it("reuses the idempotency key while a command is pending", async () => {
     const fetch = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
         id: "command-id",
@@ -87,6 +112,48 @@ describe("mainnet agent API", () => {
     const first = fetch.mock.calls[0][1]?.headers as Record<string, string>;
     const second = fetch.mock.calls[1][1]?.headers as Record<string, string>;
     expect(first["Idempotency-Key"]).toBe(second["Idempotency-Key"]);
+  });
+
+  it("clears a rejected close so registration recovery can retry", async () => {
+    let calls = 0;
+    const fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      calls += 1;
+      const headers = init.headers as Record<string, string>;
+      const idempotencyKey = headers["Idempotency-Key"];
+      const rejected = calls === 1;
+      return new Response(JSON.stringify({
+        id: rejected ? "rejected-close" : "pending-close",
+        agentId: "agent-id",
+        executionAccountId: "execution-account-id",
+        idempotencyKey,
+        command: "close",
+        status: rejected ? "rejected" : "pending",
+        agentStatus: "provisioning",
+        targetAgentStatus: "closed",
+        errorReason: rejected ? "external_execution_authority_requires_reconciliation" : null,
+        resultEvidenceDigest: null,
+        ownerActions: [],
+        completedAt: null,
+        createdAt: "2026-07-17T00:00:00Z",
+        updatedAt: "2026-07-17T00:00:00Z",
+      }), {
+        status: rejected ? 409 : 202,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetch);
+    const api = new AppApi(async () => null);
+
+    await expect(api.agentCommand("agent-id", "close")).rejects.toThrow(
+      "Finish venue registration and reconciliation before closing",
+    );
+    expect(api.pendingAgentCommand("agent-id", "close")).toBeNull();
+
+    await api.agentCommand("agent-id", "close");
+    const first = fetch.mock.calls[0][1]?.headers as Record<string, string>;
+    const second = fetch.mock.calls[1][1]?.headers as Record<string, string>;
+    expect(first["Idempotency-Key"]).not.toBe(second["Idempotency-Key"]);
+    expect(api.pendingAgentCommand("agent-id", "close")).toBe("pending-close");
   });
 
   it("recovers a pending command and clears it after terminal evidence", async () => {

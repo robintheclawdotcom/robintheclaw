@@ -91,6 +91,9 @@ export async function mockApplication(page: Page, options: { withVault?: boolean
     robinhoodFunded: false,
     executionGasReady: false,
     pauseReconciled: false,
+    closeReconciled: false,
+    lighterRevocationStatus: null,
+    lighterRevocationSubstituted: false,
     withdrawalReconciled: false,
   };
   await page.route("**/api/app/**", async (route) => respond(route, withVault, state));
@@ -99,6 +102,12 @@ export async function mockApplication(page: Page, options: { withVault?: boolean
     observeRobinhoodFunding: () => { state.robinhoodFunded = true; },
     observeExecutionGas: () => { state.executionGasReady = true; },
     reconcilePause: () => { state.pauseReconciled = true; },
+    reconcileClose: () => {
+      state.closeReconciled = true;
+      state.lighterRevocationStatus = "pending";
+    },
+    substituteLighterRevocation: () => { state.lighterRevocationSubstituted = true; },
+    restoreLighterRevocation: () => { state.lighterRevocationSubstituted = false; },
     reconcileWithdrawal: () => { state.withdrawalReconciled = true; },
   };
 }
@@ -115,6 +124,9 @@ type MockState = {
   robinhoodFunded: boolean;
   executionGasReady: boolean;
   pauseReconciled: boolean;
+  closeReconciled: boolean;
+  lighterRevocationStatus: "pending" | "revoked" | null;
+  lighterRevocationSubstituted: boolean;
   withdrawalReconciled: boolean;
 };
 
@@ -167,7 +179,7 @@ async function respond(route: Route, withVault: boolean, state: MockState) {
       executionAccountId: "execution-account-id",
       agentId: liveAgent.id,
       strategyVersion: "basis-aapl-v1",
-      strategyManifestSha256: "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f",
+      strategyManifestSha256: "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937",
       accountStatus: status === "closed" ? "closed" : "active",
       controlMode: active ? "ACTIVE" : status === "closed" ? "HALTED" : "REDUCE_ONLY",
       active,
@@ -224,6 +236,34 @@ async function respond(route: Route, withVault: boolean, state: MockState) {
     associationPayload: "Register Lighter Account\nfixture", proofTransactionHash: `0x${"34".repeat(32)}`,
     status: "linked", createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt,
     });
+  }
+  if (path.endsWith("/lighter/revocation") && request.method() === "GET") {
+    if (!state.closeReconciled || !state.lighterRevocationStatus) {
+      return json(route, { error: "invalid_request", message: "Lighter revocation is not ready." }, 400);
+    }
+    if (state.lighterRevocationSubstituted) {
+      return json(route, {
+        error: "service_unavailable",
+        message: "Lighter revocation binding does not match the canonical owner, account, or key.",
+      }, 503);
+    }
+    return json(route, lighterRevocation(state.lighterRevocationStatus));
+  }
+  if (path.endsWith("/lighter/revocation/confirm") && request.method() === "POST") {
+    const input = request.postDataJSON() as Record<string, unknown>;
+    if (
+      state.lighterRevocationSubstituted
+      || Object.keys(input).sort().join(",") !== "l1Signature,revocationId"
+      || input.revocationId !== "lighter-revocation"
+      || input.l1Signature !== `0x${"11".repeat(65)}`
+    ) {
+      return json(route, {
+        error: "conflict",
+        message: "Lighter revocation proof does not match the canonical binding.",
+      }, 409);
+    }
+    state.lighterRevocationStatus = "revoked";
+    return json(route, lighterRevocation("revoked"));
   }
   if (path.endsWith("/robinhood/prepare")) return json(route, {
     bindingRef: "robinhood-binding", requestId: "robinhood-request", providerRequestId: "execution-account-id",
@@ -283,25 +323,44 @@ async function respond(route: Route, withVault: boolean, state: MockState) {
   }
   if (path.endsWith("/commands") && request.method() === "POST") {
     const { command } = request.postDataJSON() as { command: "launch" | "pause" | "resume" | "close" | "withdraw" };
+    const coordinatorRegistered = state.liveJourney && state.lighterLinked && state.robinhoodLinked;
+    const externalAuthorityProvisioned = state.lighterLinked || state.robinhoodConfirmations > 0;
+    if (command === "close" && externalAuthorityProvisioned && !coordinatorRegistered) {
+      state.command = {
+        id: "command-close-rejected", agentId: liveAgent.id, executionAccountId: "execution-account-id",
+        idempotencyKey: request.headers()["idempotency-key"] ?? "fixture-key", command,
+        status: "rejected", agentStatus: (state.agent as { status?: string } | null)?.status ?? "provisioning",
+        targetAgentStatus: "closed",
+        errorReason: "external_execution_authority_requires_reconciliation",
+        resultEvidenceDigest: null, ownerActions: [], completedAt: null,
+        createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt,
+      };
+      return json(route, state.command, 409);
+    }
+    const closeNeedsRevocation = command === "close" && coordinatorRegistered;
     const nextStatus = command === "launch" || command === "resume" ? "running"
       : command === "pause" ? "reducing"
-        : command === "close" || command === "withdraw" ? "closed" : "blocked";
+        : command === "close" ? closeNeedsRevocation ? "closing" : "closed"
+          : command === "withdraw" ? "closed" : "blocked";
     if (command !== "withdraw") state.agent = { ...liveAgent, status: nextStatus };
     if (command === "launch" || command === "resume") state.executed = true;
     state.command = {
       id: `command-${command}`, agentId: liveAgent.id, executionAccountId: "execution-account-id",
       idempotencyKey: request.headers()["idempotency-key"] ?? "fixture-key", command,
-      status: command === "withdraw" ? "awaiting_signature" : command === "pause" ? "processing" : "completed",
-      agentStatus: nextStatus, targetAgentStatus: nextStatus, errorReason: null,
+      status: command === "withdraw" || closeNeedsRevocation ? "awaiting_signature" : command === "pause" ? "processing" : "completed",
+      agentStatus: nextStatus, targetAgentStatus: command === "close" ? "closed" : nextStatus, errorReason: null,
       resultEvidenceDigest: command === "withdraw" ? null : `0x${"45".repeat(32)}`,
       ownerActions: command === "withdraw" ? [{
         chain_id: 4663, from: embedded, to: readiness.robinhoodVaultAddress,
         data: `0x142834dd${"0".repeat(63)}1`, value: "0",
+      }] : closeNeedsRevocation ? [{
+        chain_id: 4663, from: embedded, to: readiness.robinhoodVaultAddress,
+        data: "0x51755334", value: "0",
       }] : [],
-      completedAt: command === "withdraw" || command === "pause" ? null : liveAgent.updatedAt,
+      completedAt: command === "withdraw" || closeNeedsRevocation || command === "pause" ? null : liveAgent.updatedAt,
       createdAt: liveAgent.createdAt, updatedAt: liveAgent.updatedAt,
     };
-    return json(route, state.command, command === "withdraw" ? 202 : 200);
+    return json(route, state.command, command === "withdraw" || closeNeedsRevocation ? 202 : 200);
   }
   if (path.endsWith("/commands/pending") && request.method() === "GET") {
     const active = state.command
@@ -319,6 +378,21 @@ async function respond(route: Route, withVault: boolean, state: MockState) {
         status: "completed",
         agentStatus: "paused",
         targetAgentStatus: "paused",
+        completedAt: liveAgent.updatedAt,
+      };
+    }
+    if (
+      state.closeReconciled
+      && state.lighterRevocationStatus === "revoked"
+      && state.command.command === "close"
+    ) {
+      state.agent = { ...liveAgent, status: "closed" };
+      state.command = {
+        ...state.command,
+        status: "completed",
+        agentStatus: "closed",
+        targetAgentStatus: "closed",
+        ownerActions: [],
         completedAt: liveAgent.updatedAt,
       };
     }
@@ -345,6 +419,23 @@ async function respond(route: Route, withVault: boolean, state: MockState) {
   }
   if (path.endsWith("/me")) return json(route, me(withVault));
   return json(route, { error: "not_found", message: `No mock for ${path}` }, 404);
+}
+
+function lighterRevocation(status: "pending" | "revoked") {
+  return {
+    revocationId: "lighter-revocation",
+    executionAccountId: "execution-account-id",
+    ownerAddress: embedded,
+    accountIndex: 42,
+    apiKeyIndex: 254,
+    tombstonePublicKey: `0x${"98".repeat(40)}`,
+    status,
+    messageToSign: status === "pending" ? "Revoke Lighter execution key\nfixture" : null,
+    transactionHash: status === "revoked" ? `0x${"76".repeat(32)}` : null,
+    registeredPublicKey: status === "revoked" ? "98".repeat(40) : null,
+    createdAt: liveAgent.createdAt,
+    updatedAt: liveAgent.updatedAt,
+  };
 }
 
 function json(route: Route, body: unknown, status = 200) {

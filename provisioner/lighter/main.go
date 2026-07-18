@@ -34,7 +34,7 @@ func run() error {
 	if value.Enabled {
 		startup, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		store, err = openStore(startup, value.DatabaseURL)
+		store, err = openStore(startup, value.DatabaseURL, value.RunMigrations)
 		if err != nil {
 			return err
 		}
@@ -65,6 +65,7 @@ func run() error {
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      20 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 	result := make(chan error, 1)
 	go func() { result <- httpServer.ListenAndServe() }()

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
+	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -36,7 +36,7 @@ func run() error {
 	if configuration.Enabled {
 		startup, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		store, err = openStore(startup, configuration.DatabaseURL)
+		store, err = openStore(startup, configuration.DatabaseURL, configuration.RunMigrations)
 		if err != nil {
 			return err
 		}
@@ -64,8 +64,11 @@ func run() error {
 		state.service = &service{
 			config: configuration,
 			store:  store,
-			keys:   &keyProvisioner{client: awskms.NewFromConfig(aws), aliasPrefix: configuration.KMSAliasPrefix},
-			chain:  chain,
+			keys: &keyProvisioner{
+				client:      awslambda.NewFromConfig(aws),
+				functionARN: configuration.KMSControlPlaneARN,
+			},
+			chain: chain,
 		}
 	}
 	server := &http.Server{

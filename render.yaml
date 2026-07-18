@@ -1,1276 +1,1458 @@
-envVarGroups:
-  - name: robin-lighter-provisioner-auth
-    envVars:
-      - key: LIGHTER_PROVISIONER_HMAC_KEY
-        sync: false
-  - name: robin-readiness-publisher-auth
-    envVars:
-      - key: READINESS_HMAC_KEY
-        sync: false
-  - name: robin-lighter-signer-auth
-    envVars:
-      - key: LIGHTER_SIGNER_HMAC_KEY
-        sync: false
-  - name: robin-lighter-signer-bridge-auth
-    envVars:
-      - key: LIGHTER_SIGNER_BRIDGE_HMAC_KEY
-        sync: false
-  - name: robin-lighter-publisher-bridge-auth
-    envVars:
-      - key: LIGHTER_PUBLISHER_BRIDGE_HMAC_KEY
-        sync: false
-  - name: robin-lighter-market-config
-    envVars:
-      - key: LIGHTER_AAPL_MARKET_INDEX
-        sync: false
-  - name: robin-aapl-strategy-policy
-    envVars:
-      - key: AAPL_MINIMUM_NET_EDGE_PPM
-        sync: false
-  - name: robin-coordinator-episode-auth
-    envVars:
-      - key: COORDINATOR_EPISODE_HMAC_KEY
-        sync: false
-  - name: robin-quote-authority-exit-auth
-    envVars:
-      - key: ROBIN_QUOTE_AUTHORITY_EXIT_HMAC_KEY
-        sync: false
-  - name: robin-quote-authority-robinhood-rpc
-    envVars:
-      - key: ROBINHOOD_RPC_URL
-        sync: false
-      - key: ROBINHOOD_RECONCILIATION_RPC_URL
-        sync: false
-  - name: robin-lighter-market-spec
-    envVars:
-      - key: LIGHTER_AAPL_BASE_DECIMALS
-        sync: false
-      - key: LIGHTER_AAPL_PRICE_DECIMALS
-        sync: false
-  - name: robin-aapl-reference-feed-config
-    envVars:
-      - key: AAPL_REFERENCE_FEED
-        sync: false
-      - key: AAPL_REFERENCE_FEED_CODE_HASH
-        sync: false
-      - key: AAPL_SOURCE_FEED_CODE_HASH
-        sync: false
-      - key: AAPL_REFERENCE_FEED_DECIMALS
-        sync: false
-      - key: AAPL_REFERENCE_FEED_HEARTBEAT_SECONDS
-        sync: false
-  - name: robin-robinhood-signer-auth
-    envVars:
-      - key: ROBINHOOD_SIGNER_HMAC_KEY
-        sync: false
-  - name: robin-robinhood-provisioner-auth
-    envVars:
-      - key: ROBINHOOD_PROVISIONER_HMAC_KEY
-        sync: false
-  - name: robin-robinhood-signer-bridge-auth
-    envVars:
-      - key: ROBINHOOD_SIGNER_BRIDGE_HMAC_KEY
-        sync: false
-  - name: robin-coordinator-intent-auth
-    envVars:
-      - key: COORDINATOR_INTENT_HMAC_KEY
-        sync: false
-  - name: robin-coordinator-exit-auth
-    envVars:
-      - key: COORDINATOR_EXIT_HMAC_KEY
-        sync: false
-  - name: robin-coordinator-venue-auth
-    envVars:
-      - key: COORDINATOR_VENUE_HMAC_KEY
-        sync: false
-  - name: robin-coordinator-market-auth
-    envVars:
-      - key: COORDINATOR_MARKET_HMAC_KEY
-        sync: false
-  - name: robin-coordinator-account-auth
-    envVars:
-      - key: COORDINATOR_ACCOUNT_HMAC_KEY
-        sync: false
-  - name: robin-coordinator-control-auth
-    envVars:
-      - key: COORDINATOR_CONTROL_HMAC_KEY
-        sync: false
-  - name: robin-coordinator-registration-auth
-    envVars:
-      - key: COORDINATOR_REGISTRATION_HMAC_KEY
-        sync: false
-  - name: robin-quote-authority-request-auth
-    envVars:
-      - key: ROBIN_QUOTE_AUTHORITY_HMAC_KEY
-        sync: false
-  - name: robin-strategy-runner-request-auth
-    envVars:
-      - key: ROBIN_STRATEGY_RUNNER_HMAC_KEY
-        sync: false
-  - name: robin-quote-authority-public-key
-    envVars:
-      - key: ROBIN_QUOTE_AUTHORITY_ED25519_PUBLIC_KEY
-        sync: false
-  - name: robin-sequencer-feed-config
-    envVars:
-      - key: SEQUENCER_FEED_ADDRESS
-        sync: false
-      - key: SEQUENCER_FEED_CODE_HASH
-        sync: false
-
-services:
-  - type: web
-    name: robintheclaw
-    runtime: node
-    plan: starter
-    region: virginia
-    buildCommand: cd web && npm ci && npm run build
-    startCommand: cd web && npm run start
-    healthCheckPath: /
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    renderSubdomainPolicy: disabled
-    domains:
-      - robintheclaw.com
-    previews:
-      generation: automatic
-    buildFilter:
-      paths:
-        - web/**
-        - docs/**
-        - render.yaml
-    envVars:
-      - key: APP_API_BASE_URL
-        fromService:
-          type: pserv
-          name: robin-api
-          property: hostport
-      - key: NEXT_PUBLIC_PRIVY_APP_ID
-        sync: false
-      - key: PRIVY_VERIFICATION_KEY
-        sync: false
-
-  - type: pserv
-    name: robin-api
-    runtime: rust
-    plan: starter
-    region: virginia
-    buildCommand: cargo build --locked --release --manifest-path app/Cargo.toml --bin app
-    startCommand: ./app/target/release/app
-    healthCheckPath: /health
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - app/**
-        - contracts/**
-        - config/**
-        - render.yaml
-    envVars:
-      - key: HOST
-        value: 0.0.0.0
-      - key: RUST_LOG
-        value: info
-      - key: DATABASE_URL
-        fromDatabase:
-          name: robin-app
-          property: connectionString
-      - key: APP_CHAIN_ID
-        value: "4663"
-      - key: AGENT_STRATEGY_VERSION
-        value: basis-aapl-v1
-      - key: LIGHTER_PROVISIONER_URL
-        fromService:
-          name: robin-lighter-provisioner
-          type: pserv
-          property: hostport
-      - key: LIGHTER_PROVISIONER_CALLER_ID
-        value: robin-api
-      - key: LIGHTER_API_KEY_INDEX
-        value: "254"
-      - fromGroup: robin-lighter-provisioner-auth
-      - fromGroup: robin-readiness-publisher-auth
-      - fromGroup: robin-coordinator-control-auth
-      - fromGroup: robin-coordinator-registration-auth
-      - fromGroup: robin-robinhood-provisioner-auth
-      - key: READINESS_CALLER_ID
-        value: readiness-publisher
-      - key: COORDINATOR_COMMAND_URL
-        fromService:
-          name: robin-execution-coordinator
-          type: pserv
-          property: hostport
-      - key: COORDINATOR_COMMAND_CALLER_ID
-        value: product-command-worker
-      - key: COMMAND_WORKER_ID
-        value: product-command-worker-1
-      - key: COORDINATOR_REGISTRATION_URL
-        fromService:
-          name: robin-execution-coordinator
-          type: pserv
-          property: hostport
-      - key: COORDINATOR_REGISTRATION_CALLER_ID
-        value: product-account-provisioner
-      - key: REGISTRATION_WORKER_ID
-        value: product-account-registration-1
-      - key: ROBINHOOD_PROVISIONER_URL
-        fromService:
-          name: robin-robinhood-provisioner
-          type: pserv
-          property: hostport
-      - key: ROBINHOOD_PROVISIONER_CALLER_ID
-        value: robin-api
-      - key: APP_RPC_URL
-        sync: false
-      - key: PRODUCT_INDEXER_LOOKBACK_BLOCKS
-        value: "50000"
-      - key: PRODUCT_INDEXER_BLOCK_RANGE
-        value: "10000"
-      - key: PRIVY_APP_ID
-        sync: false
-      - key: PRIVY_APP_SECRET
-        sync: false
-      - key: PRIVY_VERIFICATION_KEY
-        sync: false
-      - key: RH_MAINNET_RPC
-        sync: false
-      - key: RH_RPC_FALLBACK
-        sync: false
-      - key: RH_CHAIN_ID
-        value: "4663"
-      - key: VAULT_ADDRESS
-        sync: false
-      - key: ANCHOR_ADDRESS
-        sync: false
-      - key: GUARD_ADDRESS
-        sync: false
-      - key: EVM_ENABLED
-        value: "true"
-      - key: GEO_BLOCKING_ENABLED
-        value: "false"
-      - key: CORS_ORIGINS
-        value: https://robintheclaw.com
-
-  - type: worker
-    name: robin-research-collector
-    runtime: rust
-    plan: standard
-    region: virginia
-    buildCommand: cargo build --locked --release --manifest-path runtime/Cargo.toml --bin collector
-    startCommand: ./runtime/target/release/collector
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 120
-    buildFilter:
-      paths:
-        - runtime/**
-        - config/**
-        - render.yaml
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: robin-research
-          property: connectionPoolString
-      - key: DATABASE_MIGRATIONS_URL
-        fromDatabase:
-          name: robin-research
-          property: connectionString
-      - key: RUNTIME_CONFIG
-        value: config/addresses.json
-      - key: RUNTIME_UNIVERSE
-        value: AAPL
-      - key: ROBINHOOD_RPC_URL
-        sync: false
-      - key: RUST_LOG
-        value: info
-      - key: R2_BUCKET
-        sync: false
-      - key: AWS_ENDPOINT_URL
-        sync: false
-      - key: AWS_ACCESS_KEY_ID
-        sync: false
-      - key: AWS_SECRET_ACCESS_KEY
-        sync: false
-      - key: AWS_SESSION_TOKEN
-        sync: false
-      - key: AWS_REGION
-        value: auto
-
-  - type: worker
-    name: robin-paper-agent
-    runtime: rust
-    plan: standard
-    region: virginia
-    buildCommand: cargo build --locked --release --manifest-path runtime/Cargo.toml --bin paper_agent
-    startCommand: PAPER_MINIMUM_NET_EDGE_PPM=$AAPL_MINIMUM_NET_EDGE_PPM ./runtime/target/release/paper_agent
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 120
-    buildFilter:
-      paths:
-        - runtime/**
-        - config/**
-        - render.yaml
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: robin-research
-          property: connectionPoolString
-      - key: DATABASE_MIGRATIONS_URL
-        fromDatabase:
-          name: robin-research
-          property: connectionString
-      - key: PAPER_AGENT_CONFIG
-        value: runtime/config/mainnet-paper.json
-      - key: AGENT_DATABASE_URL
-        fromDatabase:
-          name: robin-app
-          property: connectionString
-      - fromGroup: robin-aapl-strategy-policy
-      - key: ROBINHOOD_RPC_URL
-        sync: false
-      - key: RUST_LOG
-        value: info
-
-  - type: pserv
-    name: robin-execution-coordinator
-    runtime: rust
-    plan: starter
-    region: virginia
-    buildCommand: cargo build --locked --release --manifest-path coordinator/Cargo.toml
-    preDeployCommand: bash scripts/migrate-execution.sh "$DATABASE_MIGRATIONS_URL"
-    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./coordinator/target/release/coordinator
-    healthCheckPath: /livez
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - coordinator/**
-        - execution/**
-        - research/**
-        - runtime/live-evaluation/migrations/**
-        - runtime/live-scheduler/migrations/**
-        - scripts/migrate-execution.sh
-        - render.yaml
-    envVars:
-      - key: COORDINATOR_ENABLED
-        value: "true"
-      - key: DATABASE_URL
-        fromDatabase:
-          name: robin-execution
-          property: connectionPoolString
-      - key: DATABASE_MIGRATIONS_URL
-        fromDatabase:
-          name: robin-execution
-          property: connectionString
-      - fromGroup: robin-coordinator-intent-auth
-      - fromGroup: robin-coordinator-exit-auth
-      - fromGroup: robin-coordinator-venue-auth
-      - fromGroup: robin-coordinator-market-auth
-      - fromGroup: robin-coordinator-account-auth
-      - fromGroup: robin-coordinator-control-auth
-      - fromGroup: robin-coordinator-registration-auth
-      - fromGroup: robin-coordinator-episode-auth
-      - key: INTENT_CALLER_ID
-        value: strategy-runner
-      - key: EXIT_CALLER_ID
-        value: strategy-runner-exit
-      - key: VENUE_EVENT_CALLER_ID
-        value: runtime-collector
-      - key: MARKET_QUOTE_CALLER_ID
-        value: quote-authority-market
-      - key: OPEN_EPISODE_CALLER_ID
-        value: quote-authority-resolver
-      - key: ACCOUNT_SNAPSHOT_CALLER_ID
-        value: account-publisher
-      - key: CONTROL_CALLER_ID
-        value: product-command-worker
-      - key: REGISTRATION_CALLER_ID
-        value: product-account-provisioner
-      - key: COORDINATOR_WORKER_ID
-        value: coordinator-1
-      - key: SIGNER_CALLER_ID
-        value: execution-coordinator
-      - fromGroup: robin-lighter-signer-auth
-      - fromGroup: robin-robinhood-signer-auth
-      - key: LIGHTER_API_URL
-        value: https://mainnet.zklighter.elliot.ai
-      - key: LIGHTER_SIGNER_HOSTPORT
-        fromService:
-          name: robin-lighter-signer
-          type: pserv
-          property: hostport
-      - key: ROBINHOOD_SIGNER_HOSTPORT
-        fromService:
-          name: robin-robinhood-signer
-          type: pserv
-          property: hostport
-      - key: RUST_LOG
-        value: info
-
-  - type: pserv
-    name: robin-account-publisher
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/account-publisher ./cmd/account-publisher
-    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ACCOUNT_PUBLISHER_COORDINATOR_HMAC_KEY=$COORDINATOR_ACCOUNT_HMAC_KEY ACCOUNT_PUBLISHER_APPLICATION_HMAC_KEY=$READINESS_HMAC_KEY ACCOUNT_PUBLISHER_LIGHTER_MARKET_ID=$LIGHTER_AAPL_MARKET_INDEX ./publisher/bin/account-publisher
-    healthCheckPath: /healthz
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - publisher/**
-        - render.yaml
-    envVars:
-      - key: ACCOUNT_PUBLISHER_ENABLED
-        value: "true"
-      - key: ACCOUNT_PUBLISHER_ENVIRONMENT
-        value: mainnet
-      - key: GO_VERSION
-        value: "1.24.5"
-      - key: ACCOUNT_PUBLISHER_COORDINATOR_DATABASE_URL
-        sync: false
-      - key: ACCOUNT_PUBLISHER_ROBINHOOD_DATABASE_URL
-        sync: false
-      - key: ACCOUNT_PUBLISHER_ROBINHOOD_JOURNAL_DATABASE_URL
-        sync: false
-      - key: ACCOUNT_PUBLISHER_PRIMARY_RPC_URL
-        sync: false
-      - key: ACCOUNT_PUBLISHER_SECONDARY_RPC_URL
-        sync: false
-      - key: ACCOUNT_PUBLISHER_MINIMUM_COLLATERAL_RAW
-        sync: false
-      - key: ACCOUNT_PUBLISHER_MINIMUM_SETTLEMENT_RAW
-        sync: false
-      - key: ACCOUNT_PUBLISHER_MINIMUM_OWNER_GAS_RAW
-        sync: false
-      - key: ACCOUNT_PUBLISHER_MINIMUM_SIGNER_GAS_RAW
-        sync: false
-      - key: ACCOUNT_PUBLISHER_POLL_MILLISECONDS
-        value: "4500"
-      - key: ACCOUNT_PUBLISHER_LIGHTER_BRIDGE_URL
-        fromService:
-          name: robin-lighter-provisioner
-          type: pserv
-          property: hostport
-      - key: LIGHTER_PUBLISHER_BRIDGE_CALLER_ID
-        value: account-publisher
-      - fromGroup: robin-lighter-publisher-bridge-auth
-      - fromGroup: robin-lighter-market-config
-      - key: ACCOUNT_PUBLISHER_COORDINATOR_URL
-        fromService:
-          name: robin-execution-coordinator
-          type: pserv
-          property: hostport
-      - key: ACCOUNT_PUBLISHER_COORDINATOR_CALLER_ID
-        value: account-publisher
-      - fromGroup: robin-coordinator-account-auth
-      - key: ACCOUNT_PUBLISHER_APPLICATION_URL
-        fromService:
-          name: robin-api
-          type: pserv
-          property: hostport
-      - key: ACCOUNT_PUBLISHER_APPLICATION_CALLER_ID
-        value: readiness-publisher
-      - fromGroup: robin-readiness-publisher-auth
-
-  - type: pserv
-    name: robin-quote-authority
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd liveexec && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/quote-authority ./cmd/quote-authority
-    startCommand: ROBIN_QUOTE_AUTHORITY_LISTEN=0.0.0.0:$PORT ROBIN_COORDINATOR_URL=http://$ROBIN_COORDINATOR_HOSTPORT ROBIN_COORDINATOR_MARKET_HMAC_KEY=$COORDINATOR_MARKET_HMAC_KEY ROBIN_COORDINATOR_EPISODE_HMAC_KEY=$COORDINATOR_EPISODE_HMAC_KEY ROBIN_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ./liveexec/bin/quote-authority
-    healthCheckPath: /health
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - liveexec/**
-        - config/**
-        - render.yaml
-    envVars:
-      - key: ROBIN_QUOTE_AUTHORITY_ENABLED
-        value: "true"
-      - key: GO_VERSION
-        value: "1.24.5"
-      - key: ROBIN_QUOTE_AUTHORITY_CALLER
-        value: live-scheduler-quote
-      - fromGroup: robin-quote-authority-request-auth
-      - fromGroup: robin-quote-authority-exit-auth
-      - key: ROBIN_QUOTE_AUTHORITY_EXIT_CALLER
-        value: exit-quote-publisher
-      - key: ROBIN_QUOTE_AUTHORITY_ED25519_PRIVATE_KEY
-        sync: false
-      - fromGroup: robin-lighter-market-config
-      - fromGroup: robin-coordinator-market-auth
-      - fromGroup: robin-coordinator-episode-auth
-      - fromGroup: robin-quote-authority-robinhood-rpc
-      - fromGroup: robin-lighter-market-spec
-      - fromGroup: robin-aapl-reference-feed-config
-      - key: LIGHTER_API_URL
-        value: https://mainnet.zklighter.elliot.ai
-      - key: ROBIN_COORDINATOR_EPISODE_CALLER
-        value: quote-authority-resolver
-      - key: ROBIN_COORDINATOR_HOSTPORT
-        fromService:
-          name: robin-execution-coordinator
-          type: pserv
-          property: hostport
-      - key: ROBIN_COORDINATOR_MARKET_CALLER
-        value: quote-authority-market
-
-  - type: pserv
-    name: robin-strategy-runner
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd liveexec && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/strategy-runner ./cmd/strategy-runner
-    startCommand: ROBIN_STRATEGY_RUNNER_LISTEN=0.0.0.0:$PORT ROBIN_COORDINATOR_URL=http://$ROBIN_COORDINATOR_HOSTPORT ROBIN_COORDINATOR_INTENT_HMAC_KEY=$COORDINATOR_INTENT_HMAC_KEY ROBIN_COORDINATOR_EXIT_HMAC_KEY=$COORDINATOR_EXIT_HMAC_KEY ROBIN_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ./liveexec/bin/strategy-runner
-    healthCheckPath: /health
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - liveexec/**
-        - config/**
-        - render.yaml
-    envVars:
-      - key: ROBIN_STRATEGY_RUNNER_ENABLED
-        value: "true"
-      - key: GO_VERSION
-        value: "1.24.5"
-      - key: ROBIN_STRATEGY_RUNNER_CALLER
-        value: live-scheduler-runner
-      - fromGroup: robin-strategy-runner-request-auth
-      - fromGroup: robin-quote-authority-public-key
-      - fromGroup: robin-lighter-market-config
-      - fromGroup: robin-coordinator-intent-auth
-      - fromGroup: robin-coordinator-exit-auth
-      - key: ROBIN_COORDINATOR_HOSTPORT
-        fromService:
-          name: robin-execution-coordinator
-          type: pserv
-          property: hostport
-      - key: ROBIN_COORDINATOR_INTENT_CALLER
-        value: strategy-runner
-      - key: ROBIN_COORDINATOR_EXIT_CALLER
-        value: strategy-runner-exit
-
-  - type: worker
-    name: robin-exit-quote-publisher
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd runtime/exit-quote-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/exit-quote-publisher ./cmd/exit-quote-publisher
-    startCommand: ROBIN_QUOTE_AUTHORITY_URL=http://$ROBIN_QUOTE_AUTHORITY_HOSTPORT ROBIN_EXIT_QUOTE_PUBLISHER_HMAC_KEY=$ROBIN_QUOTE_AUTHORITY_EXIT_HMAC_KEY ROBIN_EXIT_QUOTE_PUBLISHER_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ./runtime/exit-quote-publisher/bin/exit-quote-publisher
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - runtime/exit-quote-publisher/**
-        - liveexec/**
-        - coordinator/migrations/**
-        - render.yaml
-    envVars:
-      - key: ROBIN_EXIT_QUOTE_PUBLISHER_ENABLED
-        value: "true"
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: ROBIN_EXIT_QUOTE_PUBLISHER_DATABASE_URL
-        fromDatabase:
-          name: robin-execution
-          property: connectionString
-      - key: ROBIN_EXIT_QUOTE_PUBLISHER_WORKER_ID
-        value: exit-quote-publisher-1
-      - key: ROBIN_EXIT_QUOTE_PUBLISHER_CALLER
-        value: exit-quote-publisher
-      - key: ROBIN_QUOTE_AUTHORITY_HOSTPORT
-        fromService:
-          name: robin-quote-authority
-          type: pserv
-          property: hostport
-      - fromGroup: robin-quote-authority-exit-auth
-      - fromGroup: robin-quote-authority-public-key
-      - fromGroup: robin-lighter-market-config
-
-  - type: worker
-    name: robin-live-scheduler
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd runtime/live-scheduler && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/live-scheduler ./cmd/live-scheduler
-    startCommand: ROBIN_QUOTE_AUTHORITY_URL=http://$ROBIN_QUOTE_AUTHORITY_HOSTPORT ROBIN_STRATEGY_RUNNER_URL=http://$ROBIN_STRATEGY_RUNNER_HOSTPORT ROBIN_LIVE_SCHEDULER_QUOTE_HMAC_KEY=$ROBIN_QUOTE_AUTHORITY_HMAC_KEY ROBIN_LIVE_SCHEDULER_RUNNER_HMAC_KEY=$ROBIN_STRATEGY_RUNNER_HMAC_KEY ROBIN_LIVE_SCHEDULER_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ./runtime/live-scheduler/bin/live-scheduler
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - runtime/live-scheduler/**
-        - coordinator/migrations/**
-        - config/**
-        - render.yaml
-    envVars:
-      - key: ROBIN_LIVE_SCHEDULER_ENABLED
-        value: "true"
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: ROBIN_LIVE_SCHEDULER_DATABASE_URL
-        fromDatabase:
-          name: robin-execution
-          property: connectionString
-      - key: ROBIN_LIVE_SCHEDULER_WORKER_ID
-        value: live-scheduler-1
-      - key: ROBIN_QUOTE_AUTHORITY_HOSTPORT
-        fromService:
-          name: robin-quote-authority
-          type: pserv
-          property: hostport
-      - key: ROBIN_LIVE_SCHEDULER_QUOTE_CALLER
-        value: live-scheduler-quote
-      - fromGroup: robin-quote-authority-request-auth
-      - fromGroup: robin-quote-authority-public-key
-      - fromGroup: robin-lighter-market-config
-      - key: ROBIN_STRATEGY_RUNNER_HOSTPORT
-        fromService:
-          name: robin-strategy-runner
-          type: pserv
-          property: hostport
-      - key: ROBIN_LIVE_SCHEDULER_RUNNER_CALLER
-        value: live-scheduler-runner
-      - fromGroup: robin-strategy-runner-request-auth
-
-  - type: worker
-    name: robin-live-evaluation
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd runtime/live-evaluation && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/live-evaluation ./cmd/live-evaluation
-    startCommand: ROBIN_LIVE_EVALUATION_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ROBIN_LIVE_EVALUATION_LIGHTER_AAPL_BASE_DECIMALS=$LIGHTER_AAPL_BASE_DECIMALS ROBIN_LIVE_EVALUATION_LIGHTER_AAPL_PRICE_DECIMALS=$LIGHTER_AAPL_PRICE_DECIMALS ./runtime/live-evaluation/bin/live-evaluation
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - runtime/live-evaluation/**
-        - runtime/live-scheduler/**
-        - coordinator/migrations/**
-        - render.yaml
-    envVars:
-      - key: ROBIN_LIVE_EVALUATION_ENABLED
-        value: "true"
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: ROBIN_LIVE_EVALUATION_RESEARCH_DATABASE_URL
-        fromDatabase:
-          name: robin-research
-          property: connectionString
-      - key: ROBIN_LIVE_EVALUATION_PRODUCT_DATABASE_URL
-        fromDatabase:
-          name: robin-app
-          property: connectionString
-      - key: ROBIN_LIVE_EVALUATION_EXECUTION_DATABASE_URL
-        fromDatabase:
-          name: robin-execution
-          property: connectionString
-      - key: ROBIN_LIVE_EVALUATION_WORKER_ID
-        value: live-evaluation-1
-      - key: ROBIN_LIVE_EVALUATION_POLL_MILLISECONDS
-        value: "250"
-      - fromGroup: robin-aapl-strategy-policy
-      - fromGroup: robin-lighter-market-config
-      - fromGroup: robin-lighter-market-spec
-      - key: ROBIN_LIVE_EVALUATION_SPOT_CONFIG_VERSION
-        sync: false
-      - key: ROBIN_LIVE_EVALUATION_UI_MULTIPLIER_E18
-        sync: false
-      - key: ROBIN_LIVE_EVALUATION_MAX_PRICE_DEVIATION_BPS
-        sync: false
-      - key: ROBIN_LIVE_EVALUATION_MAX_UNWIND_PRICE_DEVIATION_BPS
-        sync: false
-      - key: ROBIN_LIVE_EVALUATION_MARKET_VALID_FROM
-        sync: false
-      - key: ROBIN_LIVE_EVALUATION_MARKET_VALID_UNTIL
-        sync: false
-
-  - type: worker
-    name: robin-sequencer-publisher-1
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/sequencer-publisher ./cmd/sequencer-publisher
-    startCommand: ./runtime/sequencer-publisher/bin/sequencer-publisher
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - runtime/sequencer-publisher/**
-        - contracts/src/QuorumSequencerFeed.sol
-        - render.yaml
-    envVars:
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: SEQUENCER_PUBLISHER_ID
-        value: sequencer-publisher-1
-      - key: SEQUENCER_DATABASE_URL
-        fromDatabase:
-          name: robin-execution
-          property: connectionString
-      - fromGroup: robin-sequencer-feed-config
-      - key: SEQUENCER_SOURCE_RPC_URL
-        sync: false
-      - key: SEQUENCER_TRANSACTION_RPC_URL
-        sync: false
-      - key: SEQUENCER_PUBLISHER_PRIVATE_KEY
-        sync: false
-      - key: SEQUENCER_PUBLISH_INTERVAL
-        value: 15s
-      - key: SEQUENCER_REQUEST_TIMEOUT
-        value: 10s
-      - key: SEQUENCER_LATEST_MAX_AGE
-        value: 30s
-      - key: SEQUENCER_FINALIZED_MAX_AGE
-        value: 2m
-      - key: SEQUENCER_MAX_FINALIZED_LAG
-        value: "128"
-      - key: SEQUENCER_MAX_GAS_LIMIT
-        value: "150000"
-      - key: SEQUENCER_MAX_PRIORITY_FEE_WEI
-        value: "100000000"
-      - key: SEQUENCER_MAX_FEE_PER_GAS_WEI
-        value: "10000000000"
-      - key: SEQUENCER_MAX_TRANSACTION_COST_WEI
-        value: "1500000000000000"
-      - key: SEQUENCER_MINIMUM_GAS_RESERVE_WEI
-        value: "2000000000000000"
-
-  - type: worker
-    name: robin-sequencer-publisher-2
-    runtime: go
-    plan: starter
-    region: ohio
-    buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/sequencer-publisher ./cmd/sequencer-publisher
-    startCommand: ./runtime/sequencer-publisher/bin/sequencer-publisher
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - runtime/sequencer-publisher/**
-        - contracts/src/QuorumSequencerFeed.sol
-        - render.yaml
-    envVars:
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: SEQUENCER_PUBLISHER_ID
-        value: sequencer-publisher-2
-      - key: SEQUENCER_DATABASE_URL
-        fromDatabase:
-          name: robin-execution
-          property: connectionString
-      - fromGroup: robin-sequencer-feed-config
-      - key: SEQUENCER_SOURCE_RPC_URL
-        sync: false
-      - key: SEQUENCER_TRANSACTION_RPC_URL
-        sync: false
-      - key: SEQUENCER_PUBLISHER_PRIVATE_KEY
-        sync: false
-      - key: SEQUENCER_PUBLISH_INTERVAL
-        value: 15s
-      - key: SEQUENCER_REQUEST_TIMEOUT
-        value: 10s
-      - key: SEQUENCER_LATEST_MAX_AGE
-        value: 30s
-      - key: SEQUENCER_FINALIZED_MAX_AGE
-        value: 2m
-      - key: SEQUENCER_MAX_FINALIZED_LAG
-        value: "128"
-      - key: SEQUENCER_MAX_GAS_LIMIT
-        value: "150000"
-      - key: SEQUENCER_MAX_PRIORITY_FEE_WEI
-        value: "100000000"
-      - key: SEQUENCER_MAX_FEE_PER_GAS_WEI
-        value: "10000000000"
-      - key: SEQUENCER_MAX_TRANSACTION_COST_WEI
-        value: "1500000000000000"
-      - key: SEQUENCER_MINIMUM_GAS_RESERVE_WEI
-        value: "2000000000000000"
-
-  - type: worker
-    name: robin-sequencer-publisher-3
-    runtime: go
-    plan: starter
-    region: oregon
-    buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/sequencer-publisher ./cmd/sequencer-publisher
-    startCommand: ./runtime/sequencer-publisher/bin/sequencer-publisher
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - runtime/sequencer-publisher/**
-        - contracts/src/QuorumSequencerFeed.sol
-        - render.yaml
-    envVars:
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: SEQUENCER_PUBLISHER_ID
-        value: sequencer-publisher-3
-      - key: SEQUENCER_DATABASE_URL
-        fromDatabase:
-          name: robin-execution
-          property: connectionString
-      - fromGroup: robin-sequencer-feed-config
-      - key: SEQUENCER_SOURCE_RPC_URL
-        sync: false
-      - key: SEQUENCER_TRANSACTION_RPC_URL
-        sync: false
-      - key: SEQUENCER_PUBLISHER_PRIVATE_KEY
-        sync: false
-      - key: SEQUENCER_PUBLISH_INTERVAL
-        value: 15s
-      - key: SEQUENCER_REQUEST_TIMEOUT
-        value: 10s
-      - key: SEQUENCER_LATEST_MAX_AGE
-        value: 30s
-      - key: SEQUENCER_FINALIZED_MAX_AGE
-        value: 2m
-      - key: SEQUENCER_MAX_FINALIZED_LAG
-        value: "128"
-      - key: SEQUENCER_MAX_GAS_LIMIT
-        value: "150000"
-      - key: SEQUENCER_MAX_PRIORITY_FEE_WEI
-        value: "100000000"
-      - key: SEQUENCER_MAX_FEE_PER_GAS_WEI
-        value: "10000000000"
-      - key: SEQUENCER_MAX_TRANSACTION_COST_WEI
-        value: "1500000000000000"
-      - key: SEQUENCER_MINIMUM_GAS_RESERVE_WEI
-        value: "2000000000000000"
-
-  - type: worker
-    name: robin-aapl-relay-1
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/aapl-relay ./cmd/aapl-relay
-    startCommand: ./runtime/sequencer-publisher/bin/aapl-relay
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - runtime/sequencer-publisher/aaplrelay/**
-        - runtime/sequencer-publisher/cmd/aapl-relay/**
-        - contracts/src/QuorumAaplReferenceFeed.sol
-        - contracts/src/interfaces/IQuorumAaplReferenceFeed.sol
-        - render.yaml
-    envVars:
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: AAPL_RELAY_PUBLISHER_ID
-        value: aapl-relay-1
-      - key: AAPL_RELAY_DATABASE_URL
-        fromDatabase:
-          name: robin-execution
-          property: connectionString
-      - fromGroup: robin-aapl-reference-feed-config
-      - key: AAPL_RELAY_ARBITRUM_RPC_1
-        sync: false
-      - key: AAPL_RELAY_ARBITRUM_RPC_2
-        sync: false
-      - key: AAPL_RELAY_ROBINHOOD_RPC
-        sync: false
-      - key: AAPL_RELAY_PUBLISHER_PRIVATE_KEY
-        sync: false
-      - key: AAPL_RELAY_INTERVAL
-        value: 15s
-      - key: AAPL_RELAY_REQUEST_TIMEOUT
-        value: 12s
-      - key: AAPL_RELAY_FINALIZED_MAX_AGE
-        value: 20m
-      - key: AAPL_RELAY_MAX_GAS_LIMIT
-        value: "180000"
-      - key: AAPL_RELAY_MAX_PRIORITY_FEE_WEI
-        value: "100000000"
-      - key: AAPL_RELAY_MAX_FEE_PER_GAS_WEI
-        value: "10000000000"
-      - key: AAPL_RELAY_MAX_TRANSACTION_COST_WEI
-        value: "1800000000000000"
-      - key: AAPL_RELAY_MINIMUM_GAS_RESERVE_WEI
-        value: "2000000000000000"
-
-  - type: worker
-    name: robin-aapl-relay-2
-    runtime: go
-    plan: starter
-    region: ohio
-    buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/aapl-relay ./cmd/aapl-relay
-    startCommand: ./runtime/sequencer-publisher/bin/aapl-relay
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - runtime/sequencer-publisher/aaplrelay/**
-        - runtime/sequencer-publisher/cmd/aapl-relay/**
-        - contracts/src/QuorumAaplReferenceFeed.sol
-        - contracts/src/interfaces/IQuorumAaplReferenceFeed.sol
-        - render.yaml
-    envVars:
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: AAPL_RELAY_PUBLISHER_ID
-        value: aapl-relay-2
-      - key: AAPL_RELAY_DATABASE_URL
-        fromDatabase:
-          name: robin-execution
-          property: connectionString
-      - fromGroup: robin-aapl-reference-feed-config
-      - key: AAPL_RELAY_ARBITRUM_RPC_1
-        sync: false
-      - key: AAPL_RELAY_ARBITRUM_RPC_2
-        sync: false
-      - key: AAPL_RELAY_ROBINHOOD_RPC
-        sync: false
-      - key: AAPL_RELAY_PUBLISHER_PRIVATE_KEY
-        sync: false
-      - key: AAPL_RELAY_INTERVAL
-        value: 15s
-      - key: AAPL_RELAY_REQUEST_TIMEOUT
-        value: 12s
-      - key: AAPL_RELAY_FINALIZED_MAX_AGE
-        value: 20m
-      - key: AAPL_RELAY_MAX_GAS_LIMIT
-        value: "180000"
-      - key: AAPL_RELAY_MAX_PRIORITY_FEE_WEI
-        value: "100000000"
-      - key: AAPL_RELAY_MAX_FEE_PER_GAS_WEI
-        value: "10000000000"
-      - key: AAPL_RELAY_MAX_TRANSACTION_COST_WEI
-        value: "1800000000000000"
-      - key: AAPL_RELAY_MINIMUM_GAS_RESERVE_WEI
-        value: "2000000000000000"
-
-  - type: worker
-    name: robin-aapl-relay-3
-    runtime: go
-    plan: starter
-    region: oregon
-    buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/aapl-relay ./cmd/aapl-relay
-    startCommand: ./runtime/sequencer-publisher/bin/aapl-relay
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - runtime/sequencer-publisher/aaplrelay/**
-        - runtime/sequencer-publisher/cmd/aapl-relay/**
-        - contracts/src/QuorumAaplReferenceFeed.sol
-        - contracts/src/interfaces/IQuorumAaplReferenceFeed.sol
-        - render.yaml
-    envVars:
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: AAPL_RELAY_PUBLISHER_ID
-        value: aapl-relay-3
-      - key: AAPL_RELAY_DATABASE_URL
-        fromDatabase:
-          name: robin-execution
-          property: connectionString
-      - fromGroup: robin-aapl-reference-feed-config
-      - key: AAPL_RELAY_ARBITRUM_RPC_1
-        sync: false
-      - key: AAPL_RELAY_ARBITRUM_RPC_2
-        sync: false
-      - key: AAPL_RELAY_ROBINHOOD_RPC
-        sync: false
-      - key: AAPL_RELAY_PUBLISHER_PRIVATE_KEY
-        sync: false
-      - key: AAPL_RELAY_INTERVAL
-        value: 15s
-      - key: AAPL_RELAY_REQUEST_TIMEOUT
-        value: 12s
-      - key: AAPL_RELAY_FINALIZED_MAX_AGE
-        value: 20m
-      - key: AAPL_RELAY_MAX_GAS_LIMIT
-        value: "180000"
-      - key: AAPL_RELAY_MAX_PRIORITY_FEE_WEI
-        value: "100000000"
-      - key: AAPL_RELAY_MAX_FEE_PER_GAS_WEI
-        value: "10000000000"
-      - key: AAPL_RELAY_MAX_TRANSACTION_COST_WEI
-        value: "1800000000000000"
-      - key: AAPL_RELAY_MINIMUM_GAS_RESERVE_WEI
-        value: "2000000000000000"
-
-  - type: pserv
-    name: robin-lighter-provisioner
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd provisioner/lighter && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/lighter-provisioner .
-    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT LIGHTER_PUBLISHER_MARKET_ID=$LIGHTER_AAPL_MARKET_INDEX ./provisioner/lighter/bin/lighter-provisioner
-    healthCheckPath: /livez
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - provisioner/lighter/**
-        - render.yaml
-    envVars:
-      - key: LIGHTER_PROVISIONER_ENABLED
-        value: "true"
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: LIGHTER_PROVISIONER_DATABASE_URL
-        fromDatabase:
-          name: robin-lighter-credentials
-          property: connectionString
-      - fromGroup: robin-lighter-provisioner-auth
-      - fromGroup: robin-lighter-signer-bridge-auth
-      - fromGroup: robin-lighter-publisher-bridge-auth
-      - fromGroup: robin-lighter-market-config
-      - key: PROVISIONER_CALLER_ID
-        value: robin-api
-      - key: LIGHTER_SIGNER_BRIDGE_CALLER_ID
-        value: lighter-signer
-      - key: LIGHTER_PUBLISHER_BRIDGE_CALLER_ID
-        value: account-publisher
-      - key: LIGHTER_API_URL
-        value: https://mainnet.zklighter.elliot.ai
-      - key: LIGHTER_CHAIN_ID
-        value: "304"
-      - fromGroup: robin-lighter-market-spec
-      - key: AWS_REGION
-        sync: false
-      - key: AWS_ACCESS_KEY_ID
-        sync: false
-      - key: AWS_SECRET_ACCESS_KEY
-        sync: false
-      - key: AWS_KMS_KEY_ID
-        sync: false
-
-  - type: pserv
-    name: robin-lighter-signer
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd signer/lighter && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/lighter-signer .
-    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./signer/lighter/bin/lighter-signer
-    healthCheckPath: /livez
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - signer/lighter/**
-        - render.yaml
-    envVars:
-      - key: LIGHTER_SIGNER_ENABLED
-        value: "true"
-      - key: GO_VERSION
-        value: "1.26.5"
-      - fromGroup: robin-lighter-signer-auth
-      - fromGroup: robin-lighter-signer-bridge-auth
-      - fromGroup: robin-lighter-market-config
-      - fromGroup: robin-lighter-market-spec
-      - key: SIGNER_CALLER_ID
-        value: execution-coordinator
-      - key: LIGHTER_PROVISIONER_URL
-        fromService:
-          name: robin-lighter-provisioner
-          type: pserv
-          property: hostport
-      - key: LIGHTER_SIGNER_BRIDGE_CALLER_ID
-        value: lighter-signer
-      - key: SIGNER_MAX_REQUESTS_PER_MINUTE
-        value: "60"
-      - key: SIGNER_MAX_CONCURRENT_REQUESTS
-        value: "4"
-
-  - type: pserv
-    name: robin-robinhood-provisioner
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd provisioner/robinhood && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/robinhood-provisioner .
-    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./provisioner/robinhood/bin/robinhood-provisioner
-    healthCheckPath: /livez
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - provisioner/robinhood/**
-        - contracts/**
-        - config/**
-        - render.yaml
-    envVars:
-      - key: ROBINHOOD_PROVISIONER_ENABLED
-        value: "true"
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: DATABASE_URL
-        fromDatabase:
-          name: robin-robinhood-custody
-          property: connectionString
-      - fromGroup: robin-robinhood-provisioner-auth
-      - fromGroup: robin-robinhood-signer-bridge-auth
-      - key: ROBINHOOD_PROVISIONER_CALLER_ID
-        value: robin-api
-      - key: ROBINHOOD_SIGNER_BRIDGE_CALLER_ID
-        value: robinhood-signer
-      - key: ROBINHOOD_RPC_URL
-        sync: false
-      - key: ROBINHOOD_RECONCILIATION_RPC_URL
-        sync: false
-      - key: ROBINHOOD_CHAIN_ID
-        value: "4663"
-      - key: ROBINHOOD_USER_VAULT_FACTORY
-        sync: false
-      - key: ROBINHOOD_EXECUTION_REGISTRY
-        sync: false
-      - key: ROBINHOOD_POLICY_DIGEST
-        sync: false
-      - key: ROBINHOOD_FACTORY_CODE_HASH
-        sync: false
-      - key: ROBINHOOD_REGISTRY_CODE_HASH
-        sync: false
-      - key: ROBINHOOD_USER_VAULT_CODE_HASH
-        sync: false
-      - key: ROBINHOOD_RISK_MANAGER_CODE_HASH
-        sync: false
-      - key: ROBINHOOD_SPOT_ADAPTER_CODE_HASH
-        sync: false
-      - key: ROBINHOOD_FINALITY_BLOCKS
-        value: "64"
-      - key: ROBINHOOD_KMS_ALIAS_PREFIX
-        value: alias/robinhood/execution/
-      - key: PROVISIONER_MAX_REQUESTS_PER_MINUTE
-        value: "60"
-      - key: AWS_REGION
-        sync: false
-      - key: AWS_ACCESS_KEY_ID
-        sync: false
-      - key: AWS_SECRET_ACCESS_KEY
-        sync: false
-
-  - type: pserv
-    name: robin-robinhood-signer
-    runtime: go
-    plan: starter
-    region: virginia
-    buildCommand: cd signer/robinhood && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/robinhood-signer .
-    preDeployCommand: bash scripts/migrate-robinhood-signer.sh "$DATABASE_URL"
-    startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./signer/robinhood/bin/robinhood-signer
-    healthCheckPath: /livez
-    autoDeployTrigger: checksPass
-    maxShutdownDelaySeconds: 30
-    buildFilter:
-      paths:
-        - signer/robinhood/**
-        - scripts/migrate-robinhood-signer.sh
-        - render.yaml
-    envVars:
-      - key: ROBINHOOD_SIGNER_ENABLED
-        value: "true"
-      - key: GO_VERSION
-        value: "1.26.5"
-      - key: DATABASE_URL
-        fromDatabase:
-          name: robin-robinhood-custody
-          property: connectionString
-      - fromGroup: robin-robinhood-signer-auth
-      - fromGroup: robin-robinhood-signer-bridge-auth
-      - key: SIGNER_CALLER_ID
-        value: execution-coordinator
-      - key: ROBINHOOD_PROVISIONER_URL
-        fromService:
-          name: robin-robinhood-provisioner
-          type: pserv
-          property: hostport
-      - key: ROBINHOOD_SIGNER_BRIDGE_CALLER_ID
-        value: robinhood-signer
-      - key: ROBINHOOD_RPC_URL
-        sync: false
-      - key: ROBINHOOD_RECONCILIATION_RPC_URL
-        sync: false
-      - key: ROBINHOOD_CHAIN_ID
-        value: "4663"
-      - key: AWS_REGION
-        sync: false
-      - key: AWS_ACCESS_KEY_ID
-        sync: false
-      - key: AWS_SECRET_ACCESS_KEY
-        sync: false
-      - key: ROBINHOOD_MAX_GAS_LIMIT
-        sync: false
-      - key: ROBINHOOD_MAX_PRIORITY_FEE_WEI
-        sync: false
-      - key: ROBINHOOD_MAX_FEE_PER_GAS_WEI
-        sync: false
-      - key: ROBINHOOD_MAX_TRANSACTION_COST_WEI
-        sync: false
-      - key: ROBINHOOD_MINIMUM_GAS_RESERVE_WEI
-        sync: false
-      - key: ROBINHOOD_MAX_REPLACEMENTS
-        sync: false
-      - key: ROBINHOOD_MAX_REPLACEMENT_AGE
-        sync: false
-      - key: SIGNER_MAX_REQUESTS_PER_MINUTE
-        sync: false
-      - key: SIGNER_MAX_CONCURRENT_REQUESTS
-        sync: false
-
-databases:
-  - name: robin-app
-    databaseName: robin_app
-    user: robin_app
-    plan: pro-4gb
-    diskSizeGB: 100
-    storageAutoscalingEnabled: true
-    postgresMajorVersion: "18"
-    region: virginia
-    highAvailability:
-      enabled: true
-    ipAllowList: []
-  - name: robin-research
-    databaseName: robin_research
-    user: robin_runtime
-    plan: pro-4gb
-    diskSizeGB: 100
-    storageAutoscalingEnabled: true
-    postgresMajorVersion: "18"
-    region: virginia
-    connectionPool: pgbouncer
-    highAvailability:
-      enabled: true
-    ipAllowList: []
-  - name: robin-lighter-credentials
-    databaseName: robin_lighter_credentials
-    user: robin_lighter_provisioner
-    plan: pro-4gb
-    diskSizeGB: 100
-    storageAutoscalingEnabled: true
-    postgresMajorVersion: "18"
-    region: virginia
-    highAvailability:
-      enabled: true
-    ipAllowList: []
-  - name: robin-execution
-    databaseName: robin_execution
-    user: robin_execution
-    plan: pro-4gb
-    diskSizeGB: 100
-    storageAutoscalingEnabled: true
-    postgresMajorVersion: "18"
-    region: virginia
-    connectionPool: pgbouncer
-    highAvailability:
-      enabled: true
-    ipAllowList: []
-  - name: robin-robinhood-custody
-    databaseName: robin_robinhood_custody
-    user: robin_robinhood_provisioner
-    plan: pro-4gb
-    diskSizeGB: 100
-    storageAutoscalingEnabled: true
-    postgresMajorVersion: "18"
-    region: virginia
-    highAvailability:
-      enabled: true
-    ipAllowList: []
-
 previews:
   generation: "off"
+
+projects:
+  - name: Robin the Claw
+    environments:
+      - name: Production
+        envVarGroups:
+          - name: robin-quote-authority-exit-auth
+            envVars:
+              - key: ROBIN_QUOTE_AUTHORITY_EXIT_HMAC_KEY
+                generateValue: true
+          - name: robin-quote-authority-request-auth
+            envVars:
+              - key: ROBIN_QUOTE_AUTHORITY_HMAC_KEY
+                generateValue: true
+          - name: robin-strategy-runner-request-auth
+            envVars:
+              - key: ROBIN_STRATEGY_RUNNER_HMAC_KEY
+                generateValue: true
+          - name: robin-db-app-api
+            envVars:
+              - key: ROBIN_APP_API_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-app-paper
+            envVars:
+              - key: ROBIN_APP_PAPER_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-app-readonly
+            envVars:
+              - key: ROBIN_APP_READONLY_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-research-collector
+            envVars:
+              - key: ROBIN_RESEARCH_COLLECTOR_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-research-paper
+            envVars:
+              - key: ROBIN_RESEARCH_PAPER_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-research-readonly
+            envVars:
+              - key: ROBIN_RESEARCH_READONLY_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-execution-coordinator
+            envVars:
+              - key: ROBIN_EXECUTION_COORDINATOR_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-execution-live-control
+            envVars:
+              - key: ROBIN_EXECUTION_LIVE_CONTROL_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-execution-sequencer-1
+            envVars:
+              - key: ROBIN_EXECUTION_SEQUENCER_1_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-execution-sequencer-2
+            envVars:
+              - key: ROBIN_EXECUTION_SEQUENCER_2_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-execution-sequencer-3
+            envVars:
+              - key: ROBIN_EXECUTION_SEQUENCER_3_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-execution-aapl-relay-1
+            envVars:
+              - key: ROBIN_EXECUTION_AAPL_RELAY_1_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-execution-aapl-relay-2
+            envVars:
+              - key: ROBIN_EXECUTION_AAPL_RELAY_2_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-execution-aapl-relay-3
+            envVars:
+              - key: ROBIN_EXECUTION_AAPL_RELAY_3_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-execution-readonly
+            envVars:
+              - key: ROBIN_EXECUTION_READONLY_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-lighter-provisioner
+            envVars:
+              - key: ROBIN_LIGHTER_PROVISIONER_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-lighter-readonly
+            envVars:
+              - key: ROBIN_LIGHTER_READONLY_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-custody-provisioner
+            envVars:
+              - key: ROBIN_CUSTODY_PROVISIONER_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-custody-signer
+            envVars:
+              - key: ROBIN_CUSTODY_SIGNER_DATABASE_PASSWORD
+                generateValue: true
+          - name: robin-db-custody-readonly
+            envVars:
+              - key: ROBIN_CUSTODY_READONLY_DATABASE_PASSWORD
+                generateValue: true
+
+        services:
+          - type: web
+            name: robintheclaw
+            runtime: node
+            plan: starter
+            region: virginia
+            buildCommand: cd web && npm ci && npm run build
+            startCommand: cd web && npm run start
+            healthCheckPath: /
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            renderSubdomainPolicy: disabled
+            domains:
+              - robintheclaw.com
+            buildFilter:
+              paths:
+                - web/**
+                - docs/**
+                - render.yaml
+            envVars:
+              - key: APP_API_BASE_URL
+                fromService:
+                  type: pserv
+                  name: robin-api
+                  property: hostport
+              - key: APP_ORIGIN
+                value: https://robintheclaw.com
+              - key: NEXT_PUBLIC_PRIVY_APP_ID
+                sync: false
+              - key: PRIVY_VERIFICATION_KEY
+                sync: false
+
+          - type: pserv
+            name: robin-api
+            runtime: rust
+            plan: starter
+            region: virginia
+            buildCommand: cargo build --locked --release --manifest-path app/Cargo.toml --bin app
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_APP_API_DATABASE_PASSWORD bash scripts/prepare-database.sh app "$DATABASE_OWNER_URL" robin_app_api
+            startCommand: ruby scripts/database-runtime-exec.rb --binding DATABASE_OWNER_URL,robin_app_api,ROBIN_APP_API_DATABASE_PASSWORD,DATABASE_URL -- ./app/target/release/app
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - app/**
+                - contracts/**
+                - config/**
+                - scripts/database-runtime-exec.rb
+                - scripts/migrate-app.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: HOST
+                value: 0.0.0.0
+              - key: RUST_LOG
+                value: info
+              - key: DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-app
+                  property: connectionString
+              - fromGroup: robin-db-app-api
+              - key: APP_RUN_MIGRATIONS
+                value: "false"
+              - key: APP_CHAIN_ID
+                value: "4663"
+              - key: AGENT_STRATEGY_VERSION
+                value: basis-aapl-v1
+              - key: LIGHTER_PROVISIONER_URL
+                fromService:
+                  name: robin-lighter-provisioner
+                  type: pserv
+                  property: hostport
+              - key: LIGHTER_PROVISIONER_CALLER_ID
+                value: robin-api
+              - key: LIGHTER_API_KEY_INDEX
+                value: "254"
+              - fromGroup: robin-lighter-provisioner-auth
+              - fromGroup: robin-readiness-publisher-auth
+              - fromGroup: robin-coordinator-control-auth
+              - fromGroup: robin-coordinator-registration-auth
+              - fromGroup: robin-robinhood-provisioner-auth
+              - key: READINESS_CALLER_ID
+                value: readiness-publisher
+              - key: COORDINATOR_COMMAND_URL
+                fromService:
+                  name: robin-execution-coordinator
+                  type: pserv
+                  property: hostport
+              - key: COORDINATOR_COMMAND_CALLER_ID
+                value: product-command-worker
+              - key: COMMAND_WORKER_ID
+                value: product-command-worker-1
+              - key: COORDINATOR_REGISTRATION_URL
+                fromService:
+                  name: robin-execution-coordinator
+                  type: pserv
+                  property: hostport
+              - key: COORDINATOR_REGISTRATION_CALLER_ID
+                value: product-account-provisioner
+              - key: REGISTRATION_WORKER_ID
+                value: product-account-registration-1
+              - key: ROBINHOOD_PROVISIONER_URL
+                fromService:
+                  name: robin-robinhood-provisioner
+                  type: pserv
+                  property: hostport
+              - key: ROBINHOOD_PROVISIONER_CALLER_ID
+                value: robin-api
+              - key: APP_RPC_URL
+                sync: false
+              - key: PRODUCT_INDEXER_LOOKBACK_BLOCKS
+                value: "50000"
+              - key: PRODUCT_INDEXER_BLOCK_RANGE
+                value: "10000"
+              - key: PRIVY_APP_ID
+                sync: false
+              - key: PRIVY_APP_SECRET
+                sync: false
+              - key: PRIVY_VERIFICATION_KEY
+                sync: false
+              - key: RH_MAINNET_RPC
+                sync: false
+              - key: RH_RPC_FALLBACK
+                sync: false
+              - key: RH_CHAIN_ID
+                value: "4663"
+              - key: VAULT_ADDRESS
+                sync: false
+              - key: ANCHOR_ADDRESS
+                sync: false
+              - key: GUARD_ADDRESS
+                sync: false
+              - key: EVM_ENABLED
+                value: "true"
+              - key: GEO_BLOCKING_ENABLED
+                value: "false"
+              - key: CORS_ORIGINS
+                value: https://robintheclaw.com
+
+          - type: worker
+            name: robin-research-collector
+            runtime: rust
+            plan: standard
+            region: virginia
+            buildCommand: cargo build --locked --release --manifest-path runtime/Cargo.toml --bin collector
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_RESEARCH_COLLECTOR_DATABASE_PASSWORD bash scripts/prepare-database.sh research "$DATABASE_OWNER_URL" robin_research_collector
+            startCommand: ruby scripts/database-runtime-exec.rb --binding DATABASE_OWNER_URL,robin_research_collector,ROBIN_RESEARCH_COLLECTOR_DATABASE_PASSWORD,DATABASE_URL -- ./runtime/target/release/collector
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 120
+            buildFilter:
+              paths:
+                - runtime/**
+                - config/**
+                - scripts/database-runtime-exec.rb
+                - scripts/migrate-research.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-research
+                  property: connectionString
+              - fromGroup: robin-db-research-collector
+              - key: RUNTIME_RUN_MIGRATIONS
+                value: "false"
+              - key: RUNTIME_CONFIG
+                value: config/addresses.json
+              - key: RUNTIME_UNIVERSE
+                value: AAPL
+              - key: ROBINHOOD_RPC_URL
+                sync: false
+              - key: RUST_LOG
+                value: info
+              - key: R2_BUCKET
+                sync: false
+              - key: AWS_ENDPOINT_URL
+                sync: false
+              - key: AWS_ACCESS_KEY_ID
+                sync: false
+              - key: AWS_SECRET_ACCESS_KEY
+                sync: false
+              - key: AWS_SESSION_TOKEN
+                sync: false
+              - key: AWS_REGION
+                value: auto
+
+          - type: worker
+            name: robin-paper-agent
+            runtime: rust
+            plan: standard
+            region: virginia
+            buildCommand: cargo build --locked --release --manifest-path runtime/Cargo.toml --bin paper_agent
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_RESEARCH_PAPER_DATABASE_PASSWORD bash scripts/prepare-database.sh research "$DATABASE_OWNER_URL" robin_research_paper && ROBIN_DATABASE_PASSWORD=$ROBIN_APP_PAPER_DATABASE_PASSWORD bash scripts/prepare-database.sh app "$AGENT_DATABASE_OWNER_URL" robin_app_paper
+            startCommand: ruby scripts/database-runtime-exec.rb --binding DATABASE_OWNER_URL,robin_research_paper,ROBIN_RESEARCH_PAPER_DATABASE_PASSWORD,DATABASE_URL --binding AGENT_DATABASE_OWNER_URL,robin_app_paper,ROBIN_APP_PAPER_DATABASE_PASSWORD,AGENT_DATABASE_URL -- /usr/bin/env PAPER_MINIMUM_NET_EDGE_PPM=$AAPL_MINIMUM_NET_EDGE_PPM ./runtime/target/release/paper_agent
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 120
+            buildFilter:
+              paths:
+                - runtime/**
+                - config/**
+                - app/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/migrate-app.sh
+                - scripts/migrate-research.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-research
+                  property: connectionString
+              - fromGroup: robin-db-research-paper
+              - key: RUNTIME_RUN_MIGRATIONS
+                value: "false"
+              - key: PAPER_AGENT_CONFIG
+                value: runtime/config/mainnet-paper.json
+              - key: AGENT_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-app
+                  property: connectionString
+              - fromGroup: robin-db-app-paper
+              - fromGroup: robin-aapl-strategy-policy
+              - key: ROBINHOOD_RPC_URL
+                sync: false
+              - key: RUST_LOG
+                value: info
+
+          - type: pserv
+            name: robin-execution-coordinator
+            runtime: rust
+            plan: starter
+            region: virginia
+            buildCommand: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_EXECUTION_COORDINATOR_DATABASE_PASSWORD bash scripts/prepare-database.sh execution "$DATABASE_OWNER_URL" robin_execution_coordinator
+            startCommand: ruby scripts/database-runtime-exec.rb --binding DATABASE_OWNER_URL,robin_execution_coordinator,ROBIN_EXECUTION_COORDINATOR_DATABASE_PASSWORD,DATABASE_URL -- /usr/bin/env LISTEN_ADDRESS=0.0.0.0:$PORT ./coordinator/target/release/coordinator
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - coordinator/**
+                - execution/**
+                - research/**
+                - runtime/live-evaluation/migrations/**
+                - runtime/live-scheduler/migrations/**
+                - scripts/migrate-execution.sh
+                - runtime/sequencer-publisher/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/lock-execution-after-migration.sql
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: COORDINATOR_ENABLED
+                value: "true"
+              - key: DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-execution
+                  property: connectionString
+              - fromGroup: robin-db-execution-coordinator
+              - fromGroup: robin-coordinator-intent-auth
+              - fromGroup: robin-coordinator-exit-auth
+              - fromGroup: robin-coordinator-venue-auth
+              - fromGroup: robin-coordinator-market-auth
+              - fromGroup: robin-coordinator-account-auth
+              - fromGroup: robin-coordinator-control-auth
+              - fromGroup: robin-coordinator-registration-auth
+              - fromGroup: robin-coordinator-episode-auth
+              - key: INTENT_CALLER_ID
+                value: strategy-runner
+              - key: EXIT_CALLER_ID
+                value: strategy-runner-exit
+              - key: VENUE_EVENT_CALLER_ID
+                value: runtime-collector
+              - key: MARKET_QUOTE_CALLER_ID
+                value: quote-authority-market
+              - key: OPEN_EPISODE_CALLER_ID
+                value: quote-authority-resolver
+              - key: ACCOUNT_SNAPSHOT_CALLER_ID
+                value: account-publisher
+              - key: CONTROL_CALLER_ID
+                value: product-command-worker
+              - key: REGISTRATION_CALLER_ID
+                value: product-account-provisioner
+              - key: COORDINATOR_WORKER_ID
+                value: coordinator-1
+              - key: SIGNER_CALLER_ID
+                value: execution-coordinator
+              - fromGroup: robin-lighter-signer-auth
+              - fromGroup: robin-robinhood-signer-auth
+              - key: LIGHTER_API_URL
+                value: https://mainnet.zklighter.elliot.ai
+              - key: LIGHTER_SIGNER_HOSTPORT
+                fromService:
+                  name: robin-lighter-signer
+                  type: pserv
+                  property: hostport
+              - key: ROBINHOOD_SIGNER_HOSTPORT
+                fromService:
+                  name: robin-robinhood-signer
+                  type: pserv
+                  property: hostport
+              - key: RUST_LOG
+                value: info
+
+          - type: pserv
+            name: robin-account-publisher
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/account-publisher ./cmd/account-publisher
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_EXECUTION_READONLY_DATABASE_PASSWORD bash scripts/prepare-database.sh execution "$ACCOUNT_PUBLISHER_COORDINATOR_DATABASE_OWNER_URL" robin_execution_readonly && ROBIN_DATABASE_PASSWORD=$ROBIN_CUSTODY_READONLY_DATABASE_PASSWORD bash scripts/prepare-database.sh custody "$ACCOUNT_PUBLISHER_CUSTODY_DATABASE_OWNER_URL" robin_custody_readonly
+            startCommand: ruby scripts/database-runtime-exec.rb --binding ACCOUNT_PUBLISHER_COORDINATOR_DATABASE_OWNER_URL,robin_execution_readonly,ROBIN_EXECUTION_READONLY_DATABASE_PASSWORD,ACCOUNT_PUBLISHER_COORDINATOR_DATABASE_URL --binding ACCOUNT_PUBLISHER_CUSTODY_DATABASE_OWNER_URL,robin_custody_readonly,ROBIN_CUSTODY_READONLY_DATABASE_PASSWORD,ACCOUNT_PUBLISHER_ROBINHOOD_DATABASE_URL --binding ACCOUNT_PUBLISHER_CUSTODY_DATABASE_OWNER_URL,robin_custody_readonly,ROBIN_CUSTODY_READONLY_DATABASE_PASSWORD,ACCOUNT_PUBLISHER_ROBINHOOD_JOURNAL_DATABASE_URL -- /usr/bin/env LISTEN_ADDRESS=0.0.0.0:$PORT ACCOUNT_PUBLISHER_COORDINATOR_HMAC_KEY=$COORDINATOR_ACCOUNT_HMAC_KEY ACCOUNT_PUBLISHER_APPLICATION_HMAC_KEY=$READINESS_HMAC_KEY ACCOUNT_PUBLISHER_LIGHTER_MARKET_ID=$LIGHTER_AAPL_MARKET_INDEX ./publisher/bin/account-publisher
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - publisher/**
+                - coordinator/migrations/**
+                - provisioner/robinhood/migrations/**
+                - signer/robinhood/migrations/**
+                - runtime/live-evaluation/migrations/**
+                - runtime/live-scheduler/migrations/**
+                - runtime/sequencer-publisher/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/lock-execution-after-migration.sql
+                - scripts/migrate-execution.sh
+                - scripts/migrate-robinhood-provisioner.sh
+                - scripts/migrate-robinhood-signer.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: ACCOUNT_PUBLISHER_ENABLED
+                value: "true"
+              - key: ACCOUNT_PUBLISHER_ENVIRONMENT
+                value: mainnet
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: ACCOUNT_PUBLISHER_COORDINATOR_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-execution
+                  property: connectionString
+              - fromGroup: robin-db-execution-readonly
+              - key: ACCOUNT_PUBLISHER_CUSTODY_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-robinhood-custody
+                  property: connectionString
+              - fromGroup: robin-db-custody-readonly
+              - key: ACCOUNT_PUBLISHER_PRIMARY_RPC_URL
+                sync: false
+              - key: ACCOUNT_PUBLISHER_SECONDARY_RPC_URL
+                sync: false
+              - key: ACCOUNT_PUBLISHER_MINIMUM_COLLATERAL_RAW
+                sync: false
+              - key: ACCOUNT_PUBLISHER_MINIMUM_SETTLEMENT_RAW
+                sync: false
+              - key: ACCOUNT_PUBLISHER_MINIMUM_OWNER_GAS_RAW
+                sync: false
+              - key: ACCOUNT_PUBLISHER_MINIMUM_SIGNER_GAS_RAW
+                sync: false
+              - key: ACCOUNT_PUBLISHER_POLL_MILLISECONDS
+                value: "4500"
+              - key: ACCOUNT_PUBLISHER_LIGHTER_BRIDGE_URL
+                fromService:
+                  name: robin-lighter-provisioner
+                  type: pserv
+                  property: hostport
+              - key: LIGHTER_PUBLISHER_BRIDGE_CALLER_ID
+                value: account-publisher
+              - fromGroup: robin-lighter-publisher-bridge-auth
+              - fromGroup: robin-lighter-market-config
+              - key: ACCOUNT_PUBLISHER_COORDINATOR_URL
+                fromService:
+                  name: robin-execution-coordinator
+                  type: pserv
+                  property: hostport
+              - key: ACCOUNT_PUBLISHER_COORDINATOR_CALLER_ID
+                value: account-publisher
+              - fromGroup: robin-coordinator-account-auth
+              - key: ACCOUNT_PUBLISHER_APPLICATION_URL
+                fromService:
+                  name: robin-api
+                  type: pserv
+                  property: hostport
+              - key: ACCOUNT_PUBLISHER_APPLICATION_CALLER_ID
+                value: readiness-publisher
+              - fromGroup: robin-readiness-publisher-auth
+
+          - type: pserv
+            name: robin-quote-authority
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd liveexec && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/quote-authority ./cmd/quote-authority
+            startCommand: ROBIN_QUOTE_AUTHORITY_LISTEN=0.0.0.0:$PORT ROBIN_COORDINATOR_URL=http://$ROBIN_COORDINATOR_HOSTPORT ROBIN_COORDINATOR_MARKET_HMAC_KEY=$COORDINATOR_MARKET_HMAC_KEY ROBIN_COORDINATOR_EPISODE_HMAC_KEY=$COORDINATOR_EPISODE_HMAC_KEY ROBIN_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ./liveexec/bin/quote-authority
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - liveexec/**
+                - config/**
+                - render.yaml
+            envVars:
+              - key: ROBIN_QUOTE_AUTHORITY_ENABLED
+                value: "true"
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: ROBIN_QUOTE_AUTHORITY_CALLER
+                value: live-scheduler-quote
+              - fromGroup: robin-quote-authority-request-auth
+              - fromGroup: robin-quote-authority-exit-auth
+              - key: ROBIN_QUOTE_AUTHORITY_EXIT_CALLER
+                value: exit-quote-publisher
+              - key: ROBIN_QUOTE_AUTHORITY_ED25519_PRIVATE_KEY
+                sync: false
+              - fromGroup: robin-lighter-market-config
+              - fromGroup: robin-coordinator-market-auth
+              - fromGroup: robin-coordinator-episode-auth
+              - fromGroup: robin-quote-authority-robinhood-rpc
+              - fromGroup: robin-lighter-market-spec
+              - fromGroup: robin-aapl-reference-feed-config
+              - key: LIGHTER_API_URL
+                value: https://mainnet.zklighter.elliot.ai
+              - key: ROBIN_COORDINATOR_EPISODE_CALLER
+                value: quote-authority-resolver
+              - key: ROBIN_COORDINATOR_HOSTPORT
+                fromService:
+                  name: robin-execution-coordinator
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_COORDINATOR_MARKET_CALLER
+                value: quote-authority-market
+
+          - type: pserv
+            name: robin-strategy-runner
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd liveexec && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/strategy-runner ./cmd/strategy-runner
+            startCommand: ROBIN_STRATEGY_RUNNER_LISTEN=0.0.0.0:$PORT ROBIN_COORDINATOR_URL=http://$ROBIN_COORDINATOR_HOSTPORT ROBIN_COORDINATOR_INTENT_HMAC_KEY=$COORDINATOR_INTENT_HMAC_KEY ROBIN_COORDINATOR_EXIT_HMAC_KEY=$COORDINATOR_EXIT_HMAC_KEY ROBIN_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ./liveexec/bin/strategy-runner
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - liveexec/**
+                - config/**
+                - render.yaml
+            envVars:
+              - key: ROBIN_STRATEGY_RUNNER_ENABLED
+                value: "true"
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: ROBIN_STRATEGY_RUNNER_CALLER
+                value: live-scheduler-runner
+              - fromGroup: robin-strategy-runner-request-auth
+              - fromGroup: robin-quote-authority-public-key
+              - fromGroup: robin-lighter-market-config
+              - fromGroup: robin-coordinator-intent-auth
+              - fromGroup: robin-coordinator-exit-auth
+              - key: ROBIN_COORDINATOR_HOSTPORT
+                fromService:
+                  name: robin-execution-coordinator
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_COORDINATOR_INTENT_CALLER
+                value: strategy-runner
+              - key: ROBIN_COORDINATOR_EXIT_CALLER
+                value: strategy-runner-exit
+
+          - type: worker
+            name: robin-exit-quote-publisher
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd runtime/exit-quote-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/exit-quote-publisher ./cmd/exit-quote-publisher
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_EXECUTION_READONLY_DATABASE_PASSWORD bash scripts/prepare-database.sh execution "$ROBIN_EXIT_QUOTE_PUBLISHER_DATABASE_OWNER_URL" robin_execution_readonly
+            startCommand: ruby scripts/database-runtime-exec.rb --binding ROBIN_EXIT_QUOTE_PUBLISHER_DATABASE_OWNER_URL,robin_execution_readonly,ROBIN_EXECUTION_READONLY_DATABASE_PASSWORD,ROBIN_EXIT_QUOTE_PUBLISHER_DATABASE_URL -- /usr/bin/env ROBIN_QUOTE_AUTHORITY_URL=http://$ROBIN_QUOTE_AUTHORITY_HOSTPORT ROBIN_EXIT_QUOTE_PUBLISHER_HMAC_KEY=$ROBIN_QUOTE_AUTHORITY_EXIT_HMAC_KEY ROBIN_EXIT_QUOTE_PUBLISHER_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ./runtime/exit-quote-publisher/bin/exit-quote-publisher
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - runtime/exit-quote-publisher/**
+                - liveexec/**
+                - coordinator/migrations/**
+                - runtime/live-evaluation/migrations/**
+                - runtime/live-scheduler/migrations/**
+                - runtime/sequencer-publisher/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/lock-execution-after-migration.sql
+                - scripts/migrate-execution.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: ROBIN_EXIT_QUOTE_PUBLISHER_ENABLED
+                value: "true"
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: ROBIN_EXIT_QUOTE_PUBLISHER_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-execution
+                  property: connectionString
+              - fromGroup: robin-db-execution-readonly
+              - key: ROBIN_EXIT_QUOTE_PUBLISHER_WORKER_ID
+                value: exit-quote-publisher-1
+              - key: ROBIN_EXIT_QUOTE_PUBLISHER_CALLER
+                value: exit-quote-publisher
+              - key: ROBIN_QUOTE_AUTHORITY_HOSTPORT
+                fromService:
+                  name: robin-quote-authority
+                  type: pserv
+                  property: hostport
+              - fromGroup: robin-quote-authority-exit-auth
+              - fromGroup: robin-quote-authority-public-key
+              - fromGroup: robin-lighter-market-config
+
+          - type: worker
+            name: robin-live-control
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: (cd runtime/live-evaluation && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/live-evaluation ./cmd/live-evaluation) && (cd runtime/live-scheduler && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/live-scheduler ./cmd/live-scheduler) && (cd runtime/live-control && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/live-control .)
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_EXECUTION_LIVE_CONTROL_DATABASE_PASSWORD bash scripts/prepare-database.sh execution "$ROBIN_LIVE_CONTROL_EXECUTION_DATABASE_OWNER_URL" robin_execution_live_control && ROBIN_DATABASE_PASSWORD=$ROBIN_RESEARCH_READONLY_DATABASE_PASSWORD bash scripts/prepare-database.sh research "$ROBIN_LIVE_CONTROL_RESEARCH_DATABASE_OWNER_URL" robin_research_readonly && ROBIN_DATABASE_PASSWORD=$ROBIN_APP_READONLY_DATABASE_PASSWORD bash scripts/prepare-database.sh app "$ROBIN_LIVE_CONTROL_APP_DATABASE_OWNER_URL" robin_app_readonly
+            startCommand: ruby scripts/database-runtime-exec.rb --binding ROBIN_LIVE_CONTROL_EXECUTION_DATABASE_OWNER_URL,robin_execution_live_control,ROBIN_EXECUTION_LIVE_CONTROL_DATABASE_PASSWORD,ROBIN_LIVE_SCHEDULER_DATABASE_URL --binding ROBIN_LIVE_CONTROL_RESEARCH_DATABASE_OWNER_URL,robin_research_readonly,ROBIN_RESEARCH_READONLY_DATABASE_PASSWORD,ROBIN_LIVE_EVALUATION_RESEARCH_DATABASE_URL --binding ROBIN_LIVE_CONTROL_APP_DATABASE_OWNER_URL,robin_app_readonly,ROBIN_APP_READONLY_DATABASE_PASSWORD,ROBIN_LIVE_EVALUATION_PRODUCT_DATABASE_URL --binding ROBIN_LIVE_CONTROL_EXECUTION_DATABASE_OWNER_URL,robin_execution_live_control,ROBIN_EXECUTION_LIVE_CONTROL_DATABASE_PASSWORD,ROBIN_LIVE_EVALUATION_EXECUTION_DATABASE_URL -- /usr/bin/env ROBIN_QUOTE_AUTHORITY_URL=http://$ROBIN_QUOTE_AUTHORITY_HOSTPORT ROBIN_STRATEGY_RUNNER_URL=http://$ROBIN_STRATEGY_RUNNER_HOSTPORT ROBIN_LIVE_SCHEDULER_QUOTE_HMAC_KEY=$ROBIN_QUOTE_AUTHORITY_HMAC_KEY ROBIN_LIVE_SCHEDULER_RUNNER_HMAC_KEY=$ROBIN_STRATEGY_RUNNER_HMAC_KEY ROBIN_LIVE_SCHEDULER_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ROBIN_LIVE_EVALUATION_LIGHTER_AAPL_MARKET_INDEX=$LIGHTER_AAPL_MARKET_INDEX ROBIN_LIVE_EVALUATION_LIGHTER_AAPL_BASE_DECIMALS=$LIGHTER_AAPL_BASE_DECIMALS ROBIN_LIVE_EVALUATION_LIGHTER_AAPL_PRICE_DECIMALS=$LIGHTER_AAPL_PRICE_DECIMALS ./runtime/live-control/bin/live-control
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - runtime/live-evaluation/**
+                - runtime/live-scheduler/**
+                - runtime/live-control/**
+                - coordinator/migrations/**
+                - config/**
+                - app/migrations/**
+                - runtime/migrations/**
+                - runtime/sequencer-publisher/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/lock-execution-after-migration.sql
+                - scripts/migrate-app.sh
+                - scripts/migrate-execution.sh
+                - scripts/migrate-research.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: ROBIN_LIVE_SCHEDULER_ENABLED
+                value: "true"
+              - key: ROBIN_LIVE_EVALUATION_ENABLED
+                value: "true"
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: ROBIN_LIVE_CONTROL_EXECUTION_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-execution
+                  property: connectionString
+              - fromGroup: robin-db-execution-live-control
+              - key: ROBIN_LIVE_SCHEDULER_WORKER_ID
+                value: live-scheduler-1
+              - key: ROBIN_QUOTE_AUTHORITY_HOSTPORT
+                fromService:
+                  name: robin-quote-authority
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_LIVE_SCHEDULER_QUOTE_CALLER
+                value: live-scheduler-quote
+              - fromGroup: robin-quote-authority-request-auth
+              - fromGroup: robin-quote-authority-public-key
+              - key: ROBIN_STRATEGY_RUNNER_HOSTPORT
+                fromService:
+                  name: robin-strategy-runner
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_RUNTIME_PROBE_API_HOSTPORT
+                fromService:
+                  name: robin-api
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_RUNTIME_PROBE_COORDINATOR_HOSTPORT
+                fromService:
+                  name: robin-execution-coordinator
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_RUNTIME_PROBE_ACCOUNT_PUBLISHER_HOSTPORT
+                fromService:
+                  name: robin-account-publisher
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_RUNTIME_PROBE_QUOTE_AUTHORITY_HOSTPORT
+                fromService:
+                  name: robin-quote-authority
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_RUNTIME_PROBE_STRATEGY_RUNNER_HOSTPORT
+                fromService:
+                  name: robin-strategy-runner
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_RUNTIME_PROBE_LIGHTER_PROVISIONER_HOSTPORT
+                fromService:
+                  name: robin-lighter-provisioner
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_RUNTIME_PROBE_LIGHTER_SIGNER_HOSTPORT
+                fromService:
+                  name: robin-lighter-signer
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_RUNTIME_PROBE_ROBINHOOD_PROVISIONER_HOSTPORT
+                fromService:
+                  name: robin-robinhood-provisioner
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_RUNTIME_PROBE_ROBINHOOD_SIGNER_HOSTPORT
+                fromService:
+                  name: robin-robinhood-signer
+                  type: pserv
+                  property: hostport
+              - key: ROBIN_LIVE_SCHEDULER_RUNNER_CALLER
+                value: live-scheduler-runner
+              - fromGroup: robin-strategy-runner-request-auth
+              - key: ROBIN_LIVE_CONTROL_RESEARCH_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-research
+                  property: connectionString
+              - fromGroup: robin-db-research-readonly
+              - key: ROBIN_LIVE_CONTROL_APP_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-app
+                  property: connectionString
+              - fromGroup: robin-db-app-readonly
+              - key: ROBIN_LIVE_EVALUATION_WORKER_ID
+                value: live-evaluation-1
+              - key: ROBIN_LIVE_EVALUATION_POLL_MILLISECONDS
+                value: "250"
+              - fromGroup: robin-aapl-strategy-policy
+              - fromGroup: robin-lighter-market-config
+              - fromGroup: robin-lighter-market-spec
+              - key: ROBIN_LIVE_EVALUATION_SPOT_CONFIG_VERSION
+                sync: false
+              - key: ROBIN_LIVE_EVALUATION_UI_MULTIPLIER_E18
+                sync: false
+              - key: ROBIN_LIVE_EVALUATION_MAX_PRICE_DEVIATION_BPS
+                sync: false
+              - key: ROBIN_LIVE_EVALUATION_MAX_UNWIND_PRICE_DEVIATION_BPS
+                sync: false
+              - key: ROBIN_LIVE_EVALUATION_MARKET_VALID_FROM
+                sync: false
+              - key: ROBIN_LIVE_EVALUATION_MARKET_VALID_UNTIL
+                sync: false
+
+          - type: worker
+            name: robin-sequencer-publisher-1
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/sequencer-publisher ./cmd/sequencer-publisher
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_EXECUTION_SEQUENCER_1_DATABASE_PASSWORD bash scripts/prepare-database.sh execution "$SEQUENCER_DATABASE_OWNER_URL" robin_execution_sequencer_1
+            startCommand: ruby scripts/database-runtime-exec.rb --binding SEQUENCER_DATABASE_OWNER_URL,robin_execution_sequencer_1,ROBIN_EXECUTION_SEQUENCER_1_DATABASE_PASSWORD,SEQUENCER_DATABASE_URL -- ./runtime/sequencer-publisher/bin/sequencer-publisher
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - runtime/sequencer-publisher/**
+                - contracts/src/QuorumSequencerFeed.sol
+                - coordinator/migrations/**
+                - runtime/live-evaluation/migrations/**
+                - runtime/live-scheduler/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/lock-execution-after-migration.sql
+                - scripts/migrate-execution.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: SEQUENCER_PUBLISHER_ID
+                value: sequencer-publisher-1
+              - key: SEQUENCER_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-execution
+                  property: connectionString
+              - fromGroup: robin-db-execution-sequencer-1
+              - key: SEQUENCER_RUN_MIGRATIONS
+                value: "false"
+              - fromGroup: robin-sequencer-feed-config
+              - key: SEQUENCER_SOURCE_RPC_URL
+                sync: false
+              - key: SEQUENCER_TRANSACTION_RPC_URL
+                sync: false
+              - key: SEQUENCER_PUBLISHER_PRIVATE_KEY
+                sync: false
+              - key: SEQUENCER_PUBLISH_INTERVAL
+                value: 15s
+              - key: SEQUENCER_REQUEST_TIMEOUT
+                value: 10s
+              - key: SEQUENCER_LATEST_MAX_AGE
+                value: 30s
+              - key: SEQUENCER_FINALIZED_MAX_AGE
+                value: 30m
+              - key: SEQUENCER_MAX_FINALIZED_LAG
+                value: "25000"
+              - key: SEQUENCER_MAX_GAS_LIMIT
+                value: "150000"
+              - key: SEQUENCER_MAX_PRIORITY_FEE_WEI
+                value: "100000000"
+              - key: SEQUENCER_MAX_FEE_PER_GAS_WEI
+                value: "10000000000"
+              - key: SEQUENCER_MAX_TRANSACTION_COST_WEI
+                value: "1500000000000000"
+              - key: SEQUENCER_MINIMUM_GAS_RESERVE_WEI
+                value: "2000000000000000"
+
+          - type: worker
+            name: robin-sequencer-publisher-2
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/sequencer-publisher ./cmd/sequencer-publisher
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_EXECUTION_SEQUENCER_2_DATABASE_PASSWORD bash scripts/prepare-database.sh execution "$SEQUENCER_DATABASE_OWNER_URL" robin_execution_sequencer_2
+            startCommand: ruby scripts/database-runtime-exec.rb --binding SEQUENCER_DATABASE_OWNER_URL,robin_execution_sequencer_2,ROBIN_EXECUTION_SEQUENCER_2_DATABASE_PASSWORD,SEQUENCER_DATABASE_URL -- ./runtime/sequencer-publisher/bin/sequencer-publisher
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - runtime/sequencer-publisher/**
+                - contracts/src/QuorumSequencerFeed.sol
+                - coordinator/migrations/**
+                - runtime/live-evaluation/migrations/**
+                - runtime/live-scheduler/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/lock-execution-after-migration.sql
+                - scripts/migrate-execution.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: SEQUENCER_PUBLISHER_ID
+                value: sequencer-publisher-2
+              - key: SEQUENCER_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-execution
+                  property: connectionString
+              - fromGroup: robin-db-execution-sequencer-2
+              - key: SEQUENCER_RUN_MIGRATIONS
+                value: "false"
+              - fromGroup: robin-sequencer-feed-config
+              - key: SEQUENCER_SOURCE_RPC_URL
+                sync: false
+              - key: SEQUENCER_TRANSACTION_RPC_URL
+                sync: false
+              - key: SEQUENCER_PUBLISHER_PRIVATE_KEY
+                sync: false
+              - key: SEQUENCER_PUBLISH_INTERVAL
+                value: 15s
+              - key: SEQUENCER_REQUEST_TIMEOUT
+                value: 10s
+              - key: SEQUENCER_LATEST_MAX_AGE
+                value: 30s
+              - key: SEQUENCER_FINALIZED_MAX_AGE
+                value: 30m
+              - key: SEQUENCER_MAX_FINALIZED_LAG
+                value: "25000"
+              - key: SEQUENCER_MAX_GAS_LIMIT
+                value: "150000"
+              - key: SEQUENCER_MAX_PRIORITY_FEE_WEI
+                value: "100000000"
+              - key: SEQUENCER_MAX_FEE_PER_GAS_WEI
+                value: "10000000000"
+              - key: SEQUENCER_MAX_TRANSACTION_COST_WEI
+                value: "1500000000000000"
+              - key: SEQUENCER_MINIMUM_GAS_RESERVE_WEI
+                value: "2000000000000000"
+
+          - type: worker
+            name: robin-sequencer-publisher-3
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/sequencer-publisher ./cmd/sequencer-publisher
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_EXECUTION_SEQUENCER_3_DATABASE_PASSWORD bash scripts/prepare-database.sh execution "$SEQUENCER_DATABASE_OWNER_URL" robin_execution_sequencer_3
+            startCommand: ruby scripts/database-runtime-exec.rb --binding SEQUENCER_DATABASE_OWNER_URL,robin_execution_sequencer_3,ROBIN_EXECUTION_SEQUENCER_3_DATABASE_PASSWORD,SEQUENCER_DATABASE_URL -- ./runtime/sequencer-publisher/bin/sequencer-publisher
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - runtime/sequencer-publisher/**
+                - contracts/src/QuorumSequencerFeed.sol
+                - coordinator/migrations/**
+                - runtime/live-evaluation/migrations/**
+                - runtime/live-scheduler/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/lock-execution-after-migration.sql
+                - scripts/migrate-execution.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: SEQUENCER_PUBLISHER_ID
+                value: sequencer-publisher-3
+              - key: SEQUENCER_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-execution
+                  property: connectionString
+              - fromGroup: robin-db-execution-sequencer-3
+              - key: SEQUENCER_RUN_MIGRATIONS
+                value: "false"
+              - fromGroup: robin-sequencer-feed-config
+              - key: SEQUENCER_SOURCE_RPC_URL
+                sync: false
+              - key: SEQUENCER_TRANSACTION_RPC_URL
+                sync: false
+              - key: SEQUENCER_PUBLISHER_PRIVATE_KEY
+                sync: false
+              - key: SEQUENCER_PUBLISH_INTERVAL
+                value: 15s
+              - key: SEQUENCER_REQUEST_TIMEOUT
+                value: 10s
+              - key: SEQUENCER_LATEST_MAX_AGE
+                value: 30s
+              - key: SEQUENCER_FINALIZED_MAX_AGE
+                value: 30m
+              - key: SEQUENCER_MAX_FINALIZED_LAG
+                value: "25000"
+              - key: SEQUENCER_MAX_GAS_LIMIT
+                value: "150000"
+              - key: SEQUENCER_MAX_PRIORITY_FEE_WEI
+                value: "100000000"
+              - key: SEQUENCER_MAX_FEE_PER_GAS_WEI
+                value: "10000000000"
+              - key: SEQUENCER_MAX_TRANSACTION_COST_WEI
+                value: "1500000000000000"
+              - key: SEQUENCER_MINIMUM_GAS_RESERVE_WEI
+                value: "2000000000000000"
+
+          - type: worker
+            name: robin-aapl-relay-1
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/aapl-relay ./cmd/aapl-relay
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_EXECUTION_AAPL_RELAY_1_DATABASE_PASSWORD bash scripts/prepare-database.sh execution "$AAPL_RELAY_DATABASE_OWNER_URL" robin_execution_aapl_relay_1
+            startCommand: ruby scripts/database-runtime-exec.rb --binding AAPL_RELAY_DATABASE_OWNER_URL,robin_execution_aapl_relay_1,ROBIN_EXECUTION_AAPL_RELAY_1_DATABASE_PASSWORD,AAPL_RELAY_DATABASE_URL -- ./runtime/sequencer-publisher/bin/aapl-relay
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - runtime/sequencer-publisher/aaplrelay/**
+                - runtime/sequencer-publisher/cmd/aapl-relay/**
+                - contracts/src/QuorumAaplReferenceFeed.sol
+                - contracts/src/interfaces/IQuorumAaplReferenceFeed.sol
+                - coordinator/migrations/**
+                - runtime/live-evaluation/migrations/**
+                - runtime/live-scheduler/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/lock-execution-after-migration.sql
+                - scripts/migrate-execution.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: AAPL_RELAY_PUBLISHER_ID
+                value: aapl-relay-1
+              - key: AAPL_RELAY_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-execution
+                  property: connectionString
+              - fromGroup: robin-db-execution-aapl-relay-1
+              - key: AAPL_RELAY_RUN_MIGRATIONS
+                value: "false"
+              - fromGroup: robin-aapl-reference-feed-config
+              - key: AAPL_RELAY_ARBITRUM_RPC_1
+                sync: false
+              - key: AAPL_RELAY_ARBITRUM_RPC_2
+                sync: false
+              - key: AAPL_RELAY_ROBINHOOD_RPC
+                sync: false
+              - key: AAPL_RELAY_PUBLISHER_PRIVATE_KEY
+                sync: false
+              - key: AAPL_RELAY_INTERVAL
+                value: 15s
+              - key: AAPL_RELAY_REQUEST_TIMEOUT
+                value: 12s
+              - key: AAPL_RELAY_FINALIZED_MAX_AGE
+                value: 30m
+              - key: AAPL_RELAY_MAX_GAS_LIMIT
+                value: "180000"
+              - key: AAPL_RELAY_MAX_PRIORITY_FEE_WEI
+                value: "100000000"
+              - key: AAPL_RELAY_MAX_FEE_PER_GAS_WEI
+                value: "10000000000"
+              - key: AAPL_RELAY_MAX_TRANSACTION_COST_WEI
+                value: "1800000000000000"
+              - key: AAPL_RELAY_MINIMUM_GAS_RESERVE_WEI
+                value: "2000000000000000"
+
+          - type: worker
+            name: robin-aapl-relay-2
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/aapl-relay ./cmd/aapl-relay
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_EXECUTION_AAPL_RELAY_2_DATABASE_PASSWORD bash scripts/prepare-database.sh execution "$AAPL_RELAY_DATABASE_OWNER_URL" robin_execution_aapl_relay_2
+            startCommand: ruby scripts/database-runtime-exec.rb --binding AAPL_RELAY_DATABASE_OWNER_URL,robin_execution_aapl_relay_2,ROBIN_EXECUTION_AAPL_RELAY_2_DATABASE_PASSWORD,AAPL_RELAY_DATABASE_URL -- ./runtime/sequencer-publisher/bin/aapl-relay
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - runtime/sequencer-publisher/aaplrelay/**
+                - runtime/sequencer-publisher/cmd/aapl-relay/**
+                - contracts/src/QuorumAaplReferenceFeed.sol
+                - contracts/src/interfaces/IQuorumAaplReferenceFeed.sol
+                - coordinator/migrations/**
+                - runtime/live-evaluation/migrations/**
+                - runtime/live-scheduler/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/lock-execution-after-migration.sql
+                - scripts/migrate-execution.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: AAPL_RELAY_PUBLISHER_ID
+                value: aapl-relay-2
+              - key: AAPL_RELAY_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-execution
+                  property: connectionString
+              - fromGroup: robin-db-execution-aapl-relay-2
+              - key: AAPL_RELAY_RUN_MIGRATIONS
+                value: "false"
+              - fromGroup: robin-aapl-reference-feed-config
+              - key: AAPL_RELAY_ARBITRUM_RPC_1
+                sync: false
+              - key: AAPL_RELAY_ARBITRUM_RPC_2
+                sync: false
+              - key: AAPL_RELAY_ROBINHOOD_RPC
+                sync: false
+              - key: AAPL_RELAY_PUBLISHER_PRIVATE_KEY
+                sync: false
+              - key: AAPL_RELAY_INTERVAL
+                value: 15s
+              - key: AAPL_RELAY_REQUEST_TIMEOUT
+                value: 12s
+              - key: AAPL_RELAY_FINALIZED_MAX_AGE
+                value: 30m
+              - key: AAPL_RELAY_MAX_GAS_LIMIT
+                value: "180000"
+              - key: AAPL_RELAY_MAX_PRIORITY_FEE_WEI
+                value: "100000000"
+              - key: AAPL_RELAY_MAX_FEE_PER_GAS_WEI
+                value: "10000000000"
+              - key: AAPL_RELAY_MAX_TRANSACTION_COST_WEI
+                value: "1800000000000000"
+              - key: AAPL_RELAY_MINIMUM_GAS_RESERVE_WEI
+                value: "2000000000000000"
+
+          - type: worker
+            name: robin-aapl-relay-3
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd runtime/sequencer-publisher && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/aapl-relay ./cmd/aapl-relay
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_EXECUTION_AAPL_RELAY_3_DATABASE_PASSWORD bash scripts/prepare-database.sh execution "$AAPL_RELAY_DATABASE_OWNER_URL" robin_execution_aapl_relay_3
+            startCommand: ruby scripts/database-runtime-exec.rb --binding AAPL_RELAY_DATABASE_OWNER_URL,robin_execution_aapl_relay_3,ROBIN_EXECUTION_AAPL_RELAY_3_DATABASE_PASSWORD,AAPL_RELAY_DATABASE_URL -- ./runtime/sequencer-publisher/bin/aapl-relay
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - runtime/sequencer-publisher/aaplrelay/**
+                - runtime/sequencer-publisher/cmd/aapl-relay/**
+                - contracts/src/QuorumAaplReferenceFeed.sol
+                - contracts/src/interfaces/IQuorumAaplReferenceFeed.sol
+                - coordinator/migrations/**
+                - runtime/live-evaluation/migrations/**
+                - runtime/live-scheduler/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/lock-execution-after-migration.sql
+                - scripts/migrate-execution.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: AAPL_RELAY_PUBLISHER_ID
+                value: aapl-relay-3
+              - key: AAPL_RELAY_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-execution
+                  property: connectionString
+              - fromGroup: robin-db-execution-aapl-relay-3
+              - key: AAPL_RELAY_RUN_MIGRATIONS
+                value: "false"
+              - fromGroup: robin-aapl-reference-feed-config
+              - key: AAPL_RELAY_ARBITRUM_RPC_1
+                sync: false
+              - key: AAPL_RELAY_ARBITRUM_RPC_2
+                sync: false
+              - key: AAPL_RELAY_ROBINHOOD_RPC
+                sync: false
+              - key: AAPL_RELAY_PUBLISHER_PRIVATE_KEY
+                sync: false
+              - key: AAPL_RELAY_INTERVAL
+                value: 15s
+              - key: AAPL_RELAY_REQUEST_TIMEOUT
+                value: 12s
+              - key: AAPL_RELAY_FINALIZED_MAX_AGE
+                value: 30m
+              - key: AAPL_RELAY_MAX_GAS_LIMIT
+                value: "180000"
+              - key: AAPL_RELAY_MAX_PRIORITY_FEE_WEI
+                value: "100000000"
+              - key: AAPL_RELAY_MAX_FEE_PER_GAS_WEI
+                value: "10000000000"
+              - key: AAPL_RELAY_MAX_TRANSACTION_COST_WEI
+                value: "1800000000000000"
+              - key: AAPL_RELAY_MINIMUM_GAS_RESERVE_WEI
+                value: "2000000000000000"
+
+          - type: pserv
+            name: robin-lighter-provisioner
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd provisioner/lighter && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/lighter-provisioner .
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_LIGHTER_PROVISIONER_DATABASE_PASSWORD bash scripts/prepare-database.sh lighter "$LIGHTER_PROVISIONER_DATABASE_OWNER_URL" robin_lighter_provisioner && ROBIN_DATABASE_PASSWORD=$ROBIN_LIGHTER_READONLY_DATABASE_PASSWORD bash scripts/provision-database-roles.sh "$LIGHTER_PROVISIONER_DATABASE_OWNER_URL" robin_lighter_readonly
+            startCommand: ruby scripts/database-runtime-exec.rb --binding LIGHTER_PROVISIONER_DATABASE_OWNER_URL,robin_lighter_provisioner,ROBIN_LIGHTER_PROVISIONER_DATABASE_PASSWORD,LIGHTER_PROVISIONER_DATABASE_URL --remove-env ROBIN_LIGHTER_READONLY_DATABASE_PASSWORD -- /usr/bin/env LISTEN_ADDRESS=0.0.0.0:$PORT LIGHTER_PUBLISHER_MARKET_ID=$LIGHTER_AAPL_MARKET_INDEX ./provisioner/lighter/bin/lighter-provisioner
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - provisioner/lighter/**
+                - scripts/database-runtime-exec.rb
+                - scripts/migrate-lighter-provisioner.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: LIGHTER_PROVISIONER_ENABLED
+                value: "true"
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: LIGHTER_PROVISIONER_DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-lighter-credentials
+                  property: connectionString
+              - fromGroup: robin-db-lighter-provisioner
+              - fromGroup: robin-db-lighter-readonly
+              - key: LIGHTER_PROVISIONER_RUN_MIGRATIONS
+                value: "false"
+              - fromGroup: robin-lighter-provisioner-auth
+              - fromGroup: robin-lighter-signer-bridge-auth
+              - fromGroup: robin-lighter-publisher-bridge-auth
+              - fromGroup: robin-lighter-market-config
+              - key: PROVISIONER_CALLER_ID
+                value: robin-api
+              - key: LIGHTER_SIGNER_BRIDGE_CALLER_ID
+                value: lighter-signer
+              - key: LIGHTER_PUBLISHER_BRIDGE_CALLER_ID
+                value: account-publisher
+              - key: LIGHTER_API_URL
+                value: https://mainnet.zklighter.elliot.ai
+              - key: LIGHTER_CHAIN_ID
+                value: "304"
+              - fromGroup: robin-lighter-market-spec
+              - key: AWS_REGION
+                value: us-east-1
+              - key: AWS_ROLE_ARN
+                sync: false
+              - key: AWS_KMS_KEY_ID
+                sync: false
+
+          - type: pserv
+            name: robin-lighter-signer
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd signer/lighter && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/lighter-signer .
+            startCommand: LISTEN_ADDRESS=0.0.0.0:$PORT ./signer/lighter/bin/lighter-signer
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - signer/lighter/**
+                - render.yaml
+            envVars:
+              - key: LIGHTER_SIGNER_ENABLED
+                value: "true"
+              - key: GO_VERSION
+                value: "1.26.5"
+              - fromGroup: robin-lighter-signer-auth
+              - fromGroup: robin-lighter-signer-bridge-auth
+              - fromGroup: robin-lighter-market-config
+              - fromGroup: robin-lighter-market-spec
+              - key: SIGNER_CALLER_ID
+                value: execution-coordinator
+              - key: LIGHTER_PROVISIONER_URL
+                fromService:
+                  name: robin-lighter-provisioner
+                  type: pserv
+                  property: hostport
+              - key: LIGHTER_SIGNER_BRIDGE_CALLER_ID
+                value: lighter-signer
+              - key: SIGNER_MAX_REQUESTS_PER_MINUTE
+                value: "60"
+              - key: SIGNER_MAX_CONCURRENT_REQUESTS
+                value: "4"
+
+          - type: pserv
+            name: robin-robinhood-provisioner
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd provisioner/robinhood && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/robinhood-provisioner .
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_CUSTODY_PROVISIONER_DATABASE_PASSWORD bash scripts/prepare-database.sh custody "$DATABASE_OWNER_URL" robin_custody_provisioner
+            startCommand: ruby scripts/database-runtime-exec.rb --binding DATABASE_OWNER_URL,robin_custody_provisioner,ROBIN_CUSTODY_PROVISIONER_DATABASE_PASSWORD,DATABASE_URL -- /usr/bin/env LISTEN_ADDRESS=0.0.0.0:$PORT ./provisioner/robinhood/bin/robinhood-provisioner
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - provisioner/robinhood/**
+                - contracts/**
+                - config/**
+                - signer/robinhood/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/migrate-robinhood-provisioner.sh
+                - scripts/migrate-robinhood-signer.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: ROBINHOOD_PROVISIONER_ENABLED
+                value: "true"
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-robinhood-custody
+                  property: connectionString
+              - fromGroup: robin-db-custody-provisioner
+              - key: ROBINHOOD_PROVISIONER_RUN_MIGRATIONS
+                value: "false"
+              - fromGroup: robin-robinhood-provisioner-auth
+              - fromGroup: robin-robinhood-signer-bridge-auth
+              - key: ROBINHOOD_PROVISIONER_CALLER_ID
+                value: robin-api
+              - key: ROBINHOOD_SIGNER_BRIDGE_CALLER_ID
+                value: robinhood-signer
+              - key: ROBINHOOD_RPC_URL
+                sync: false
+              - key: ROBINHOOD_RECONCILIATION_RPC_URL
+                sync: false
+              - key: ROBINHOOD_CHAIN_ID
+                value: "4663"
+              - key: ROBINHOOD_USER_VAULT_FACTORY
+                sync: false
+              - key: ROBINHOOD_EXECUTION_REGISTRY
+                sync: false
+              - key: ROBINHOOD_POLICY_DIGEST
+                sync: false
+              - key: ROBINHOOD_FACTORY_CODE_HASH
+                sync: false
+              - key: ROBINHOOD_REGISTRY_CODE_HASH
+                sync: false
+              - key: ROBINHOOD_USER_VAULT_CODE_HASH
+                sync: false
+              - key: ROBINHOOD_RISK_MANAGER_CODE_HASH
+                sync: false
+              - key: ROBINHOOD_SPOT_ADAPTER_CODE_HASH
+                sync: false
+              - key: ROBINHOOD_FINALITY_BLOCKS
+                value: "64"
+              - key: ROBINHOOD_KMS_PROVISION_FUNCTION_ARN
+                sync: false
+              - key: PROVISIONER_MAX_REQUESTS_PER_MINUTE
+                value: "60"
+              - key: AWS_REGION
+                value: us-east-1
+              - key: AWS_ROLE_ARN
+                sync: false
+
+          - type: pserv
+            name: robin-robinhood-signer
+            runtime: go
+            plan: starter
+            region: virginia
+            buildCommand: cd signer/robinhood && go mod download && go mod verify && go build -trimpath -ldflags="-s -w" -o bin/robinhood-signer .
+            preDeployCommand: ROBIN_DATABASE_PASSWORD=$ROBIN_CUSTODY_SIGNER_DATABASE_PASSWORD bash scripts/prepare-database.sh custody "$DATABASE_OWNER_URL" robin_custody_signer
+            startCommand: ruby scripts/database-runtime-exec.rb --binding DATABASE_OWNER_URL,robin_custody_signer,ROBIN_CUSTODY_SIGNER_DATABASE_PASSWORD,DATABASE_URL -- /usr/bin/env LISTEN_ADDRESS=0.0.0.0:$PORT ./signer/robinhood/bin/robinhood-signer
+            autoDeployTrigger: "off"
+            maxShutdownDelaySeconds: 30
+            buildFilter:
+              paths:
+                - signer/robinhood/**
+                - provisioner/robinhood/migrations/**
+                - scripts/database-runtime-exec.rb
+                - scripts/migrate-robinhood-provisioner.sh
+                - scripts/migrate-robinhood-signer.sh
+                - scripts/prepare-database.sh
+                - scripts/provision-database-roles.sh
+                - scripts/psql-with-url.rb
+                - scripts/run-ordered-migrations.sh
+                - render.yaml
+            envVars:
+              - key: ROBINHOOD_SIGNER_ENABLED
+                value: "true"
+              - key: GO_VERSION
+                value: "1.26.5"
+              - key: DATABASE_OWNER_URL
+                fromDatabase:
+                  name: robin-robinhood-custody
+                  property: connectionString
+              - fromGroup: robin-db-custody-signer
+              - fromGroup: robin-robinhood-signer-auth
+              - fromGroup: robin-robinhood-signer-bridge-auth
+              - key: SIGNER_CALLER_ID
+                value: execution-coordinator
+              - key: ROBINHOOD_PROVISIONER_URL
+                fromService:
+                  name: robin-robinhood-provisioner
+                  type: pserv
+                  property: hostport
+              - key: ROBINHOOD_SIGNER_BRIDGE_CALLER_ID
+                value: robinhood-signer
+              - key: ROBINHOOD_RPC_URL
+                sync: false
+              - key: ROBINHOOD_RECONCILIATION_RPC_URL
+                sync: false
+              - key: ROBINHOOD_CHAIN_ID
+                value: "4663"
+              - key: AWS_REGION
+                value: us-east-1
+              - key: AWS_ROLE_ARN
+                sync: false
+              - key: ROBINHOOD_MAX_GAS_LIMIT
+                sync: false
+              - key: ROBINHOOD_MAX_PRIORITY_FEE_WEI
+                sync: false
+              - key: ROBINHOOD_MAX_FEE_PER_GAS_WEI
+                sync: false
+              - key: ROBINHOOD_MAX_TRANSACTION_COST_WEI
+                sync: false
+              - key: ROBINHOOD_MINIMUM_GAS_RESERVE_WEI
+                sync: false
+              - key: ROBINHOOD_MAX_REPLACEMENTS
+                sync: false
+              - key: ROBINHOOD_MAX_REPLACEMENT_AGE
+                sync: false
+              - key: SIGNER_MAX_REQUESTS_PER_MINUTE
+                sync: false
+              - key: SIGNER_MAX_CONCURRENT_REQUESTS
+                sync: false
+
+        databases:
+          - name: robin-app
+            databaseName: robin_app
+            user: robin_app
+            plan: pro-4gb
+            diskSizeGB: 100
+            storageAutoscalingEnabled: true
+            postgresMajorVersion: "16"
+            region: virginia
+            highAvailability:
+              enabled: true
+            ipAllowList: []
+          - name: robin-research
+            databaseName: robin_research
+            user: robin_runtime
+            plan: pro-4gb
+            diskSizeGB: 100
+            storageAutoscalingEnabled: true
+            postgresMajorVersion: "17"
+            region: virginia
+            connectionPool: pgbouncer
+            highAvailability:
+              enabled: true
+            ipAllowList: []
+          - name: robin-lighter-credentials
+            databaseName: robin_lighter_credentials
+            user: robin_lighter_provisioner
+            plan: pro-4gb
+            diskSizeGB: 100
+            storageAutoscalingEnabled: true
+            postgresMajorVersion: "18"
+            region: virginia
+            highAvailability:
+              enabled: true
+            ipAllowList: []
+          - name: robin-execution
+            databaseName: robin_execution
+            user: robin_execution
+            plan: pro-4gb
+            diskSizeGB: 100
+            storageAutoscalingEnabled: true
+            postgresMajorVersion: "18"
+            region: virginia
+            connectionPool: pgbouncer
+            highAvailability:
+              enabled: true
+            ipAllowList: []
+          - name: robin-robinhood-custody
+            databaseName: robin_robinhood_custody
+            user: robin_robinhood_provisioner
+            plan: pro-4gb
+            diskSizeGB: 100
+            storageAutoscalingEnabled: true
+            postgresMajorVersion: "18"
+            region: virginia
+            highAvailability:
+              enabled: true
+            ipAllowList: []
+        networking:
+          isolation: enabled
+        permissions:
+          protection: enabled

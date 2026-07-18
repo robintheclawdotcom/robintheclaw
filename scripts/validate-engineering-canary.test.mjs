@@ -5,12 +5,12 @@ import { calculateEvidenceHash, validateEngineeringCanary } from "./validate-eng
 
 const evidence = JSON.parse(readFileSync("config/engineering-canary-evidence.json", "utf8"));
 const audit = readFileSync("docs/production-audit-mainnet-live-execution.md");
-const migration = readFileSync("coordinator/migrations/0016_enable_basis_aapl_canary.sql", "utf8");
+const migration = readFileSync("coordinator/migrations/0017_refresh_basis_aapl_canary.sql", "utf8");
 const policy = JSON.parse(readFileSync("config/mainnet-live-policy.json", "utf8"));
 
 test("binds the enabled canary to the internal audit", () => {
   const result = validateEngineeringCanary({ evidence, audit, migration, policy });
-  assert.equal(result.evidenceHash, "7be8be449e9897075e9ab9f0e7d6fb26b9140fe5ae568adf696fca8c7bb31c2a");
+  assert.equal(result.evidenceHash, "a1bddab41e9b969f70e9a9cc42bde1350e1b4191a19513733171bfbf671a6f09");
   assert.equal(calculateEvidenceHash(evidence), result.evidenceHash);
 });
 

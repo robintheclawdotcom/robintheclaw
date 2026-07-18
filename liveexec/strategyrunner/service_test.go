@@ -223,6 +223,17 @@ func TestRunnerRejectsStaleOrTamperedQuotes(t *testing.T) {
 	if _, err := service.Run(context.Background(), input); err == nil {
 		t.Fatal("tampered account quote accepted")
 	}
+
+	service, input = validInput(t, protocol.ActionUnwind)
+	input.OpenEpisode = openEpisode(input)
+	input.Quotes.TargetStrategyManifestSHA256 = protocol.PreviousStrategyManifestSHA256
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+	if err := input.Quotes.Sign(privateKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Run(context.Background(), input); err == nil {
+		t.Fatal("normal runner accepted a predecessor-manifest recovery quote")
+	}
 }
 
 func TestRunnerRejectsAccountAndQuoteAgreementOnUnreviewedMarket(t *testing.T) {
@@ -308,6 +319,7 @@ func validInput(t *testing.T, action protocol.Action) (*Service, RunRequest) {
 		quote.Spot.MinimumAmountOut = "1990000"
 		quote.Perp.Side = "short"
 	} else {
+		quote.TargetStrategyManifestSHA256 = protocol.StrategyManifestSHA256
 		quote.Spot.Side = "sell"
 		quote.Spot.MinimumAmountOut = "24000000"
 		quote.Perp.Side = "long"

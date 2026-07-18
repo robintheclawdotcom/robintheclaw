@@ -28,71 +28,293 @@ func TestRobinhoodDualRPCCollection(t *testing.T) {
 	}
 	if !observation.WiringVerified || !observation.FinalityHealthy || !observation.FundingReady ||
 		!observation.OwnerGasReady || !observation.SignerGasReady || !observation.AgentEnabled || !observation.Flat ||
-		!observation.SignerNonceAligned || !observation.OracleHealthy || !observation.SequencerHealthy {
+		!observation.FinalizedAgentEnabled || observation.FinalizedAgentRevoked ||
+		observation.FinalizedAgentAddress != binding.Signer ||
+		observation.GlobalMode != "ACTIVE" || observation.FinalizedGlobalMode != "ACTIVE" ||
+		observation.FinalizedRiskMode != "ACTIVE" || !observation.SignerNonceAligned ||
+		!observation.OracleHealthy || !observation.SequencerHealthy {
 		t.Fatalf("unexpected observation: %+v", observation)
 	}
 }
 
-func TestRobinhoodDualRPCReconcilesAtLowerCommonFinalizedHeight(t *testing.T) {
+func TestRobinhoodDualRPCRejectsUnfinalizedAuthorizationReceipt(t *testing.T) {
 	binding := robinhoodTestBinding(t)
-	commonHash := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	primary := robinhoodRPCServerAt(t, binding, 101, commonHash,
-		"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", time.Now().UTC())
-	secondary := robinhoodRPCServerAt(t, binding, 100, commonHash, commonHash, time.Now().UTC())
+	now := time.Now().UTC().Truncate(time.Second)
+	finalized := blockRef{
+		Number: 100, Hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Timestamp: uint64(now.Add(-15 * time.Minute).Unix()),
+	}
+	authorization := blockRef{
+		Number: 101, Hash: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Timestamp: uint64(now.Add(-14 * time.Minute).Unix()),
+	}
+	current := blockRef{
+		Number: 110, Hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Timestamp: uint64(now.Unix()),
+	}
+	config := robinhoodRPCConfig{
+		Finalized: finalized, Safe: current, Latest: current,
+		Blocks:       map[uint64]blockRef{100: finalized, 101: authorization, 110: current},
+		ReceiptBlock: finalized,
+		ReceiptBlocks: map[string]blockRef{
+			binding.ReceiptHashes[1]: authorization,
+		},
+	}
+	primary := robinhoodRPCServerWithConfig(t, binding, config)
+	secondary := robinhoodRPCServerWithConfig(t, binding, config)
 	defer primary.Close()
 	defer secondary.Close()
-	client := &RobinhoodClient{
-		primary:   &rpcEndpoint{url: primary.URL, host: "provider-one", client: primary.Client()},
-		secondary: &rpcEndpoint{url: secondary.URL, host: "provider-two", client: secondary.Client()},
-		finalized: make(map[string]blockRef),
-	}
-	observation, err := client.Collect(context.Background(), binding)
+
+	observation, err := robinhoodTestClient(primary, secondary).Collect(context.Background(), binding)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !observation.FinalityHealthy || observation.FinalizedNumber != 100 || observation.FinalizedHash != commonHash {
-		t.Fatalf("skewed healthy RPCs did not reconcile at the common height: %+v", observation)
+	if observation.FinalityHealthy || observation.Healthy() {
+		t.Fatalf("unfinalized authorization receipt was accepted: %+v", observation)
 	}
 }
 
-func TestRobinhoodDualRPCRejectsStaleCommonFinalizedHeight(t *testing.T) {
+func TestRobinhoodDualRPCPropagatesGlobalRestriction(t *testing.T) {
 	binding := robinhoodTestBinding(t)
-	hash := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	primary := robinhoodRPCServerAt(t, binding, 100, hash, hash, time.Now().UTC().Add(-31*time.Second))
-	secondary := robinhoodRPCServerAt(t, binding, 100, hash, hash, time.Now().UTC().Add(-31*time.Second))
+	now := time.Now().UTC().Truncate(time.Second)
+	finalized := blockRef{
+		Number: 100, Hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Timestamp: uint64(now.Add(-15 * time.Minute).Unix()),
+	}
+	current := blockRef{
+		Number: 110, Hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Timestamp: uint64(now.Unix()),
+	}
+	config := robinhoodRPCConfig{
+		Finalized: finalized, Safe: current, Latest: current,
+		Blocks:       map[uint64]blockRef{100: finalized, 110: current},
+		ReceiptBlock: finalized,
+		StateByBlock: map[uint64]robinhoodBlockState{
+			100: {VaultAgent: binding.Signer, AgentEnabled: true},
+			110: {VaultAgent: binding.Signer, AgentEnabled: true, GlobalMode: 1},
+		},
+	}
+	primary := robinhoodRPCServerWithConfig(t, binding, config)
+	secondary := robinhoodRPCServerWithConfig(t, binding, config)
 	defer primary.Close()
 	defer secondary.Close()
-	client := &RobinhoodClient{
-		primary:   &rpcEndpoint{url: primary.URL, host: "provider-one", client: primary.Client()},
-		secondary: &rpcEndpoint{url: secondary.URL, host: "provider-two", client: secondary.Client()},
-		finalized: make(map[string]blockRef),
-	}
-	observation, err := client.Collect(context.Background(), binding)
+
+	observation, err := robinhoodTestClient(primary, secondary).Collect(context.Background(), binding)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observation.FinalityHealthy || observation.WiringVerified {
-		t.Fatalf("stale common head must fail closed: %+v", observation)
+	if observation.GlobalMode != "REDUCE_ONLY" || observation.FinalizedGlobalMode != "ACTIVE" ||
+		observation.Healthy() {
+		t.Fatalf("global restriction was not propagated: %+v", observation)
 	}
 }
 
-func TestRobinhoodDualRPCDisagreementPublishesUnhealthy(t *testing.T) {
+func TestRobinhoodDualRPCUsesFreshCurrentStateWithRealisticFinalityLag(t *testing.T) {
 	binding := robinhoodTestBinding(t)
-	primary := robinhoodRPCServer(t, binding, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	secondary := robinhoodRPCServer(t, binding, "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	now := time.Now().UTC().Truncate(time.Second)
+	finalized := blockRef{
+		Number: 100, Hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Timestamp: uint64(now.Add(-15 * time.Minute).Unix()),
+	}
+	current := blockRef{
+		Number: 110, Hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Timestamp: uint64(now.Unix()),
+	}
+	safe := blockRef{
+		Number: 105, Hash: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Timestamp: uint64(now.Add(-8 * time.Minute).Unix()),
+	}
+	config := robinhoodRPCConfig{
+		Finalized: finalized, Safe: safe, Latest: current,
+		Blocks:            map[uint64]blockRef{100: finalized, 105: safe, 110: current},
+		ReceiptBlock:      finalized,
+		SettlementByBlock: map[uint64]uint64{100: 0, 110: 50_000_000},
+	}
+	primary := robinhoodRPCServerWithConfig(t, binding, config)
+	secondary := robinhoodRPCServerWithConfig(t, binding, config)
 	defer primary.Close()
 	defer secondary.Close()
-	client := &RobinhoodClient{
-		primary:   &rpcEndpoint{url: primary.URL, host: "provider-one", client: primary.Client()},
-		secondary: &rpcEndpoint{url: secondary.URL, host: "provider-two", client: secondary.Client()},
-		finalized: make(map[string]blockRef),
-	}
+	client := robinhoodTestClient(primary, secondary)
 	observation, err := client.Collect(context.Background(), binding)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observation.WiringVerified || observation.FinalityHealthy || observation.FundingReady {
-		t.Fatalf("RPC disagreement must fail closed: %+v", observation)
+	if !observation.Healthy() || observation.FinalizedNumber != finalized.Number ||
+		observation.FinalizedHash != finalized.Hash || observation.FinalizedTimestamp != finalized.Timestamp ||
+		observation.SourceBlockNumber != current.Number || observation.SourceBlockHash != current.Hash ||
+		observation.SourceBlockTimestamp != current.Timestamp || !observation.ObservedAt.Equal(now) {
+		t.Fatalf("finalized and mutable evidence were not separated: %+v", observation)
+	}
+}
+
+func TestRobinhoodDualRPCSeparatesLatestRevocationFromFinalizedProof(t *testing.T) {
+	binding := robinhoodTestBinding(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	finalized := blockRef{
+		Number: 100, Hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Timestamp: uint64(now.Add(-15 * time.Minute).Unix()),
+	}
+	current := blockRef{
+		Number: 110, Hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Timestamp: uint64(now.Unix()),
+	}
+	safe := blockRef{
+		Number: 105, Hash: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Timestamp: uint64(now.Add(-8 * time.Minute).Unix()),
+	}
+	config := robinhoodRPCConfig{
+		Finalized: finalized, Safe: safe, Latest: current,
+		Blocks:       map[uint64]blockRef{100: finalized, 105: safe, 110: current},
+		ReceiptBlock: finalized,
+		StateByBlock: map[uint64]robinhoodBlockState{
+			100: {VaultAgent: binding.Signer, AgentEnabled: true, RiskMode: 0},
+			110: {VaultAgent: zeroAddress, AgentEnabled: false, RiskMode: 2},
+		},
+	}
+	primary := robinhoodRPCServerWithConfig(t, binding, config)
+	secondary := robinhoodRPCServerWithConfig(t, binding, config)
+	defer primary.Close()
+	defer secondary.Close()
+
+	observation, err := robinhoodTestClient(primary, secondary).Collect(context.Background(), binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.AgentEnabled || observation.RiskMode != "HALTED" ||
+		!observation.FinalizedAgentEnabled || observation.FinalizedAgentRevoked ||
+		observation.FinalizedRiskMode != "ACTIVE" || !observation.WiringVerified {
+		t.Fatalf("latest revocation was conflated with finality: %+v", observation)
+	}
+
+	finalizedConfig := robinhoodRPCConfig{
+		Finalized: current, Safe: current, Latest: current,
+		Blocks:       map[uint64]blockRef{110: current},
+		ReceiptBlock: current,
+		StateByBlock: map[uint64]robinhoodBlockState{
+			110: {VaultAgent: zeroAddress, AgentEnabled: false, RiskMode: 2},
+		},
+	}
+	finalizedPrimary := robinhoodRPCServerWithConfig(t, binding, finalizedConfig)
+	finalizedSecondary := robinhoodRPCServerWithConfig(t, binding, finalizedConfig)
+	defer finalizedPrimary.Close()
+	defer finalizedSecondary.Close()
+	finalizedObservation, err := robinhoodTestClient(finalizedPrimary, finalizedSecondary).
+		Collect(context.Background(), binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalizedObservation.FinalizedAgentEnabled ||
+		!finalizedObservation.FinalizedAgentRevoked ||
+		finalizedObservation.FinalizedRiskMode != "HALTED" ||
+		!finalizedObservation.WiringVerified {
+		t.Fatalf("finalized revocation proof was not published: %+v", finalizedObservation)
+	}
+}
+
+func TestRobinhoodDualRPCReconcilesProviderSkewAtCommonLatestHead(t *testing.T) {
+	binding := robinhoodTestBinding(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	finalized := blockRef{
+		Number: 100, Hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Timestamp: uint64(now.Add(-15 * time.Minute).Unix()),
+	}
+	primaryFinalized := blockRef{
+		Number: 101, Hash: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Timestamp: uint64(now.Add(-14 * time.Minute).Unix()),
+	}
+	commonCurrent := blockRef{
+		Number: 110, Hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Timestamp: uint64(now.Unix()),
+	}
+	primarySafe := blockRef{
+		Number: 106, Hash: "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		Timestamp: uint64(now.Add(-8 * time.Minute).Unix()),
+	}
+	primaryLatest := blockRef{
+		Number: 112, Hash: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		Timestamp: uint64(now.Unix()),
+	}
+	secondarySafe := blockRef{
+		Number: 105, Hash: "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		Timestamp: uint64(now.Add(-8*time.Minute - 30*time.Second).Unix()),
+	}
+	primary := robinhoodRPCServerWithConfig(t, binding, robinhoodRPCConfig{
+		Finalized: primaryFinalized, Safe: primarySafe, Latest: primaryLatest,
+		Blocks: map[uint64]blockRef{
+			100: finalized, 101: primaryFinalized, 105: secondarySafe, 106: primarySafe,
+			110: commonCurrent, 112: primaryLatest,
+		},
+		ReceiptBlock: finalized,
+	})
+	secondary := robinhoodRPCServerWithConfig(t, binding, robinhoodRPCConfig{
+		Finalized: finalized, Safe: secondarySafe, Latest: commonCurrent,
+		Blocks:       map[uint64]blockRef{100: finalized, 105: secondarySafe, 110: commonCurrent},
+		ReceiptBlock: finalized,
+	})
+	defer primary.Close()
+	defer secondary.Close()
+	client := robinhoodTestClient(primary, secondary)
+	observation, err := client.Collect(context.Background(), binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observation.Healthy() || observation.FinalizedNumber != finalized.Number ||
+		observation.SourceBlockNumber != commonCurrent.Number || observation.SourceBlockHash != commonCurrent.Hash {
+		t.Fatalf("skewed healthy RPCs did not reconcile at common latest block: %+v", observation)
+	}
+}
+
+func TestRobinhoodDualRPCRejectsCurrentBlockDisagreement(t *testing.T) {
+	binding := robinhoodTestBinding(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	finalized := blockRef{
+		Number: 100, Hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Timestamp: uint64(now.Add(-15 * time.Minute).Unix()),
+	}
+	firstCurrent := blockRef{
+		Number: 110, Hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Timestamp: uint64(now.Unix()),
+	}
+	secondCurrent := firstCurrent
+	secondCurrent.Hash = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	primary := robinhoodRPCServerWithConfig(t, binding, robinhoodRPCConfig{
+		Finalized: finalized, Safe: firstCurrent, Latest: firstCurrent,
+		Blocks: map[uint64]blockRef{100: finalized, 110: firstCurrent}, ReceiptBlock: finalized,
+	})
+	secondary := robinhoodRPCServerWithConfig(t, binding, robinhoodRPCConfig{
+		Finalized: finalized, Safe: secondCurrent, Latest: secondCurrent,
+		Blocks: map[uint64]blockRef{100: finalized, 110: secondCurrent}, ReceiptBlock: finalized,
+	})
+	defer primary.Close()
+	defer secondary.Close()
+	observation, err := robinhoodTestClient(primary, secondary).Collect(context.Background(), binding)
+	if err == nil || observation.Healthy() {
+		t.Fatalf("current RPC disagreement must fail closed: observation=%+v err=%v", observation, err)
+	}
+}
+
+func TestRobinhoodDualRPCRejectsStaleCurrentBlock(t *testing.T) {
+	binding := robinhoodTestBinding(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	finalized := blockRef{
+		Number: 100, Hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Timestamp: uint64(now.Add(-15 * time.Minute).Unix()),
+	}
+	stale := blockRef{
+		Number: 110, Hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Timestamp: uint64(now.Add(-6 * time.Second).Unix()),
+	}
+	config := robinhoodRPCConfig{
+		Finalized: finalized, Safe: stale, Latest: stale,
+		Blocks: map[uint64]blockRef{100: finalized, 110: stale}, ReceiptBlock: finalized,
+	}
+	primary := robinhoodRPCServerWithConfig(t, binding, config)
+	secondary := robinhoodRPCServerWithConfig(t, binding, config)
+	defer primary.Close()
+	defer secondary.Close()
+	observation, err := robinhoodTestClient(primary, secondary).Collect(context.Background(), binding)
+	if err == nil || observation.Healthy() {
+		t.Fatalf("stale current state must fail closed: observation=%+v err=%v", observation, err)
 	}
 }
 
@@ -105,17 +327,55 @@ func robinhoodTestBinding(t *testing.T) RobinhoodBinding {
 		Signer:               "0x5555555555555555555555555555555555555555",
 		VaultCodeHash:        "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		MinimumSettlementRaw: "25000000", MinimumOwnerGasRaw: "1", MinimumSignerGasRaw: "1",
-		ReceiptHashes:       []string{"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+		ReceiptHashes: []string{
+			"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		},
 		ExpectedSignerNonce: 7, SignerJournalReady: true,
 	}
 }
 
 func robinhoodRPCServer(t *testing.T, binding RobinhoodBinding, finalizedHash string) *httptest.Server {
-	return robinhoodRPCServerAt(t, binding, 100, finalizedHash, finalizedHash, time.Now().UTC())
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	finalized := blockRef{Number: 100, Hash: finalizedHash, Timestamp: uint64(now.Unix())}
+	current := blockRef{
+		Number: 101, Hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Timestamp: uint64(now.Unix()),
+	}
+	return robinhoodRPCServerWithConfig(t, binding, robinhoodRPCConfig{
+		Finalized: finalized, Safe: current, Latest: current,
+		Blocks: map[uint64]blockRef{100: finalized, 101: current}, ReceiptBlock: finalized,
+	})
 }
 
-func robinhoodRPCServerAt(t *testing.T, binding RobinhoodBinding, finalizedNumber uint64,
-	commonHash, finalizedHash string, blockTime time.Time) *httptest.Server {
+type robinhoodRPCConfig struct {
+	Finalized         blockRef
+	Safe              blockRef
+	Latest            blockRef
+	Blocks            map[uint64]blockRef
+	ReceiptBlock      blockRef
+	ReceiptBlocks     map[string]blockRef
+	SettlementByBlock map[uint64]uint64
+	StateByBlock      map[uint64]robinhoodBlockState
+}
+
+type robinhoodBlockState struct {
+	VaultAgent   string
+	AgentEnabled bool
+	GlobalMode   uint64
+	RiskMode     uint64
+}
+
+func robinhoodTestClient(primary, secondary *httptest.Server) *RobinhoodClient {
+	return &RobinhoodClient{
+		primary:   &rpcEndpoint{url: primary.URL, host: "provider-one", client: primary.Client()},
+		secondary: &rpcEndpoint{url: secondary.URL, host: "provider-two", client: secondary.Client()},
+		finalized: make(map[string]blockRef),
+	}
+}
+
+func robinhoodRPCServerWithConfig(t *testing.T, binding RobinhoodBinding, config robinhoodRPCConfig) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var rpc struct {
@@ -135,25 +395,29 @@ func robinhoodRPCServerAt(t *testing.T, binding RobinhoodBinding, finalizedNumbe
 			result = false
 		case "eth_getBlockByNumber":
 			tag := rpc.Params[0].(string)
-			number := finalizedNumber
-			hash := finalizedHash
-			if tag == "safe" {
-				number++
-				hash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-			} else if tag != "finalized" {
+			var block blockRef
+			switch tag {
+			case "finalized":
+				block = config.Finalized
+			case "safe":
+				block = config.Safe
+			case "latest":
+				block = config.Latest
+			default:
 				parsed, err := parseQuantity(tag)
 				if err != nil {
 					result = nil
 					break
 				}
-				number = parsed
-				if number == 100 {
-					hash = commonHash
-				}
+				block = config.Blocks[parsed]
+			}
+			if block.Number == 0 {
+				result = nil
+				break
 			}
 			result = map[string]string{
-				"number": encodeQuantity(number), "hash": hash,
-				"timestamp": encodeQuantity(uint64(blockTime.Unix())),
+				"number": encodeQuantity(block.Number), "hash": block.Hash,
+				"timestamp": encodeQuantity(block.Timestamp),
 			}
 		case "eth_getProof":
 			result = map[string]string{"address": binding.Vault, "codeHash": binding.VaultCodeHash}
@@ -162,16 +426,55 @@ func robinhoodRPCServerAt(t *testing.T, binding RobinhoodBinding, finalizedNumbe
 		case "eth_getTransactionCount":
 			result = "0x7"
 		case "eth_getTransactionReceipt":
+			hash := strings.ToLower(rpc.Params[0].(string))
+			receiptBlock := config.ReceiptBlock
+			if configured, ok := config.ReceiptBlocks[hash]; ok {
+				receiptBlock = configured
+			}
+			to := binding.Factory
+			if len(binding.ReceiptHashes) > 1 && strings.EqualFold(hash, binding.ReceiptHashes[1]) {
+				to = binding.Vault
+			}
 			result = map[string]interface{}{
-				"transactionHash": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-				"blockHash":       commonHash, "blockNumber": "0x64", "status": "0x1", "to": binding.Factory,
+				"transactionHash": hash,
+				"blockHash":       receiptBlock.Hash, "blockNumber": encodeQuantity(receiptBlock.Number),
+				"status": "0x1", "to": to,
 				"contractAddress": nil, "logs": []interface{}{},
 			}
 		case "eth_call":
 			call := rpc.Params[0].(map[string]interface{})
 			to := strings.ToLower(call["to"].(string))
 			data := strings.ToLower(call["data"].(string))
-			result = robinhoodCallResult(t, binding, to, data, blockTime)
+			tag := rpc.Params[1].(string)
+			number, err := parseQuantity(tag)
+			if err != nil {
+				result = nil
+				break
+			}
+			block, ok := config.Blocks[number]
+			if !ok {
+				result = nil
+				break
+			}
+			settlement := uint64(50_000_000)
+			if configured, ok := config.SettlementByBlock[number]; ok {
+				settlement = configured
+			}
+			state := robinhoodBlockState{
+				VaultAgent: binding.Signer, AgentEnabled: true, RiskMode: 0,
+			}
+			if configured, ok := config.StateByBlock[number]; ok {
+				state = configured
+			}
+			result = robinhoodCallResult(
+				t,
+				binding,
+				to,
+				data,
+				time.Unix(int64(block.Timestamp), 0).UTC(),
+				settlement,
+				state,
+			)
 		default:
 			writer.WriteHeader(http.StatusBadRequest)
 			return
@@ -181,10 +484,18 @@ func robinhoodRPCServerAt(t *testing.T, binding RobinhoodBinding, finalizedNumbe
 	}))
 }
 
-func robinhoodCallResult(t *testing.T, binding RobinhoodBinding, to, data string, blockTime time.Time) string {
+func robinhoodCallResult(
+	t *testing.T,
+	binding RobinhoodBinding,
+	to string,
+	data string,
+	blockTime time.Time,
+	settlement uint64,
+	state robinhoodBlockState,
+) string {
 	t.Helper()
 	if to == usdgAddress {
-		return abiWordUint(50_000_000)
+		return abiWordUint(settlement)
 	}
 	if to == aaplAddress {
 		switch data[:10] {
@@ -209,15 +520,16 @@ func robinhoodCallResult(t *testing.T, binding RobinhoodBinding, to, data string
 		return abiWords(1, answer, started, uint64(blockTime.Add(-time.Second).Unix()), 1)
 	}
 	if selector == "0x8e8f294b" {
-		return abiWordAddress(oracleFeed) + strings.TrimPrefix(abiWords(0, 0, 0, 60, 1, 0, 0, 0, 0), "0x")
+		return abiWordAddress(oracleFeed) + strings.TrimPrefix(abiWords(0, 0, 60, 1, 0, 0, 0, 0, 0), "0x")
 	}
 	values := map[string]string{
 		"0x2724fe09": abiWordAddress(binding.Owner), "0x15600884": abiWordAddress(binding.Factory),
 		"0x55bbaf1e": abiWordAddress(binding.RiskManager), "0x73068297": abiWordAddress(binding.SpotAdapter),
-		"0x5c3569a2": abiWordUint(0), "0x8da5cb5b": abiWordAddress(binding.Owner),
-		"0xf5ff5c76": abiWordAddress(binding.Signer), "0x7b103999": abiWordAddress(binding.Registry),
+		"0x5c3569a2": abiWordUint(state.GlobalMode), "0x8da5cb5b": abiWordAddress(binding.Owner),
+		"0xf5ff5c76": abiWordAddress(state.VaultAgent), "0x7b103999": abiWordAddress(binding.Registry),
 		"0x47842663": abiWordAddress(binding.RiskManager), "0x34d45c62": abiWordAddress(binding.SpotAdapter),
-		"0x99d29e71": abiWordUint(1), "0xae37e931": abiWordUint(1), "0x295a5212": abiWordUint(0),
+		"0x99d29e71": abiWordUint(boolUint(state.AgentEnabled)), "0xae37e931": abiWordUint(1),
+		"0x295a5212": abiWordUint(state.RiskMode),
 		"0x3b521cb6": abiWordAddress(sequencerFeed), "0x26a97b94": abiWordUint(60),
 	}
 	value, ok := values[selector]
@@ -225,6 +537,13 @@ func robinhoodCallResult(t *testing.T, binding RobinhoodBinding, to, data string
 		t.Fatalf("unexpected eth_call to=%s selector=%s", to, selector)
 	}
 	return value
+}
+
+func boolUint(value bool) uint64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func abiWords(values ...uint64) string {

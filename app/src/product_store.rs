@@ -3,9 +3,9 @@ use crate::lighter_provisioner::PublicLink;
 use crate::product::{
     command_transition, ActivityPage, ActivityRecord, AgentCommandRecord, AgentCommandWorkItem,
     AgentReadiness, AgentRecord, AgentSnapshot, ConfirmedVault, ExecutionAccountRecord,
-    ExecutionBindingRecord, IdentitySnapshot, MeResponse, OwnerAction, PreferencesInput,
-    PreferencesRecord, ReadinessEvidenceInput, SmartAccountRecord, UserRecord, VaultRecord,
-    WalletRecord, LIVE_STRATEGY_MANIFEST_SHA256, LIVE_STRATEGY_VERSION,
+    ExecutionBindingRecord, IdentitySnapshot, LighterBindingIdentity, MeResponse, OwnerAction,
+    PreferencesInput, PreferencesRecord, ReadinessEvidenceInput, SmartAccountRecord, UserRecord,
+    VaultRecord, WalletRecord, LIVE_STRATEGY_MANIFEST_SHA256, LIVE_STRATEGY_VERSION,
 };
 use crate::robinhood_provisioner::{PublicGraphBinding, UnsignedAction};
 use anyhow::{anyhow, Result};
@@ -13,7 +13,19 @@ use chrono::{DateTime, Duration, Utc};
 use sha3::{Digest, Keccak256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Transaction};
+use std::env;
 use uuid::Uuid;
+
+const GOVERNANCE_ROTATION_REQUIRED: &str = "governance_rotation_required";
+const EXTERNAL_AUTHORITY_RECONCILIATION_REQUIRED: &str =
+    "external_execution_authority_requires_reconciliation";
+const RELEASE_REGISTRATION_BLOCK_REASON: &str =
+    "strategy release changed; registration must not be reused";
+const RELEASE_COMMAND_BLOCK_REASON: &str = "strategy_release_changed_close_required";
+const PREDECESSOR_STRATEGY_MANIFESTS: [&str; 2] = [
+    "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f",
+    "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a",
+];
 
 #[derive(Clone, Default)]
 pub struct ProductStore {
@@ -53,7 +65,9 @@ impl ProductStore {
             .max_connections(10)
             .connect(database_url)
             .await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        if parse_migration_mode(env::var("APP_RUN_MIGRATIONS").ok().as_deref())? {
+            sqlx::migrate!("./migrations").run(&pool).await?;
+        }
         Ok(Self { pool: Some(pool) })
     }
 
@@ -63,6 +77,18 @@ impl ProductStore {
 
     pub fn is_enabled(&self) -> bool {
         self.pool.is_some()
+    }
+
+    pub async fn ready(&self) -> bool {
+        let Some(pool) = &self.pool else {
+            return false;
+        };
+        matches!(
+            sqlx::query_scalar::<_, i32>("SELECT 1")
+                .fetch_one(pool)
+                .await,
+            Ok(1)
+        )
     }
 
     pub async fn ensure_user(&self, did: &str) -> Result<UserRecord> {
@@ -426,7 +452,7 @@ impl ProductStore {
             r#"
             INSERT INTO agents (id, user_id, strategy_version, mode, status)
             VALUES ($1, $2, $3, 'paper', 'running')
-            ON CONFLICT (user_id) DO UPDATE SET
+            ON CONFLICT (user_id) WHERE status <> 'closed' DO UPDATE SET
                 status = 'running',
                 updated_at = now()
             WHERE agents.mode = 'paper'
@@ -451,42 +477,66 @@ impl ProductStore {
         }
         let user = self.ensure_user(did).await?;
         let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user.id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let existing = sqlx::query_as::<_, AgentRecord>(
+            r#"
+            SELECT id, strategy_version, mode, status, created_at, updated_at
+            FROM agents WHERE user_id = $1 FOR UPDATE
+            "#,
+        )
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = existing {
+            if existing.status == "closed"
+                && !closed_generation_reusable(&mut tx, user.id, existing.id).await?
+            {
+                return Err(anyhow!(GOVERNANCE_ROTATION_REQUIRED));
+            }
+            if existing.status != "closed"
+                && existing.mode == "live"
+                && existing.strategy_version == strategy_version
+            {
+                tx.commit().await?;
+                return Ok(existing);
+            }
+            if existing.status != "closed" && existing.mode != "paper" {
+                return Err(anyhow!("this account already has a different agent"));
+            }
+            let reopened = sqlx::query_as::<_, AgentRecord>(
+                r#"
+                UPDATE agents SET strategy_version = $3, mode = 'live', status = 'setup',
+                    blocked_reason = NULL, updated_at = now()
+                WHERE id = $1 AND user_id = $2
+                RETURNING id, strategy_version, mode, status, created_at, updated_at
+                "#,
+            )
+            .bind(existing.id)
+            .bind(user.id)
+            .bind(strategy_version)
+            .fetch_one(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(reopened);
+        }
         let inserted = sqlx::query_as::<_, AgentRecord>(
             r#"
             INSERT INTO agents (id, user_id, strategy_version, mode, status)
             VALUES ($1, $2, $3, 'live', 'setup')
-            ON CONFLICT (user_id) DO UPDATE SET
-                strategy_version = EXCLUDED.strategy_version,
-                mode = 'live',
-                status = 'setup',
-                blocked_reason = NULL,
-                updated_at = now()
-            WHERE agents.mode = 'paper'
             RETURNING id, strategy_version, mode, status, created_at, updated_at
             "#,
         )
         .bind(Uuid::new_v4())
         .bind(user.id)
         .bind(strategy_version)
-        .fetch_optional(pool)
+        .fetch_one(&mut *tx)
         .await?;
-        if let Some(record) = inserted {
-            return Ok(record);
-        }
-        let existing = sqlx::query_as::<_, AgentRecord>(
-            r#"
-            SELECT id, strategy_version, mode, status, created_at, updated_at
-            FROM agents WHERE user_id = $1
-            "#,
-        )
-        .bind(user.id)
-        .fetch_one(pool)
-        .await?;
-        if existing.mode == "live" && existing.strategy_version == strategy_version {
-            Ok(existing)
-        } else {
-            Err(anyhow!("this account already has a different agent"))
-        }
+        tx.commit().await?;
+        Ok(inserted)
     }
 
     pub async fn set_agent_status(
@@ -519,7 +569,7 @@ impl ProductStore {
         let user = self.ensure_user(did).await?;
         let pool = self.pool()?;
         let mut tx = pool.begin().await?;
-        let agent = sqlx::query_as::<_, AgentRecord>(
+        let mut agent = sqlx::query_as::<_, AgentRecord>(
             r#"
             SELECT id, strategy_version, mode, status, created_at, updated_at
             FROM agents WHERE id = $1 AND user_id = $2 FOR UPDATE
@@ -535,25 +585,80 @@ impl ProductStore {
                 "execution accounts are only available for the approved live strategy"
             ));
         }
-        let account = sqlx::query_as::<_, ExecutionAccountRecord>(
+        if agent.status == "closed" {
+            if !closed_generation_reusable(&mut tx, user.id, agent.id).await? {
+                return Err(anyhow!(GOVERNANCE_ROTATION_REQUIRED));
+            }
+            agent = sqlx::query_as::<_, AgentRecord>(
+                r#"
+                UPDATE agents SET status = 'setup', blocked_reason = NULL, updated_at = now()
+                WHERE id = $1
+                RETURNING id, strategy_version, mode, status, created_at, updated_at
+                "#,
+            )
+            .bind(agent.id)
+            .fetch_one(&mut *tx)
+            .await?;
+        }
+        let existing = sqlx::query_as::<_, ExecutionAccountRecord>(
             r#"
-            INSERT INTO execution_accounts (
-                id, user_id, agent_id, strategy_version, strategy_manifest_sha256,
-                chain_id, status
-            ) VALUES ($1, $2, $3, $4, $5, 4663, 'provisioning')
-            ON CONFLICT (agent_id) DO UPDATE SET updated_at = execution_accounts.updated_at
-            RETURNING id, agent_id, strategy_version, strategy_manifest_sha256,
+            SELECT id, agent_id, strategy_version, strategy_manifest_sha256,
                 chain_id, status, created_at, updated_at
+            FROM execution_accounts
+            WHERE agent_id = $1 AND user_id = $2
+            FOR UPDATE
             "#,
         )
-        .bind(Uuid::new_v4())
-        .bind(user.id)
         .bind(agent_id)
-        .bind(LIVE_STRATEGY_VERSION)
-        .bind(LIVE_STRATEGY_MANIFEST_SHA256)
-        .fetch_one(&mut *tx)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
         .await?;
-        let inserted = sqlx::query(
+        let reset = existing
+            .as_ref()
+            .is_some_and(|account| account.status == "closed");
+        let account = if let Some(existing) = existing {
+            if reset {
+                if !closed_generation_reusable(&mut tx, user.id, agent.id).await? {
+                    return Err(anyhow!(GOVERNANCE_ROTATION_REQUIRED));
+                }
+                sqlx::query_as::<_, ExecutionAccountRecord>(
+                    r#"
+                    UPDATE execution_accounts SET
+                        strategy_version = $2, strategy_manifest_sha256 = $3,
+                        chain_id = 4663, status = 'provisioning', updated_at = now()
+                    WHERE id = $1
+                    RETURNING id, agent_id, strategy_version, strategy_manifest_sha256,
+                        chain_id, status, created_at, updated_at
+                    "#,
+                )
+                .bind(existing.id)
+                .bind(LIVE_STRATEGY_VERSION)
+                .bind(LIVE_STRATEGY_MANIFEST_SHA256)
+                .fetch_one(&mut *tx)
+                .await?
+            } else {
+                existing
+            }
+        } else {
+            sqlx::query_as::<_, ExecutionAccountRecord>(
+                r#"
+                INSERT INTO execution_accounts (
+                    id, user_id, agent_id, strategy_version, strategy_manifest_sha256,
+                    chain_id, status
+                ) VALUES ($1, $2, $3, $4, $5, 4663, 'provisioning')
+                RETURNING id, agent_id, strategy_version, strategy_manifest_sha256,
+                    chain_id, status, created_at, updated_at
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(user.id)
+            .bind(agent_id)
+            .bind(LIVE_STRATEGY_VERSION)
+            .bind(LIVE_STRATEGY_MANIFEST_SHA256)
+            .fetch_one(&mut *tx)
+            .await?
+        };
+        let readiness_inserted = sqlx::query(
             r#"
             INSERT INTO agent_readiness (execution_account_id)
             VALUES ($1) ON CONFLICT (execution_account_id) DO NOTHING
@@ -562,35 +667,23 @@ impl ProductStore {
         .bind(account.id)
         .execute(&mut *tx)
         .await?;
-        if inserted.rows_affected() == 1 {
-            let readiness_snapshot_id = Uuid::new_v4();
-            for check_name in [
-                "lighter_linked",
-                "lighter_funded",
-                "robinhood_deployed",
-                "robinhood_funded",
-                "user_gas_ready",
-                "execution_gas_ready",
-                "policy_active",
-                "reconciled",
-            ] {
-                sqlx::query(
-                    r#"
-                    INSERT INTO agent_readiness_evidence (
-                        id, execution_account_id, snapshot_id, check_name, ready, source,
-                        evidence_digest, observed_at, expires_at
-                    ) VALUES ($1, $2, $3, $4, false, 'account-bootstrap', $5, now(), now() + interval '1 second')
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(account.id)
-                .bind(readiness_snapshot_id)
-                .bind(check_name)
-                .bind("0".repeat(64))
-                .execute(&mut *tx)
-                .await?;
-            }
-            insert_readiness_snapshot(&mut tx, account.id).await?;
+        if reset {
+            sqlx::query(
+                r#"
+                UPDATE agent_readiness SET
+                    lighter_linked = false, lighter_funded = false,
+                    robinhood_deployed = false, robinhood_funded = false,
+                    user_gas_ready = false, execution_gas_ready = false,
+                    policy_active = false, reconciled = false, updated_at = now()
+                WHERE execution_account_id = $1
+                "#,
+            )
+            .bind(account.id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        if reset || readiness_inserted.rows_affected() == 1 {
+            append_bootstrap_readiness(&mut tx, account.id).await?;
         }
         sqlx::query(
             r#"
@@ -625,31 +718,6 @@ impl ProductStore {
         .ok_or_else(|| anyhow!("execution account not found"))
     }
 
-    async fn onboarding_execution_account(
-        &self,
-        did: &str,
-        agent_id: Uuid,
-    ) -> Result<ExecutionAccountRecord> {
-        let user = self.ensure_user(did).await?;
-        sqlx::query_as::<_, ExecutionAccountRecord>(
-            r#"
-            SELECT account.id, account.agent_id, account.strategy_version,
-                account.strategy_manifest_sha256, account.chain_id, account.status,
-                account.created_at, account.updated_at
-            FROM execution_accounts account
-            JOIN agents agent ON agent.id = account.agent_id
-            WHERE account.agent_id = $1 AND account.user_id = $2
-              AND account.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
-              AND agent.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
-            "#,
-        )
-        .bind(agent_id)
-        .bind(user.id)
-        .fetch_optional(self.pool()?)
-        .await?
-        .ok_or_else(|| anyhow!("agent is not accepting onboarding changes"))
-    }
-
     pub async fn request_execution_binding(
         &self,
         did: &str,
@@ -680,24 +748,7 @@ impl ProductStore {
         if !owner_is_linked {
             return Err(anyhow!("execution owner is not linked to this account"));
         }
-        let account = sqlx::query_as::<_, ExecutionAccountRecord>(
-            r#"
-            SELECT account.id, account.agent_id, account.strategy_version,
-                account.strategy_manifest_sha256, account.chain_id, account.status,
-                account.created_at, account.updated_at
-            FROM execution_accounts account
-            JOIN agents agent ON agent.id = account.agent_id
-            WHERE account.agent_id = $1 AND account.user_id = $2
-              AND account.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
-              AND agent.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
-            FOR UPDATE OF account, agent
-            "#,
-        )
-        .bind(agent_id)
-        .bind(user.id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| anyhow!("agent is not accepting onboarding changes"))?;
+        let account = lock_onboarding_execution_account(&mut tx, user.id, agent_id).await?;
         let binding = sqlx::query_as::<_, ExecutionBindingRecord>(
             r#"
             INSERT INTO execution_account_bindings (
@@ -745,14 +796,17 @@ impl ProductStore {
         request_id: Uuid,
         graph: &PublicGraphBinding,
     ) -> Result<ExecutionBindingRecord> {
-        let account = self.onboarding_execution_account(did, agent_id).await?;
+        let public = validate_robinhood_graph(graph, false)?;
+        let user = self.ensure_user(did).await?;
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        let account = lock_onboarding_execution_account(&mut tx, user.id, agent_id).await?;
         if account.id != graph.execution_account_id {
             return Err(anyhow!(
                 "Robinhood provisioner returned a different execution account"
             ));
         }
-        let public = validate_robinhood_graph(graph, false)?;
-        sqlx::query_as::<_, ExecutionBindingRecord>(
+        let binding = sqlx::query_as::<_, ExecutionBindingRecord>(
             r#"
             UPDATE execution_account_bindings SET
                 provider_request_id = $4,
@@ -828,9 +882,11 @@ impl ProductStore {
         .bind(public.authorization_transaction_hash)
         .bind(public.authorization_block)
         .bind(public.status)
-        .fetch_optional(self.pool()?)
+        .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| anyhow!("Robinhood graph does not match its prepared account"))
+        .ok_or_else(|| anyhow!("Robinhood graph does not match its prepared account"))?;
+        tx.commit().await?;
+        Ok(binding)
     }
 
     pub async fn apply_robinhood_confirmation(
@@ -841,17 +897,30 @@ impl ProductStore {
         transaction_hash: &str,
         graph: &PublicGraphBinding,
     ) -> Result<ExecutionBindingRecord> {
-        let account = self.onboarding_execution_account(did, agent_id).await?;
+        let transaction_hash = normalize_bytes32(transaction_hash, "Robinhood transaction")?;
+        let public = validate_robinhood_graph(graph, true)?;
+        let user = self.ensure_user(did).await?;
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        let account = lock_onboarding_execution_account(&mut tx, user.id, agent_id).await?;
         if account.id != graph.execution_account_id {
             return Err(anyhow!(
                 "Robinhood provisioner returned a different execution account"
             ));
         }
-        let transaction_hash = normalize_bytes32(transaction_hash, "Robinhood transaction")?;
-        let public = validate_robinhood_graph(graph, true)?;
-        let existing = self
-            .execution_binding(did, agent_id, "robinhood", request_id)
-            .await?;
+        let existing_deployment_hash = sqlx::query_scalar::<_, Option<String>>(
+            r#"
+            SELECT proof_transaction_hash
+            FROM execution_account_bindings
+            WHERE execution_account_id = $1 AND venue = 'robinhood' AND request_id = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(account.id)
+        .bind(request_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow!("execution binding not found"))?;
         match public.status {
             "awaiting_signature"
                 if public.deployment_transaction_hash.as_deref()
@@ -860,7 +929,7 @@ impl ProductStore {
             "linked"
                 if public.authorization_transaction_hash.as_deref()
                     == Some(transaction_hash.as_str())
-                    && existing.proof_transaction_hash.as_deref()
+                    && existing_deployment_hash.as_deref()
                         == public.deployment_transaction_hash.as_deref() => {}
             _ => {
                 return Err(anyhow!(
@@ -868,7 +937,7 @@ impl ProductStore {
                 ));
             }
         }
-        sqlx::query_as::<_, ExecutionBindingRecord>(
+        let binding = sqlx::query_as::<_, ExecutionBindingRecord>(
             r#"
             UPDATE execution_account_bindings SET
                 proof_transaction_hash = coalesce(proof_transaction_hash, $12),
@@ -930,9 +999,11 @@ impl ProductStore {
         .bind(public.authorization_transaction_hash)
         .bind(public.authorization_block)
         .bind(public.status)
-        .fetch_optional(self.pool()?)
+        .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| anyhow!("Robinhood confirmation does not match its prepared graph"))
+        .ok_or_else(|| anyhow!("Robinhood confirmation does not match its prepared graph"))?;
+        tx.commit().await?;
+        Ok(binding)
     }
 
     pub async fn apply_lighter_link(
@@ -942,12 +1013,6 @@ impl ProductStore {
         request_id: Uuid,
         link: &PublicLink,
     ) -> Result<ExecutionBindingRecord> {
-        let account = self.onboarding_execution_account(did, agent_id).await?;
-        if account.id != link.execution_account_id {
-            return Err(anyhow!(
-                "Lighter provisioner returned a different execution account"
-            ));
-        }
         let owner = normalize_address(&link.owner_address)?;
         if link.account_index <= 0 || !(4..=254).contains(&link.api_key_index) {
             return Err(anyhow!(
@@ -968,7 +1033,16 @@ impl ProductStore {
         }
         let public_identifier =
             format!("account:{}:key:{}", link.account_index, link.api_key_index);
-        sqlx::query_as::<_, ExecutionBindingRecord>(
+        let user = self.ensure_user(did).await?;
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        let account = lock_onboarding_execution_account(&mut tx, user.id, agent_id).await?;
+        if account.id != link.execution_account_id {
+            return Err(anyhow!(
+                "Lighter provisioner returned a different execution account"
+            ));
+        }
+        let binding = sqlx::query_as::<_, ExecutionBindingRecord>(
             r#"
             UPDATE execution_account_bindings SET
                 provider_request_id = $4,
@@ -1015,9 +1089,11 @@ impl ProductStore {
         .bind(link.message_to_sign.as_deref())
         .bind(link.transaction_hash.as_deref())
         .bind(status)
-        .fetch_optional(self.pool()?)
+        .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| anyhow!("Lighter binding does not match its provisioned account"))
+        .ok_or_else(|| anyhow!("Lighter binding does not match its provisioned account"))?;
+        tx.commit().await?;
+        Ok(binding)
     }
 
     pub async fn execution_binding(
@@ -1057,6 +1133,32 @@ impl ProductStore {
         .fetch_optional(self.pool()?)
         .await?
         .ok_or_else(|| anyhow!("execution binding not found"))
+    }
+
+    pub async fn lighter_binding_identity(
+        &self,
+        did: &str,
+        agent_id: Uuid,
+    ) -> Result<LighterBindingIdentity> {
+        sqlx::query_as::<_, LighterBindingIdentity>(
+            r#"
+            SELECT account.id AS execution_account_id,
+                lower(binding.owner_address) AS owner_address,
+                binding.lighter_account_index AS account_index,
+                binding.lighter_api_key_index AS api_key_index
+            FROM execution_accounts account
+            JOIN execution_account_bindings binding
+              ON binding.execution_account_id = account.id
+             AND binding.venue = 'lighter'
+             AND binding.status = 'linked'
+            WHERE account.agent_id = $1 AND account.user_id = $2
+            "#,
+        )
+        .bind(agent_id)
+        .bind(self.ensure_user(did).await?.id)
+        .fetch_optional(self.pool()?)
+        .await?
+        .ok_or_else(|| anyhow!("linked Lighter binding not found"))
     }
 
     pub async fn enqueue_ready_account_registrations(&self, limit: u32) -> Result<()> {
@@ -1455,23 +1557,40 @@ impl ProductStore {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| anyhow!("live agent not found"))?;
-        let registration = sqlx::query_as::<_, (String, Option<DateTime<Utc>>)>(
-            r#"
-            SELECT status, registered_at
+        let registration =
+            sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<String>, String)>(
+                r#"
+            SELECT status, registered_at, last_error, strategy_manifest_sha256
             FROM coordinator_account_registrations
             WHERE execution_account_id = $1
             FOR UPDATE
             "#,
-        )
-        .bind(account_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+            )
+            .bind(account_id)
+            .fetch_optional(&mut *tx)
+            .await?;
         let coordinator_registered = registration
             .as_ref()
-            .is_some_and(|(status, _)| status == "registered");
+            .is_some_and(|(status, _, _, _)| status == "registered");
         let coordinator_ever_registered = registration
             .as_ref()
-            .is_some_and(|(_, registered_at)| registered_at.is_some());
+            .is_some_and(|(_, registered_at, _, _)| registered_at.is_some());
+        let authority = external_execution_authority_state(&mut tx, account_id).await?;
+        let release_blocked_close = command == "close"
+            && registration
+                .as_ref()
+                .is_some_and(|(status, registered_at, error, manifest)| {
+                    release_close_allowed(status, *registered_at, error.as_deref(), manifest)
+                });
+        if release_blocked_close {
+            terminalize_registration_commands(
+                &mut tx,
+                account_id,
+                true,
+                RELEASE_COMMAND_BLOCK_REASON,
+            )
+            .await?;
+        }
         if let Some(existing) = sqlx::query_as::<_, AgentCommandRecord>(
             r#"
             SELECT id, agent_id, execution_account_id, idempotency_key,
@@ -1539,15 +1658,26 @@ impl ProductStore {
         .fetch_one(&mut *tx)
         .await?
         .finalize();
-        let local_close =
-            command == "close" && !coordinator_registered && !coordinator_ever_registered;
-        let transition = if coordinator_registered || local_close {
+        let local_close = local_close_allowed(
+            command,
+            registration.is_some(),
+            coordinator_registered,
+            coordinator_ever_registered,
+            authority.binding_exists,
+            authority.provisioned,
+        );
+        let transition = if coordinator_registered || release_blocked_close || local_close {
             command_transition(
                 &agent_status,
                 command,
                 readiness.can_launch,
                 readiness.reconciled,
             )
+        } else if command == "close"
+            && !coordinator_registered
+            && (registration.is_some() || authority.binding_exists || authority.provisioned)
+        {
+            Err(EXTERNAL_AUTHORITY_RECONCILIATION_REQUIRED)
         } else {
             Err("coordinator_account_not_registered")
         };
@@ -1570,7 +1700,7 @@ impl ProductStore {
             sqlx::query(
                 r#"
                 UPDATE coordinator_account_registrations SET
-                    status = 'blocked', last_error = 'owner_closed_before_registration',
+                    status = 'closed', last_error = 'owner_closed_before_registration',
                     updated_at = now()
                 WHERE execution_account_id = $1 AND registered_at IS NULL
                 "#,
@@ -1923,11 +2053,29 @@ impl ProductStore {
                 JOIN agent_commands command ON command.id = outbox.command_id
                 JOIN coordinator_account_registrations registration
                   ON registration.execution_account_id = command.execution_account_id
-                 AND registration.status = 'registered'
+                 AND (
+                     registration.status = 'registered'
+                     OR (
+                         command.command = 'close'
+                         AND registration.status = 'blocked'
+                         AND registration.registered_at IS NOT NULL
+                         AND registration.last_error =
+                             'strategy release changed; registration must not be reused'
+                         AND registration.strategy_manifest_sha256 IN (
+                             'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f',
+                             '4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a'
+                         )
+                     )
+                 )
+                LEFT JOIN execution_account_bindings lighter
+                  ON lighter.execution_account_id = command.execution_account_id
+                 AND lighter.venue = 'lighter'
+                 AND lighter.status = 'linked'
                 WHERE outbox.delivered_at IS NULL
                   AND outbox.claimed_at IS NULL
                   AND outbox.available_at <= now()
                   AND command.status = 'pending'
+                  AND (command.command <> 'close' OR lighter.id IS NOT NULL)
                 ORDER BY outbox.available_at, outbox.command_id
                 LIMIT $2
                 FOR UPDATE OF outbox SKIP LOCKED
@@ -1944,12 +2092,43 @@ impl ProductStore {
             FROM claimed, coordinator_account_registrations registration
             WHERE command.id = claimed.command_id
               AND registration.execution_account_id = command.execution_account_id
-              AND registration.status = 'registered'
+              AND (
+                  registration.status = 'registered'
+                  OR (
+                      command.command = 'close'
+                      AND registration.status = 'blocked'
+                      AND registration.registered_at IS NOT NULL
+                      AND registration.last_error =
+                          'strategy release changed; registration must not be reused'
+                      AND registration.strategy_manifest_sha256 IN (
+                          'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f',
+                          '4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a'
+                      )
+                  )
+              )
             RETURNING command.id, command.agent_id, command.execution_account_id,
                 command.command, command.agent_status, command.target_agent_status,
                 (EXTRACT(EPOCH FROM command.dispatch_requested_at) * 1000)::bigint
                     AS requested_at_ms,
-                registration.robinhood_owner, registration.robinhood_vault
+                registration.robinhood_owner, registration.robinhood_vault,
+                (
+                    SELECT lower(owner_address)
+                    FROM execution_account_bindings
+                    WHERE execution_account_id = command.execution_account_id
+                      AND venue = 'lighter' AND status = 'linked'
+                ) AS lighter_owner,
+                (
+                    SELECT lighter_account_index
+                    FROM execution_account_bindings
+                    WHERE execution_account_id = command.execution_account_id
+                      AND venue = 'lighter' AND status = 'linked'
+                ) AS lighter_account_index,
+                (
+                    SELECT lighter_api_key_index
+                    FROM execution_account_bindings
+                    WHERE execution_account_id = command.execution_account_id
+                      AND venue = 'lighter' AND status = 'linked'
+                ) AS lighter_api_key_index
             "#,
         )
         .bind(worker_id)
@@ -1969,15 +2148,36 @@ impl ProductStore {
                 command.command, command.agent_status, command.target_agent_status,
                 (EXTRACT(EPOCH FROM command.dispatch_requested_at) * 1000)::bigint
                     AS requested_at_ms,
-                registration.robinhood_owner, registration.robinhood_vault
+                registration.robinhood_owner, registration.robinhood_vault,
+                lower(lighter.owner_address) AS lighter_owner,
+                lighter.lighter_account_index,
+                lighter.lighter_api_key_index
             FROM agent_commands command
             JOIN agent_command_outbox outbox ON outbox.command_id = command.id
             JOIN coordinator_account_registrations registration
               ON registration.execution_account_id = command.execution_account_id
-             AND registration.status = 'registered'
+             AND (
+                 registration.status = 'registered'
+                 OR (
+                     command.command = 'close'
+                     AND registration.status = 'blocked'
+                     AND registration.registered_at IS NOT NULL
+                     AND registration.last_error =
+                         'strategy release changed; registration must not be reused'
+                     AND registration.strategy_manifest_sha256 IN (
+                         'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f',
+                         '4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a'
+                     )
+                 )
+             )
+            LEFT JOIN execution_account_bindings lighter
+              ON lighter.execution_account_id = command.execution_account_id
+             AND lighter.venue = 'lighter'
+             AND lighter.status = 'linked'
             WHERE command.status IN ('processing', 'awaiting_signature')
               AND command.dispatch_requested_at IS NOT NULL
               AND outbox.delivered_at IS NULL
+              AND (command.command <> 'close' OR lighter.id IS NOT NULL)
             ORDER BY command.updated_at, command.id
             LIMIT $1
             "#,
@@ -1998,23 +2198,59 @@ impl ProductStore {
         if owner_actions.is_empty() {
             return Err(anyhow!("owner signature command omitted its actions"));
         }
+        let pool = self.pool()?;
+        let mut tx = pool.begin().await?;
+        let (command, registration_status, registered_at, last_error, manifest) = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<DateTime<Utc>>,
+                Option<String>,
+                String,
+            ),
+        >(
+            r#"
+                SELECT command.command, registration.status, registration.registered_at,
+                    registration.last_error, registration.strategy_manifest_sha256
+                FROM agent_commands command
+                JOIN coordinator_account_registrations registration
+                  ON registration.execution_account_id = command.execution_account_id
+                WHERE command.id = $1
+                FOR UPDATE OF registration
+                "#,
+        )
+        .bind(command_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow!("agent command registration is not available"))?;
+        if !registration_allows_command(
+            &command,
+            &registration_status,
+            registered_at,
+            last_error.as_deref(),
+            &manifest,
+        ) {
+            return Err(anyhow!("agent command registration is not active"));
+        }
         let updated = sqlx::query(
             r#"
             UPDATE agent_commands SET status = 'awaiting_signature',
                 result_evidence_digest = $2, result_owner_actions = $3,
                 updated_at = now()
-            WHERE id = $1 AND command = 'withdraw'
+            WHERE id = $1 AND command IN ('close', 'withdraw')
               AND status IN ('processing', 'awaiting_signature')
             "#,
         )
         .bind(command_id)
         .bind(evidence_digest)
         .bind(sqlx::types::Json(owner_actions))
-        .execute(self.pool()?)
+        .execute(&mut *tx)
         .await?;
         if updated.rows_affected() != 1 {
             return Err(anyhow!("agent command is not awaiting an owner signature"));
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2031,6 +2267,39 @@ impl ProductStore {
 
         let pool = self.pool()?;
         let mut tx = pool.begin().await?;
+        let (command, registration_status, registered_at, last_error, manifest) = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<DateTime<Utc>>,
+                Option<String>,
+                String,
+            ),
+        >(
+            r#"
+                SELECT command.command, registration.status, registration.registered_at,
+                    registration.last_error, registration.strategy_manifest_sha256
+                FROM agent_commands command
+                JOIN coordinator_account_registrations registration
+                  ON registration.execution_account_id = command.execution_account_id
+                WHERE command.id = $1
+                FOR UPDATE OF registration
+                "#,
+        )
+        .bind(command_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow!("agent command registration is not available"))?;
+        if !registration_allows_command(
+            &command,
+            &registration_status,
+            registered_at,
+            last_error.as_deref(),
+            &manifest,
+        ) {
+            return Err(anyhow!("agent command registration is not active"));
+        }
         let (status, agent_id, execution_account_id, initial_status, target_status, current_status) =
             sqlx::query_as::<_, (String, Uuid, Uuid, String, String, String)>(
                 r#"
@@ -2096,6 +2365,25 @@ impl ProductStore {
             .bind(&target_status)
             .execute(&mut *tx)
             .await?;
+            if target_status == "closed" {
+                sqlx::query(
+                    "UPDATE execution_accounts SET status = 'closed', updated_at = now() WHERE id = $1",
+                )
+                .bind(execution_account_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    r#"
+                    UPDATE coordinator_account_registrations
+                    SET status = 'closed', coordinator_account_status = 'closed',
+                        coordinator_control_mode = 'HALTED', updated_at = now()
+                    WHERE execution_account_id = $1
+                    "#,
+                )
+                .bind(execution_account_id)
+                .execute(&mut *tx)
+                .await?;
+            }
             sqlx::query(
                 r#"
                 UPDATE agent_commands SET status = 'completed', agent_status = $2,
@@ -2142,7 +2430,10 @@ impl ProductStore {
         let Some(record) = sqlx::query_as::<_, AgentRecord>(
             r#"
             SELECT id, strategy_version, mode, status, created_at, updated_at
-            FROM agents WHERE user_id = $1
+            FROM agents
+            WHERE user_id = $1
+            ORDER BY (status = 'closed'), updated_at DESC
+            LIMIT 1
             "#,
         )
         .bind(user_id)
@@ -2312,6 +2603,169 @@ impl ProductStore {
     }
 }
 
+async fn closed_generation_reusable(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    agent_id: Uuid,
+) -> Result<bool> {
+    let account = sqlx::query_as::<_, (Uuid, String)>(
+        r#"
+        SELECT id, status
+        FROM execution_accounts
+        WHERE user_id = $1 AND agent_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(user_id)
+    .bind(agent_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((account_id, status)) = account else {
+        return Ok(true);
+    };
+    if status != "closed" {
+        return Ok(false);
+    }
+    let registration_exists = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT execution_account_id
+        FROM coordinator_account_registrations
+        WHERE execution_account_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(account_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .is_some();
+    let authority = external_execution_authority_state(tx, account_id).await?;
+    Ok(!registration_exists && !authority.binding_exists && !authority.provisioned)
+}
+
+async fn append_bootstrap_readiness(
+    tx: &mut Transaction<'_, Postgres>,
+    execution_account_id: Uuid,
+) -> Result<()> {
+    let snapshot_id = Uuid::new_v4();
+    for check_name in [
+        "lighter_linked",
+        "lighter_funded",
+        "robinhood_deployed",
+        "robinhood_funded",
+        "user_gas_ready",
+        "execution_gas_ready",
+        "policy_active",
+        "reconciled",
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO agent_readiness_evidence (
+                id, execution_account_id, snapshot_id, check_name, ready, source,
+                evidence_digest, observed_at, expires_at
+            ) VALUES (
+                $1, $2, $3, $4, false, 'account-bootstrap',
+                $5, now(), now() + interval '1 second'
+            )
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(execution_account_id)
+        .bind(snapshot_id)
+        .bind(check_name)
+        .bind("0".repeat(64))
+        .execute(&mut **tx)
+        .await?;
+    }
+    insert_readiness_snapshot(tx, execution_account_id).await
+}
+
+async fn lock_onboarding_execution_account(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    agent_id: Uuid,
+) -> Result<ExecutionAccountRecord> {
+    sqlx::query_as::<_, ExecutionAccountRecord>(
+        r#"
+        SELECT account.id, account.agent_id, account.strategy_version,
+            account.strategy_manifest_sha256, account.chain_id, account.status,
+            account.created_at, account.updated_at
+        FROM execution_accounts account
+        JOIN agents agent ON agent.id = account.agent_id
+        WHERE account.agent_id = $1 AND account.user_id = $2
+          AND account.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+          AND agent.status IN ('provisioning', 'awaiting_signatures', 'awaiting_funding')
+        FOR UPDATE OF account, agent
+        "#,
+    )
+    .bind(agent_id)
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| anyhow!("agent is not accepting onboarding changes"))
+}
+
+#[derive(Default)]
+struct ExternalAuthorityState {
+    binding_exists: bool,
+    provisioned: bool,
+}
+
+async fn external_execution_authority_state(
+    tx: &mut Transaction<'_, Postgres>,
+    execution_account_id: Uuid,
+) -> Result<ExternalAuthorityState> {
+    let bindings = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT status <> 'provisioning'
+            OR provider_request_id IS NOT NULL
+            OR lighter_account_index IS NOT NULL
+            OR lighter_api_key_index IS NOT NULL
+            OR public_identifier IS NOT NULL
+            OR public_key IS NOT NULL
+            OR association_payload IS NOT NULL
+            OR proof_transaction_hash IS NOT NULL
+            OR robinhood_vault_address IS NOT NULL
+            OR robinhood_signer_address IS NOT NULL
+            OR robinhood_key_version IS NOT NULL
+            OR robinhood_factory_address IS NOT NULL
+            OR robinhood_registry_address IS NOT NULL
+            OR robinhood_policy_digest IS NOT NULL
+            OR robinhood_risk_manager_address IS NOT NULL
+            OR robinhood_spot_adapter_address IS NOT NULL
+            OR robinhood_deployment_block IS NOT NULL
+            OR robinhood_deployment_action IS NOT NULL
+            OR robinhood_authorization_transaction_hash IS NOT NULL
+            OR robinhood_authorization_block IS NOT NULL
+        FROM execution_account_bindings
+        WHERE execution_account_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(execution_account_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(ExternalAuthorityState {
+        binding_exists: !bindings.is_empty(),
+        provisioned: bindings.into_iter().any(|provisioned| provisioned),
+    })
+}
+
+fn local_close_allowed(
+    command: &str,
+    registration_exists: bool,
+    coordinator_registered: bool,
+    coordinator_ever_registered: bool,
+    binding_exists: bool,
+    external_authority_provisioned: bool,
+) -> bool {
+    command == "close"
+        && !registration_exists
+        && !coordinator_registered
+        && !coordinator_ever_registered
+        && !binding_exists
+        && !external_authority_provisioned
+}
+
 fn validate_evidence_digest(value: &str) -> Result<()> {
     if value.len() == 64
         && value
@@ -2323,6 +2777,74 @@ fn validate_evidence_digest(value: &str) -> Result<()> {
     Err(anyhow!("invalid command evidence digest"))
 }
 
+fn release_close_allowed(
+    status: &str,
+    registered_at: Option<DateTime<Utc>>,
+    last_error: Option<&str>,
+    manifest: &str,
+) -> bool {
+    status == "blocked"
+        && registered_at.is_some()
+        && last_error == Some(RELEASE_REGISTRATION_BLOCK_REASON)
+        && PREDECESSOR_STRATEGY_MANIFESTS.contains(&manifest)
+}
+
+fn registration_allows_command(
+    command: &str,
+    status: &str,
+    registered_at: Option<DateTime<Utc>>,
+    last_error: Option<&str>,
+    manifest: &str,
+) -> bool {
+    status == "registered"
+        || (command == "close"
+            && release_close_allowed(status, registered_at, last_error, manifest))
+}
+
+async fn terminalize_registration_commands(
+    tx: &mut Transaction<'_, Postgres>,
+    execution_account_id: Uuid,
+    preserve_release_close: bool,
+    error_reason: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        WITH terminalized AS (
+            UPDATE agent_commands SET
+                status = 'failed', error_reason = $3,
+                result_evidence_digest = NULL, result_owner_actions = '[]'::jsonb,
+                completed_at = now(), updated_at = now()
+            WHERE execution_account_id = $1
+              AND status IN ('pending', 'processing', 'awaiting_signature')
+              AND (command <> 'close' OR NOT $2)
+            RETURNING id
+        )
+        UPDATE agent_command_outbox SET
+            delivered_at = coalesce(delivered_at, now()), claimed_at = NULL,
+            claimed_by = NULL, last_error = $3
+        WHERE command_id IN (SELECT id FROM terminalized)
+        "#,
+    )
+    .bind(execution_account_id)
+    .bind(preserve_release_close)
+    .bind(error_reason)
+    .execute(&mut **tx)
+    .await?;
+    if preserve_release_close {
+        sqlx::query(
+            r#"
+            UPDATE agent_commands SET agent_status = 'blocked', updated_at = now()
+            WHERE execution_account_id = $1 AND command = 'close'
+              AND status IN ('pending', 'processing', 'awaiting_signature')
+            "#,
+        )
+        .bind(execution_account_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn block_registration_transaction(
     tx: &mut Transaction<'_, Postgres>,
     execution_account_id: Uuid,
@@ -2331,16 +2853,35 @@ async fn block_registration_transaction(
     if reason.trim().is_empty() || reason.len() > 128 {
         return Err(anyhow!("invalid account registration block reason"));
     }
-    sqlx::query(
+    let registration = sqlx::query_as::<_, (Option<DateTime<Utc>>, String)>(
         r#"
         UPDATE coordinator_account_registrations SET
             status = 'blocked', last_error = $2, updated_at = now()
         WHERE execution_account_id = $1
+        RETURNING registered_at, strategy_manifest_sha256
         "#,
     )
     .bind(execution_account_id)
     .bind(reason)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let preserve_release_close = registration
+        .as_ref()
+        .is_some_and(|(registered_at, manifest)| {
+            reason == RELEASE_REGISTRATION_BLOCK_REASON
+                && registered_at.is_some()
+                && PREDECESSOR_STRATEGY_MANIFESTS.contains(&manifest.as_str())
+        });
+    terminalize_registration_commands(
+        tx,
+        execution_account_id,
+        preserve_release_close,
+        if preserve_release_close {
+            RELEASE_COMMAND_BLOCK_REASON
+        } else {
+            reason
+        },
+    )
     .await?;
     sqlx::query(
         r#"
@@ -2679,9 +3220,94 @@ pub fn normalize_address(value: &str) -> Result<String> {
     Ok(output)
 }
 
+fn parse_migration_mode(value: Option<&str>) -> Result<bool> {
+    match value {
+        None | Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(_) => Err(anyhow!("APP_RUN_MIGRATIONS must be true or false")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_close_requires_zero_external_execution_authority() {
+        assert!(local_close_allowed(
+            "close", false, false, false, false, false
+        ));
+        assert!(!local_close_allowed(
+            "pause", false, false, false, false, false
+        ));
+        assert!(!local_close_allowed(
+            "close", true, false, false, false, false
+        ));
+        assert!(!local_close_allowed("close", true, true, true, true, true));
+        assert!(!local_close_allowed(
+            "close", false, false, false, true, false
+        ));
+        assert!(!local_close_allowed(
+            "close", false, false, false, true, true
+        ));
+    }
+
+    #[test]
+    fn application_migration_mode_is_strict() {
+        assert!(parse_migration_mode(None).unwrap());
+        assert!(parse_migration_mode(Some("true")).unwrap());
+        assert!(!parse_migration_mode(Some("false")).unwrap());
+        assert!(parse_migration_mode(Some("FALSE")).is_err());
+    }
+
+    #[test]
+    fn only_canonical_predecessor_close_survives_release_blocking() {
+        let registered_at = Some(Utc::now());
+        assert!(registration_allows_command(
+            "close",
+            "blocked",
+            registered_at,
+            Some(RELEASE_REGISTRATION_BLOCK_REASON),
+            PREDECESSOR_STRATEGY_MANIFESTS[0],
+        ));
+        for command in ["launch", "pause", "resume", "withdraw"] {
+            assert!(!registration_allows_command(
+                command,
+                "blocked",
+                registered_at,
+                Some(RELEASE_REGISTRATION_BLOCK_REASON),
+                PREDECESSOR_STRATEGY_MANIFESTS[0],
+            ));
+        }
+        assert!(!registration_allows_command(
+            "close",
+            "blocked",
+            registered_at,
+            Some(RELEASE_REGISTRATION_BLOCK_REASON),
+            LIVE_STRATEGY_MANIFEST_SHA256,
+        ));
+        assert!(!registration_allows_command(
+            "close",
+            "blocked",
+            None,
+            Some(RELEASE_REGISTRATION_BLOCK_REASON),
+            PREDECESSOR_STRATEGY_MANIFESTS[0],
+        ));
+        assert!(!registration_allows_command(
+            "close",
+            "blocked",
+            registered_at,
+            Some("different reason"),
+            PREDECESSOR_STRATEGY_MANIFESTS[0],
+        ));
+        assert!(registration_allows_command(
+            "withdraw",
+            "registered",
+            registered_at,
+            None,
+            LIVE_STRATEGY_MANIFEST_SHA256,
+        ));
+    }
 
     #[test]
     fn checksums_addresses() {

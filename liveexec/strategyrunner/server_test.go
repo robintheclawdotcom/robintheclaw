@@ -30,18 +30,21 @@ func TestServerRequiresAuthenticationAndRejectsReplay(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("authenticated request failed: %d %s", response.Code, response.Body.String())
 	}
+	assertRunnerResponseAuthenticated(t, response, key, "nonce-1")
 
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, authenticatedRequest(body, timestamp, "nonce-1", signature))
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("replayed request returned %d", response.Code)
 	}
+	assertRunnerResponseAuthenticated(t, response, key, "nonce-1")
 
 	response = httptest.NewRecorder()
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/run", bytes.NewReader(body)))
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated request returned %d", response.Code)
 	}
+	assertRunnerResponseAuthenticated(t, response, key, "")
 }
 
 func TestServerRejectsUnknownStrategyParameters(t *testing.T) {
@@ -59,6 +62,7 @@ func TestServerRejectsUnknownStrategyParameters(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown strategy parameter returned %d", response.Code)
 	}
+	assertRunnerResponseAuthenticated(t, response, key, "nonce-2")
 }
 
 func TestDisabledServerStaysFailClosed(t *testing.T) {
@@ -117,4 +121,19 @@ func authenticatedRequest(body []byte, timestamp, nonce, signature string) *http
 	request.Header.Set("X-Robin-Nonce", nonce)
 	request.Header.Set("X-Robin-Signature", signature)
 	return request
+}
+
+func assertRunnerResponseAuthenticated(t *testing.T, response *httptest.ResponseRecorder, key []byte, nonce string) {
+	t.Helper()
+	if err := protocol.VerifyResponseMAC(
+		key,
+		"/v1/run",
+		"evaluation-service",
+		nonce,
+		response.Code,
+		response.Body.Bytes(),
+		response.Header().Get("X-Robin-Response-Signature"),
+	); err != nil {
+		t.Fatalf("response authentication failed: %v", err)
+	}
 }

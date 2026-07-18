@@ -1,6 +1,5 @@
 {
-  "Finalized": {"number": 100, "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-  "Safe": {"number": 101, "hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+  "Block": {"number": 100, "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "timestamp": 1700000000},
   "Owner": "0x1111111111111111111111111111111111111111",
   "Factory": "0x2222222222222222222222222222222222222222",
   "RiskManager": "0x3333333333333333333333333333333333333333",

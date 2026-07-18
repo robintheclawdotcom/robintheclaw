@@ -119,6 +119,17 @@ func (p *CoordinatorPublisher) publish(ctx context.Context, body []byte, payload
 	if err != nil {
 		return protocol.MarketQuoteReceipt{}, fmt.Errorf("%w: invalid response body", ErrMarketQuoteAmbiguous)
 	}
+	if err := protocol.VerifyResponseMAC(
+		p.key,
+		"/v1/market-quotes",
+		p.caller,
+		nonce,
+		response.StatusCode,
+		responseBody,
+		response.Header.Get("X-RTC-Response-Signature"),
+	); err != nil {
+		return protocol.MarketQuoteReceipt{}, fmt.Errorf("%w: invalid response signature", ErrMarketQuoteAmbiguous)
+	}
 	if response.StatusCode == http.StatusConflict {
 		return protocol.MarketQuoteReceipt{}, ErrMarketQuoteConflict
 	}

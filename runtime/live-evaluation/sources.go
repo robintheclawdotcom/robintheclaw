@@ -257,5 +257,5 @@ func schedulerStrategyVersion() string {
 }
 
 func schedulerManifest() string {
-	return "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f"
+	return "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937"
 }

@@ -314,16 +314,14 @@ impl SignerClients {
             .header(header::CONTENT_TYPE, "application/json")
             .header("X-RTC-Caller", &self.caller_id)
             .header("X-RTC-Timestamp", timestamp)
-            .header("X-RTC-Nonce", nonce)
+            .header("X-RTC-Nonce", &nonce)
             .header("X-RTC-Signature", signature)
             .body(body)
             .send()
             .await
             .map_err(|_| SignerClientError::SignerTransport)?;
-        let status = response.status();
-        let body = read_limited(response)
-            .await
-            .map_err(|_| SignerClientError::InvalidSignerResponse)?;
+        let (status, body) =
+            read_authenticated_response(response, path, &self.caller_id, &nonce, key).await?;
         if !status.is_success() {
             return Err(SignerClientError::SignerRejected(status.as_u16()));
         }
@@ -350,12 +348,60 @@ fn sign_request(
     hex::encode(mac.finalize().into_bytes())
 }
 
-async fn read_limited(mut response: Response) -> Result<Vec<u8>, reqwest::Error> {
+async fn read_authenticated_response(
+    response: Response,
+    path: &str,
+    caller: &str,
+    nonce: &str,
+    key: &[u8; 32],
+) -> Result<(reqwest::StatusCode, Vec<u8>), SignerClientError> {
+    let mut signatures = response
+        .headers()
+        .get_all("X-RTC-Response-Signature")
+        .iter();
+    let encoded = signatures
+        .next()
+        .ok_or(SignerClientError::InvalidSignerResponse)?;
+    if signatures.next().is_some() {
+        return Err(SignerClientError::InvalidSignerResponse);
+    }
+    let provided =
+        hex::decode(encoded.as_bytes()).map_err(|_| SignerClientError::InvalidSignerResponse)?;
+    if provided.len() != Sha256::output_size() {
+        return Err(SignerClientError::InvalidSignerResponse);
+    }
+
+    let status = response.status();
+    let body = read_limited(response)
+        .await
+        .map_err(|_| SignerClientError::InvalidSignerResponse)?;
+    let digest = Sha256::digest(&body);
+    let canonical = format!(
+        "RESPONSE\n{path}\n{caller}\n{nonce}\n{}\n{}",
+        status.as_u16(),
+        hex::encode(digest)
+    );
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("fixed-length HMAC key");
+    mac.update(canonical.as_bytes());
+    mac.verify_slice(&provided)
+        .map_err(|_| SignerClientError::InvalidSignerResponse)?;
+    Ok((status, body))
+}
+
+enum ResponseReadError {
+    Transport,
+    TooLarge,
+}
+
+async fn read_limited(mut response: Response) -> Result<Vec<u8>, ResponseReadError> {
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| ResponseReadError::Transport)?
+    {
         if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            body.clear();
-            return Ok(body);
+            return Err(ResponseReadError::TooLarge);
         }
         body.extend_from_slice(&chunk);
     }
@@ -414,9 +460,10 @@ struct NextNonce {
 mod tests {
     use super::*;
     use axum::{
-        body::Bytes,
+        body::{Body, Bytes},
         extract::State,
         http::{HeaderMap, StatusCode},
+        response::Response as AxumResponse,
         routing::post,
         Json, Router,
     };
@@ -455,27 +502,35 @@ mod tests {
     async fn signer_request_is_authenticated() {
         let key = [5; 32];
         let captured = Arc::new(Mutex::new(None));
-        let app = Router::new()
-            .route(
-                "/v1/sign/create-order",
-                post(
-                    |State(state): State<CapturedRequest>,
-                     headers: HeaderMap,
-                     body: Bytes| async move {
-                        *state.lock().unwrap() = Some((headers, body));
-                        Json(serde_json::json!({
-                            "executionAccountId": "account-canary-1",
-                            "accountIndex": 7,
-                            "apiKeyIndex": 4,
-                            "intentId": "intent-1",
-                            "txType": 14,
-                            "txHash": HASH,
-                            "txInfo": {"Nonce": 1}
-                        }))
-                    },
-                ),
-            )
-            .with_state(captured.clone());
+        let app =
+            Router::new()
+                .route(
+                    "/v1/sign/create-order",
+                    post(
+                        move |State(state): State<CapturedRequest>,
+                              headers: HeaderMap,
+                              body: Bytes| async move {
+                            let response_headers = headers.clone();
+                            *state.lock().unwrap() = Some((headers, body));
+                            authenticated_json_response(
+                                &key,
+                                "/v1/sign/create-order",
+                                &response_headers,
+                                StatusCode::OK,
+                                serde_json::json!({
+                                "executionAccountId": "account-canary-1",
+                                "accountIndex": 7,
+                                "apiKeyIndex": 4,
+                                "intentId": "intent-1",
+                                "txType": 14,
+                                "txHash": HASH,
+                                "txInfo": {"Nonce": 1}
+                                }),
+                            )
+                        },
+                    ),
+                )
+                .with_state(captured.clone());
         let base_url = serve(app).await;
         let clients = clients(&base_url, &base_url, key, [6; 32]);
         let request = lighter_request();
@@ -619,7 +674,7 @@ mod tests {
             "superseded",
             "quarantined",
         ] {
-            let app = robinhood_app(StatusCode::ACCEPTED, status);
+            let app = robinhood_app(StatusCode::ACCEPTED, status, [6; 32]);
             let base_url = serve(app).await;
             let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
             let submission = clients
@@ -632,7 +687,7 @@ mod tests {
 
     #[tokio::test]
     async fn robinhood_rejects_terminal_failure_states() {
-        let app = robinhood_app(StatusCode::ACCEPTED, "reverted");
+        let app = robinhood_app(StatusCode::ACCEPTED, "reverted", [6; 32]);
         let base_url = serve(app).await;
         let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
         let result = clients.execute_robinhood_spot(&robinhood_request()).await;
@@ -654,7 +709,7 @@ mod tests {
 
     #[tokio::test]
     async fn robinhood_rejects_unknown_journal_state() {
-        let app = robinhood_app(StatusCode::ACCEPTED, "unknown");
+        let app = robinhood_app(StatusCode::ACCEPTED, "unknown", [6; 32]);
         let base_url = serve(app).await;
         let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
         let result = clients.execute_robinhood_spot(&robinhood_request()).await;
@@ -663,11 +718,55 @@ mod tests {
 
     #[tokio::test]
     async fn robinhood_conflict_is_a_deterministic_signer_rejection() {
-        let app = Router::new().route("/v1/spot-intents", post(|| async { StatusCode::CONFLICT }));
+        let app = Router::new().route(
+            "/v1/spot-intents",
+            post(|headers: HeaderMap| async move {
+                authenticated_response(
+                    &[6; 32],
+                    "/v1/spot-intents",
+                    &headers,
+                    StatusCode::CONFLICT,
+                    Vec::new(),
+                )
+            }),
+        );
         let base_url = serve(app).await;
         let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
         let result = clients.execute_robinhood_spot(&robinhood_request()).await;
         assert_eq!(result, Err(SignerClientError::SignerRejected(409)));
+    }
+
+    #[tokio::test]
+    async fn signer_responses_fail_closed_on_authentication_tampering() {
+        for mutation in [
+            ResponseMutation::Missing,
+            ResponseMutation::Body,
+            ResponseMutation::Status,
+            ResponseMutation::Path,
+            ResponseMutation::Nonce,
+            ResponseMutation::SignerSubstitution,
+        ] {
+            let app = tampered_lighter_app(mutation);
+            let base_url = serve(app).await;
+            let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
+            let result = clients.sign_lighter_create_order(&lighter_request()).await;
+            assert_eq!(
+                result,
+                Err(SignerClientError::InvalidSignerResponse),
+                "accepted {mutation:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn robinhood_response_cannot_be_substituted_for_lighter() {
+        let app = robinhood_app(StatusCode::ACCEPTED, "submitted", [5; 32]);
+        let base_url = serve(app).await;
+        let clients = clients(&base_url, &base_url, [5; 32], [6; 32]);
+        assert_eq!(
+            clients.execute_robinhood_spot(&robinhood_request()).await,
+            Err(SignerClientError::InvalidSignerResponse)
+        );
     }
 
     fn lighter_request() -> LighterCreateOrderRequest {
@@ -710,16 +809,19 @@ mod tests {
         }
     }
 
-    fn robinhood_app(status_code: StatusCode, status: &str) -> Router {
+    fn robinhood_app(status_code: StatusCode, status: &str, key: [u8; 32]) -> Router {
         let status = status.to_owned();
         Router::new().route(
             "/v1/spot-intents",
-            post(move || {
+            post(move |headers: HeaderMap| {
                 let status = status.clone();
                 async move {
-                    (
+                    authenticated_json_response(
+                        &key,
+                        "/v1/spot-intents",
+                        &headers,
                         status_code,
-                        Json(serde_json::json!({
+                        serde_json::json!({
                             "execution_account_id": "account-canary-1",
                             "vault_address": "0x0000000000000000000000000000000000000002",
                             "signer_address": "0x0000000000000000000000000000000000000003",
@@ -728,11 +830,150 @@ mod tests {
                             "tx_hash": HASH,
                             "nonce": 7,
                             "status": status,
-                        })),
+                        }),
                     )
                 }
             }),
         )
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ResponseMutation {
+        Missing,
+        Body,
+        Status,
+        Path,
+        Nonce,
+        SignerSubstitution,
+    }
+
+    fn tampered_lighter_app(mutation: ResponseMutation) -> Router {
+        Router::new().route(
+            "/v1/sign/create-order",
+            post(move |headers: HeaderMap| async move {
+                let actual_body = serde_json::to_vec(&serde_json::json!({
+                    "executionAccountId": "account-canary-1",
+                    "accountIndex": 7,
+                    "apiKeyIndex": 4,
+                    "intentId": "intent-1",
+                    "txType": 14,
+                    "txHash": HASH,
+                    "txInfo": {"Nonce": 1}
+                }))
+                .unwrap();
+                let signed_body = if matches!(mutation, ResponseMutation::Body) {
+                    b"{}".to_vec()
+                } else {
+                    actual_body.clone()
+                };
+                let signed_status = if matches!(mutation, ResponseMutation::Status) {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                };
+                let path = if matches!(mutation, ResponseMutation::Path) {
+                    "/v1/spot-intents"
+                } else {
+                    "/v1/sign/create-order"
+                };
+                let nonce = if matches!(mutation, ResponseMutation::Nonce) {
+                    "substituted-response-nonce"
+                } else {
+                    header_value(&headers, "X-RTC-Nonce")
+                };
+                let key = if matches!(mutation, ResponseMutation::SignerSubstitution) {
+                    [6; 32]
+                } else {
+                    [5; 32]
+                };
+                response_with_signature(
+                    &key,
+                    path,
+                    "execution-coordinator",
+                    nonce,
+                    signed_status,
+                    StatusCode::OK,
+                    signed_body,
+                    actual_body,
+                    !matches!(mutation, ResponseMutation::Missing),
+                )
+            }),
+        )
+    }
+
+    fn authenticated_json_response(
+        key: &[u8; 32],
+        path: &str,
+        headers: &HeaderMap,
+        status: StatusCode,
+        value: serde_json::Value,
+    ) -> AxumResponse {
+        authenticated_response(
+            key,
+            path,
+            headers,
+            status,
+            serde_json::to_vec(&value).unwrap(),
+        )
+    }
+
+    fn authenticated_response(
+        key: &[u8; 32],
+        path: &str,
+        headers: &HeaderMap,
+        status: StatusCode,
+        body: Vec<u8>,
+    ) -> AxumResponse {
+        response_with_signature(
+            key,
+            path,
+            "execution-coordinator",
+            header_value(headers, "X-RTC-Nonce"),
+            status,
+            status,
+            body.clone(),
+            body,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn response_with_signature(
+        key: &[u8; 32],
+        path: &str,
+        caller: &str,
+        nonce: &str,
+        signed_status: StatusCode,
+        actual_status: StatusCode,
+        signed_body: Vec<u8>,
+        actual_body: Vec<u8>,
+        include_signature: bool,
+    ) -> AxumResponse {
+        let digest = Sha256::digest(&signed_body);
+        let canonical = format!(
+            "RESPONSE\n{path}\n{caller}\n{nonce}\n{}\n{}",
+            signed_status.as_u16(),
+            hex::encode(digest)
+        );
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+        mac.update(canonical.as_bytes());
+        let mut builder = AxumResponse::builder()
+            .status(actual_status)
+            .header(header::CONTENT_TYPE, "application/json");
+        if include_signature {
+            builder = builder.header(
+                "X-RTC-Response-Signature",
+                hex::encode(mac.finalize().into_bytes()),
+            );
+        }
+        builder.body(Body::from(actual_body)).unwrap()
+    }
+
+    fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
     }
 
     fn clients(

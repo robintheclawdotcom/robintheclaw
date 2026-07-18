@@ -1,11 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
+import {
+  BodyTooLargeError,
+  readBoundedBody,
+  validateContentLength,
+} from "../../../../lib/server-body";
 import { isSameOriginRequest } from "../../../../lib/server-origin";
 import { requestSubject, takeRateLimit } from "../../../../lib/server-rate-limit";
 
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ path: string[] }> };
+const maxBodyBytes = 256 * 1_024;
 
 async function proxy(request: NextRequest, context: RouteContext) {
   const requestId = request.headers.get("x-request-id") ?? randomUUID();
@@ -46,12 +52,30 @@ async function proxy(request: NextRequest, context: RouteContext) {
   headers.set("x-request-id", requestId);
   if (session) headers.set("cookie", `privy-token=${encodeURIComponent(session)}`);
 
+  let body: Uint8Array | undefined;
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    try {
+      validateContentLength(request.headers.get("content-length"), maxBodyBytes);
+      body = await readBoundedBody(request.body, maxBodyBytes);
+    } catch (error) {
+      if (error instanceof BodyTooLargeError) {
+        return NextResponse.json(
+          { error: "request_too_large", message: "Application request is too large." },
+          { status: 413, headers: { "X-Request-Id": requestId } },
+        );
+      }
+      throw error;
+    }
+  }
+
   let response: Response;
   try {
     response = await fetch(target, {
       method: request.method,
       headers,
-      body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer(),
+      body: body
+        ? body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer
+        : undefined,
       redirect: "manual",
       cache: "no-store",
       signal: AbortSignal.timeout(30_000),

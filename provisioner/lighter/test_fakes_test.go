@@ -44,6 +44,12 @@ func (value *memoryStore) Reserve(_ context.Context, executionID, owner string, 
 	value.mu.Lock()
 	defer value.mu.Unlock()
 	bound, exists := value.bindings[executionID]
+	if exists && bound.Status == "revoked" {
+		return reservation{}, errBindingRevoked
+	}
+	if exists && (bound.Status == "revocation_pending" || bound.Status == "revoking") {
+		return reservation{}, errRotationOpen
+	}
 	if exists && (bound.OwnerAddress != owner || bound.AccountIndex != accountIndex || bound.APIKeyIndex != apiKeyIndex) {
 		return reservation{}, errBindingMismatch
 	}
@@ -74,6 +80,7 @@ func (value *memoryStore) Reserve(_ context.Context, executionID, owner string, 
 		AccountIndex:       accountIndex,
 		APIKeyIndex:        apiKeyIndex,
 		Version:            int64(len(value.versions[executionID]) + 1),
+		Purpose:            purposeAssociation,
 		Status:             statusGenerating,
 		CreatedAt:          now,
 		UpdatedAt:          now,
@@ -96,11 +103,119 @@ func (value *memoryStore) Reserve(_ context.Context, executionID, owner string, 
 	return reservation{Credential: record, Rotation: rotation}, nil
 }
 
+func (value *memoryStore) ReserveRevocation(_ context.Context, executionID string) (revocationReservation, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	bound, exists := value.bindings[executionID]
+	if !exists || bound.ActiveCredentialID == "" {
+		return revocationReservation{}, errNoActiveCredential
+	}
+	if bound.Status == "revoked" {
+		return revocationReservation{}, errBindingRevoked
+	}
+	active := value.records[bound.ActiveCredentialID]
+	if active.Status != statusLinked || active.Purpose != purposeAssociation {
+		return revocationReservation{}, errNoActiveCredential
+	}
+	for _, id := range value.versions[executionID] {
+		record := value.records[id]
+		if record.Status != statusGenerating && record.Status != statusPending && record.Status != statusVerifying {
+			continue
+		}
+		if record.Purpose == purposeRevocation && record.ReplacesCredentialID == active.ID &&
+			record.Status != statusGenerating &&
+			(bound.Status == "revocation_pending" || bound.Status == "revoking") {
+			return revocationReservation{
+				Active: active, Tombstone: cloneCredential(record), Existing: true,
+			}, nil
+		}
+		return revocationReservation{}, errRotationOpen
+	}
+	if bound.Status != "linked" {
+		return revocationReservation{}, errRotationOpen
+	}
+	id, err := newUUID()
+	if err != nil {
+		return revocationReservation{}, err
+	}
+	now := time.Now().UTC()
+	tombstone := credential{
+		ID:                   id,
+		ExecutionAccountID:   executionID,
+		OwnerAddress:         bound.OwnerAddress,
+		AccountIndex:         bound.AccountIndex,
+		APIKeyIndex:          bound.APIKeyIndex,
+		Version:              int64(len(value.versions[executionID]) + 1),
+		Purpose:              purposeRevocation,
+		ReplacesCredentialID: active.ID,
+		Status:               statusGenerating,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+	bound.Status = "revocation_pending"
+	value.bindings[executionID] = bound
+	value.records[id] = tombstone
+	value.versions[executionID] = append(value.versions[executionID], id)
+	return revocationReservation{Active: cloneCredential(active), Tombstone: cloneCredential(tombstone)}, nil
+}
+
+func (value *memoryStore) ReplaceExpiredRevocation(_ context.Context, expired credential, now time.Time) (revocationReservation, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	canonical, exists := value.records[expired.ID]
+	bound := value.bindings[expired.ExecutionAccountID]
+	if !exists || canonical.Purpose != purposeRevocation || canonical.Status != statusPending ||
+		canonical.ExpiresAtMS > now.UnixMilli() || bound.Status != "revocation_pending" ||
+		bound.ActiveCredentialID != canonical.ReplacesCredentialID {
+		return revocationReservation{}, errors.New("credential revocation is not replaceable")
+	}
+	active := value.records[bound.ActiveCredentialID]
+	if active.Status != statusLinked || active.Purpose != purposeAssociation {
+		return revocationReservation{}, errNoActiveCredential
+	}
+	zero(canonical.EncryptedDataKey)
+	zero(canonical.CipherNonce)
+	zero(canonical.Ciphertext)
+	zero(canonical.AADDigest)
+	canonical.EncryptedDataKey = nil
+	canonical.CipherNonce = nil
+	canonical.Ciphertext = nil
+	canonical.AADDigest = nil
+	canonical.KMSKeyID = ""
+	canonical.Status = statusSuperseded
+	canonical.UpdatedAt = now
+	value.records[canonical.ID] = canonical
+
+	id, err := newUUID()
+	if err != nil {
+		return revocationReservation{}, err
+	}
+	replacement := credential{
+		ID:                   id,
+		ExecutionAccountID:   expired.ExecutionAccountID,
+		OwnerAddress:         active.OwnerAddress,
+		AccountIndex:         active.AccountIndex,
+		APIKeyIndex:          active.APIKeyIndex,
+		Version:              int64(len(value.versions[expired.ExecutionAccountID]) + 1),
+		Purpose:              purposeRevocation,
+		ReplacesCredentialID: active.ID,
+		Status:               statusGenerating,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+	value.records[id] = replacement
+	value.versions[expired.ExecutionAccountID] = append(value.versions[expired.ExecutionAccountID], id)
+	return revocationReservation{
+		Active: cloneCredential(active), Tombstone: cloneCredential(replacement),
+	}, nil
+}
+
 func (value *memoryStore) Complete(_ context.Context, record credential) (credential, error) {
 	value.mu.Lock()
 	defer value.mu.Unlock()
 	current, exists := value.records[record.ID]
-	if !exists || current.Status != statusGenerating {
+	if !exists || current.Status != statusGenerating ||
+		current.Purpose != purposeAssociation || record.Purpose != purposeAssociation {
 		return credential{}, errNotFound
 	}
 	record.Status = statusPending
@@ -108,6 +223,43 @@ func (value *memoryStore) Complete(_ context.Context, record credential) (creden
 	record.UpdatedAt = time.Now().UTC()
 	value.records[record.ID] = cloneCredential(record)
 	return cloneCredential(record), nil
+}
+
+func (value *memoryStore) CompleteRevocation(_ context.Context, record credential) (credential, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	current, exists := value.records[record.ID]
+	if !exists || current.Status != statusGenerating || current.Purpose != purposeRevocation ||
+		current.ReplacesCredentialID != record.ReplacesCredentialID {
+		return credential{}, errNotFound
+	}
+	record.Status = statusPending
+	record.CreatedAt = current.CreatedAt
+	record.UpdatedAt = time.Now().UTC()
+	value.records[record.ID] = cloneCredential(record)
+	return cloneCredential(record), nil
+}
+
+func (value *memoryStore) VerifyRevocationNonce(_ context.Context, active credential, venueNonce int64) error {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	bound := value.bindings[active.ExecutionAccountID]
+	if venueNonce < 0 || bound.Status != "revocation_pending" ||
+		bound.ActiveCredentialID != active.ID {
+		return errors.New("Lighter signing state is not safe for revocation")
+	}
+	prefix := active.ID + ":"
+	for key, request := range value.signing {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		var nonce int64
+		if _, err := fmt.Sscanf(strings.TrimPrefix(key, prefix), "%d", &nonce); err != nil ||
+			request.result == nil || nonce >= venueNonce {
+			return errors.New("Lighter signing state is not safe for revocation")
+		}
+	}
+	return nil
 }
 
 func (value *memoryStore) Fail(_ context.Context, id, _ string) error {
@@ -149,7 +301,8 @@ func (value *memoryStore) MarkVerifying(_ context.Context, record credential, si
 	value.mu.Lock()
 	defer value.mu.Unlock()
 	current := value.records[record.ID]
-	if current.Status != statusPending {
+	if current.Status != statusPending ||
+		current.Purpose != purposeAssociation || record.Purpose != purposeAssociation {
 		return credential{}, errors.New("invalid transition")
 	}
 	current.Status = statusVerifying
@@ -159,6 +312,27 @@ func (value *memoryStore) MarkVerifying(_ context.Context, record credential, si
 	value.records[record.ID] = current
 	bound := value.bindings[record.ExecutionAccountID]
 	bound.Status = "verifying"
+	value.bindings[record.ExecutionAccountID] = bound
+	return cloneCredential(current), nil
+}
+
+func (value *memoryStore) MarkRevocationVerifying(_ context.Context, record credential, signature string, txInfo []byte) (credential, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	current := value.records[record.ID]
+	if current.Status != statusPending || current.Purpose != purposeRevocation {
+		return credential{}, errors.New("invalid transition")
+	}
+	bound := value.bindings[record.ExecutionAccountID]
+	if bound.Status != "revocation_pending" || bound.ActiveCredentialID != record.ReplacesCredentialID {
+		return credential{}, errors.New("invalid revocation binding")
+	}
+	current.Status = statusVerifying
+	current.L1Signature = signature
+	current.TxInfo = append([]byte(nil), txInfo...)
+	current.UpdatedAt = time.Now().UTC()
+	value.records[record.ID] = current
+	bound.Status = "revoking"
 	value.bindings[record.ExecutionAccountID] = bound
 	return cloneCredential(current), nil
 }
@@ -183,6 +357,48 @@ func (value *memoryStore) Activate(_ context.Context, record credential) (creden
 	bound := value.bindings[record.ExecutionAccountID]
 	bound.Status = "linked"
 	bound.ActiveCredentialID = record.ID
+	value.bindings[record.ExecutionAccountID] = bound
+	return cloneCredential(current), nil
+}
+
+func (value *memoryStore) FinalizeRevocation(_ context.Context, record credential, registeredPublicKey string) (credential, error) {
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	current, exists := value.records[record.ID]
+	if !exists || current.Status != statusVerifying || current.Purpose != purposeRevocation ||
+		normalizePublicKey(current.PublicKey) != normalizePublicKey(registeredPublicKey) {
+		return credential{}, errors.New("credential revocation proof mismatch")
+	}
+	bound := value.bindings[record.ExecutionAccountID]
+	if bound.Status != "revoking" || bound.ActiveCredentialID != current.ReplacesCredentialID {
+		return credential{}, errors.New("credential revocation binding changed")
+	}
+	active := value.records[bound.ActiveCredentialID]
+	if active.Status != statusLinked ||
+		normalizePublicKey(active.PublicKey) == normalizePublicKey(registeredPublicKey) {
+		return credential{}, errors.New("registered Lighter key did not change")
+	}
+	for _, id := range value.versions[record.ExecutionAccountID] {
+		candidate := value.records[id]
+		zero(candidate.EncryptedDataKey)
+		zero(candidate.CipherNonce)
+		zero(candidate.Ciphertext)
+		zero(candidate.AADDigest)
+		candidate.EncryptedDataKey = nil
+		candidate.CipherNonce = nil
+		candidate.Ciphertext = nil
+		candidate.AADDigest = nil
+		candidate.KMSKeyID = ""
+		candidate.Status = statusRevoked
+		candidate.UpdatedAt = time.Now().UTC()
+		if id == record.ID {
+			candidate.RegisteredPublicKey = normalizePublicKey(registeredPublicKey)
+			current = candidate
+		}
+		value.records[id] = candidate
+	}
+	bound.Status = "revoked"
+	bound.ActiveCredentialID = ""
 	value.bindings[record.ExecutionAccountID] = bound
 	return cloneCredential(current), nil
 }

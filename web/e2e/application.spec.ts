@@ -49,6 +49,49 @@ test("user can close an agent that is stuck before coordinator registration", as
   await expect(page.getByRole("heading", { name: "Agent closed" })).toBeVisible();
 });
 
+test("Robinhood authority cannot close locally before venue registration", async ({ page }) => {
+  const journey = await mockApplication(page, { withVault: false, withAgent: false, liveJourney: true });
+  await page.goto("/app/onboarding");
+  await page.getByRole("button", { name: "Create execution account" }).click();
+  await page.getByRole("button", { name: "Prepare Robinhood deployment" }).click();
+  await page.getByRole("button", { name: "Deploy with owner ETH" }).click();
+  await page.getByRole("button", { name: "Authorize execution agent" }).click();
+
+  await page.getByRole("button", { name: "Close agent" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "Request failed" })).toContainText(
+    "Execution authority is already provisioned. Finish venue registration and reconciliation before closing",
+  );
+  await expect(page.getByRole("heading", { name: "Agent provisioning" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Revoke execution agent" })).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem("robin:agent-command:agent-id:close"))).toBeNull();
+
+  await page.getByRole("button", { name: "Find empty Lighter subaccount" }).click();
+  await page.getByRole("button", { name: "Sign Lighter association" }).click();
+  await page.getByRole("button", { name: "Close agent" }).click();
+  await expect(page.getByRole("heading", { name: "Agent closing" })).toBeVisible();
+  await page.getByRole("button", { name: "Revoke execution agent" }).click();
+  await expect(page.getByRole("button", { name: "Awaiting reconciliation" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Agent closing" })).toBeVisible();
+  journey.substituteLighterRevocation();
+  journey.reconcileClose();
+  await expect(page.getByRole("alert").filter({
+    hasText: "Lighter revocation binding does not match the canonical owner, account, or key",
+  })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sign Lighter revocation" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Agent closing" })).toBeVisible();
+  journey.restoreLighterRevocation();
+  await page.reload();
+  await page.getByRole("button", { name: "Sign Lighter revocation" }).click();
+  expect(await page.evaluate(() => {
+    const signed = JSON.parse(localStorage.getItem("robin:e2e-signed-messages") ?? "[]");
+    return signed.at(-1);
+  })).toEqual({
+    message: "Revoke Lighter execution key\nfixture",
+    signerAddress: "0x1111111111111111111111111111111111111111",
+  });
+  await expect(page.getByRole("heading", { name: "Agent closed" })).toBeVisible();
+});
+
 test("wallet conflict opens the account recovery path", async ({ page }) => {
   await mockApplication(page);
   await page.route("**/api/app/v1/me/wallets/sync", (route) => route.fulfill({
@@ -91,7 +134,7 @@ test("user launches a Robin agent from the strategy page", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Not launched" })).toBeVisible();
   await page.getByRole("button", { name: "Create mainnet agent" }).click();
   await expect(page.getByRole("heading", { name: "Agent setup" })).toBeVisible();
-  await expect(page.getByText("basis-aapl-v1")).toBeVisible();
+  await expect(page.getByText("Strategy: basis-aapl-v1")).toBeVisible();
   await expect(page.getByText("Robinhood USDG")).toBeVisible();
   await expect(page.getByText("Lighter USDC")).toBeVisible();
   await expect(page.getByText("Pays deployment and owner transactions without sponsorship", { exact: false })).toBeVisible();
@@ -169,7 +212,7 @@ test("deployment finality retry reuses the submitted transaction", async ({ page
   await page.getByRole("button", { name: "Authorize execution agent" }).click();
   await expect(page.getByText("Robinhood request robinhood-request: linked", { exact: false })).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem("robin:mainnet-deployment:robinhood-request"))).toBeNull();
-  expect(confirmations).toBe(2);
+  expect(confirmations).toBe(3);
 });
 
 test("user completes the live mainnet lifecycle from account setup to withdrawal", async ({ page }) => {
@@ -212,7 +255,7 @@ test("user completes the live mainnet lifecycle from account setup to withdrawal
   await page.goto("/app/strategy");
   await page.getByRole("button", { name: "Pause and unwind" }).click();
   await expect(page.getByRole("heading", { name: "Agent reducing" })).toBeVisible();
-  await expect(page.getByText("Reducing", { exact: true })).toBeVisible();
+  await expect(page.getByText("Reducing", { exact: true }).first()).toBeVisible();
   await page.evaluate(() => localStorage.removeItem("robin:agent-command:agent-id:pause"));
   await page.reload();
   await expect(page.getByRole("heading", { name: "Agent reducing" })).toBeVisible();
@@ -224,17 +267,41 @@ test("user completes the live mainnet lifecycle from account setup to withdrawal
   await page.getByRole("button", { name: "Resume agent" }).click();
   await expect(page.getByRole("heading", { name: "Agent running" })).toBeVisible();
   await page.getByRole("button", { name: "Close agent" }).click();
+  await expect(page.getByRole("heading", { name: "Agent closing" })).toBeVisible();
+  await page.evaluate(() => localStorage.setItem("robin:e2e-mainnet-receipt-failure", "1"));
+  await page.getByRole("button", { name: "Revoke execution agent" }).click();
+  await expect(page.getByText("The mainnet transaction reverted.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Revoke execution agent" })).toBeEnabled();
+  expect(await page.evaluate(() => localStorage.getItem("robin:owner-actions:command-close"))).toBeNull();
+  await page.getByRole("button", { name: "Revoke execution agent" }).click();
+  await expect(page.getByRole("button", { name: "Awaiting reconciliation" })).toBeVisible();
+  journey.reconcileClose();
+  await page.getByRole("button", { name: "Sign Lighter revocation" }).click();
+  expect(await page.evaluate(() => {
+    const signed = JSON.parse(localStorage.getItem("robin:e2e-signed-messages") ?? "[]");
+    return signed.at(-1);
+  })).toEqual({
+    message: "Revoke Lighter execution key\nfixture",
+    signerAddress: "0x1111111111111111111111111111111111111111",
+  });
   await expect(page.getByRole("heading", { name: "Agent closed" })).toBeVisible();
   await expect(page.getByText("Flat", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Prepare owner withdrawal" }).click();
   await expect(page.getByRole("button", { name: "Prepare owner withdrawal" })).toBeHidden();
+  await page.evaluate(() => localStorage.setItem("robin:e2e-mainnet-receipt-failure", "1"));
+  await page.getByRole("button", { name: "Sign owner withdrawal" }).click();
+  await expect(page.getByText("The mainnet transaction reverted.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sign owner withdrawal" })).toBeEnabled();
+  expect(await page.evaluate(() => localStorage.getItem("robin:owner-actions:command-withdraw"))).toBeNull();
   await page.getByRole("button", { name: "Sign owner withdrawal" }).click();
   await expect(page.getByRole("button", { name: "Awaiting reconciliation" })).toBeVisible();
   await page.reload();
   await expect(page.getByRole("button", { name: "Awaiting reconciliation" })).toBeVisible();
   journey.reconcileWithdrawal();
   await expect(page.getByText("Owner withdrawal completed.", { exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Submitted owner transaction", exact: false })).toHaveAttribute("href", /\/tx\/0xefef/);
+  const withdrawalLink = page.getByRole("link", { name: "Submitted owner transaction", exact: false });
+  const withdrawalHref = await withdrawalLink.getAttribute("href");
+  expect(withdrawalHref).toMatch(/\/tx\/0x[0-9a-f]{64}$/);
   await page.reload();
-  await expect(page.getByRole("link", { name: "Submitted owner transaction", exact: false })).toHaveAttribute("href", /\/tx\/0xefef/);
+  await expect(page.getByRole("link", { name: "Submitted owner transaction", exact: false })).toHaveAttribute("href", withdrawalHref!);
 });

@@ -126,6 +126,9 @@ func validateEvidence(input RunRequest, lighterMarketIndex uint32, nowMS uint64)
 	}
 	if quotes.SourceEvaluationID != evaluation.ID || quotes.Action != evaluation.Action ||
 		quotes.MarketManifest != evaluation.MarketManifest ||
+		(evaluation.Action == protocol.ActionEntry && quotes.TargetStrategyManifestSHA256 != "") ||
+		(evaluation.Action == protocol.ActionUnwind &&
+			quotes.TargetStrategyManifestSHA256 != evaluation.StrategyManifestSHA256) ||
 		quotes.ExecutionAccountID != readiness.ExecutionAccountID || quotes.ExecutionAccountID != state.ExecutionAccountID ||
 		readiness.ExecutionAccountID != state.ExecutionAccountID || readiness.AgentID != state.AgentID ||
 		readiness.StrategyVersion != protocol.StrategyVersion || readiness.StrategyManifestSHA256 != protocol.StrategyManifestSHA256 ||

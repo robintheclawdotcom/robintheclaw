@@ -23,6 +23,7 @@ type storedIntent struct {
 	ExecutionAccountID         string `json:"execution_account_id"`
 	AgentID                    string `json:"agent_id"`
 	SourceEvaluationID         string `json:"source_evaluation_id"`
+	StrategyManifestSHA256     string `json:"strategy_manifest_sha256"`
 	MinimumUnwindSettlementOut string `json:"minimum_unwind_settlement_out"`
 }
 
@@ -33,6 +34,21 @@ type storedSaga struct {
 	PerpFilledBase  uint64 `json:"perp_filled_base"`
 	PerpUnwoundBase uint64 `json:"perp_unwound_base"`
 	SpotReceivedRaw string `json:"spot_received_raw"`
+}
+
+type storedExitRequest struct {
+	RequestID                  string `json:"request_id"`
+	ExecutionAccountID         string `json:"execution_account_id"`
+	IntentID                   string `json:"intent_id"`
+	QuoteSourceSession         string `json:"quote_source_session"`
+	QuoteSourceEventID         string `json:"quote_source_event_id"`
+	QuotePayloadSHA256         string `json:"quote_payload_sha256"`
+	PerpUnwindPrice            uint32 `json:"perp_unwind_price"`
+	MinimumUnwindSettlementOut string `json:"minimum_unwind_settlement_out"`
+	RequestedAtMS              uint64 `json:"requested_at_ms"`
+	SubmissionDeadlineMS       uint64 `json:"submission_deadline_ms"`
+	ReconciliationDeadlineMS   uint64 `json:"reconciliation_deadline_ms"`
+	Reason                     string `json:"reason"`
 }
 
 func NewPGStore(pool *pgxpool.Pool, workerID string) (*PGStore, error) {
@@ -121,7 +137,9 @@ LIMIT 1`, StrategyVersion, StrategyManifestSHA256, now)
 		var saga storedSaga
 		if len(intentBody) == 0 || len(sagaBody) == 0 || json.Unmarshal(intentBody, &intent) != nil || json.Unmarshal(sagaBody, &saga) != nil ||
 			intent.ID != dispatch.Evaluation.PairIntentID || intent.ExecutionAccountID != dispatch.ExecutionAccountID ||
-			intent.AgentID != dispatch.AgentID || saga.IntentID != intent.ID || saga.State != "hedged" || sagaVersion == nil ||
+			intent.AgentID != dispatch.AgentID ||
+			intent.StrategyManifestSHA256 != StrategyManifestSHA256 ||
+			saga.IntentID != intent.ID || saga.State != "hedged" || sagaVersion == nil ||
 			*sagaVersion < 0 || uint64(*sagaVersion) != saga.Version ||
 			saga.PerpFilledBase == 0 || saga.PerpUnwoundBase != 0 || !positiveDecimal(saga.SpotReceivedRaw) {
 			return nil, errors.New("stored unwind episode is not canonical")
@@ -131,6 +149,7 @@ LIMIT 1`, StrategyVersion, StrategyManifestSHA256, now)
 			SpotAmount: saga.SpotReceivedRaw, MinimumSettlementAmountOut: intent.MinimumUnwindSettlementOut,
 			PerpBaseAmount: saga.PerpFilledBase,
 		}
+		dispatch.TargetStrategyManifestSHA256 = intent.StrategyManifestSHA256
 	}
 	if requestID != nil {
 		dispatch.RequestID = *requestID
@@ -247,7 +266,32 @@ WHERE evaluation_id = $1 AND execution_account_id = $2 AND lease_owner = $5
 func (s *PGStore) Complete(ctx context.Context, dispatch Dispatch, body []byte, sha string) error {
 	return s.finishWith(ctx, dispatch, "succeeded", "completed", body, sha, "", func(tx pgx.Tx) error {
 		if dispatch.Evaluation.Action != ActionEntry {
-			return nil
+			var output runOutput
+			var persistence exitPersistence
+			if decodeStrict(body, &output) != nil || decodeStrict(output.ExitPersistence, &persistence) != nil {
+				return errors.New("completed exit output cannot be bound")
+			}
+			var payload, saga []byte
+			var payloadSHA256 string
+			var acceptanceVersion, sagaVersion int64
+			err := tx.QueryRow(ctx, `
+SELECT exit_request.payload, exit_request.payload_sha256,
+       exit_request.saga_version_at_accept, intent.saga, intent.saga_version
+FROM execution_exit_requests exit_request
+JOIN execution_intents intent
+  ON intent.id = exit_request.intent_id
+ AND intent.execution_account_id = exit_request.execution_account_id
+WHERE exit_request.request_id = $1
+  AND exit_request.intent_id = $2
+  AND exit_request.execution_account_id = $3
+FOR SHARE OF exit_request, intent`,
+				persistence.RequestID, dispatch.Evaluation.PairIntentID, dispatch.ExecutionAccountID,
+			).Scan(&payload, &payloadSHA256, &acceptanceVersion, &saga, &sagaVersion)
+			if err != nil {
+				return errors.New("authoritative exit persistence is missing")
+			}
+			return validateAuthoritativeExit(dispatch, body, payload, payloadSHA256,
+				acceptanceVersion, saga, sagaVersion)
 		}
 		var output runOutput
 		var intent pairIdentity
@@ -292,6 +336,86 @@ SELECT EXISTS (
 		}
 		return nil
 	})
+}
+
+func validateAuthoritativeExit(
+	dispatch Dispatch,
+	body, storedPayload []byte,
+	storedPayloadSHA256 string,
+	acceptanceVersion int64,
+	sagaBody []byte,
+	sagaVersion int64,
+) error {
+	if err := validateRunnerOutput(body, dispatch); err != nil {
+		return err
+	}
+	var output runOutput
+	var unwind unwindIdentity
+	var persistence exitPersistence
+	if decodeStrict(body, &output) != nil || decodeStrict(output.Unwind, &unwind) != nil ||
+		decodeStrict(output.ExitPersistence, &persistence) != nil {
+		return errors.New("completed exit output cannot be bound")
+	}
+	var quote QuoteBundle
+	var authority exitQuoteAuthority
+	if decodeStrict(dispatch.QuoteBody, &quote) != nil || decodeStrict(quote.ExitAuthority, &authority) != nil {
+		return errors.New("completed exit quote cannot be bound")
+	}
+	var spot spotQuote
+	var perp perpQuote
+	if decodeStrict(quote.Spot, &spot) != nil || decodeStrict(quote.Perp, &perp) != nil {
+		return errors.New("completed exit quote cannot be bound")
+	}
+	if unwind.QuoteSourceSession != authority.SourceSession ||
+		unwind.QuoteSourceEventID != authority.SourceEventID ||
+		unwind.QuotePayloadSHA256 != authority.PayloadSHA256 ||
+		unwind.DeadlineMS != authority.SubmissionDeadlineMS ||
+		unwind.ReconciliationDeadlineMS != authority.ReconciliationDeadlineMS ||
+		unwind.ObservedAtMS != quote.ObservedAtMS ||
+		unwind.SpotAmountIn != spot.StockAmount ||
+		unwind.MinimumSettlementAmountOut != spot.MinimumAmountOut ||
+		unwind.PerpBaseAmount != perp.BaseAmount ||
+		unwind.PerpLimitPrice != perp.LimitPrice {
+		return errors.New("completed exit directive does not match the authoritative quote")
+	}
+	reason := "strategy_exit"
+	switch dispatch.Readiness.Lifecycle {
+	case "running":
+	case "reducing", "closing":
+		reason = "operator_exit"
+	default:
+		return errors.New("completed exit lifecycle cannot be bound")
+	}
+	expected := storedExitRequest{
+		RequestID: persistence.RequestID, ExecutionAccountID: dispatch.ExecutionAccountID,
+		IntentID: dispatch.Evaluation.PairIntentID, QuoteSourceSession: unwind.QuoteSourceSession,
+		QuoteSourceEventID: unwind.QuoteSourceEventID, QuotePayloadSHA256: unwind.QuotePayloadSHA256,
+		PerpUnwindPrice: unwind.PerpLimitPrice, MinimumUnwindSettlementOut: unwind.MinimumSettlementAmountOut,
+		RequestedAtMS: authority.ReceivedAtMS, SubmissionDeadlineMS: unwind.DeadlineMS,
+		ReconciliationDeadlineMS: unwind.ReconciliationDeadlineMS, Reason: reason,
+	}
+	var stored storedExitRequest
+	if decodeStrict(storedPayload, &stored) != nil || stored != expected {
+		return errors.New("authoritative exit payload does not match runner output")
+	}
+	encoded, err := json.Marshal(expected)
+	if err != nil || digest(encoded) != storedPayloadSHA256 {
+		return errors.New("authoritative exit payload digest mismatch")
+	}
+	var saga storedSaga
+	if decodeStrict(sagaBody, &saga) != nil || acceptanceVersion <= 0 || sagaVersion <= 0 ||
+		uint64(sagaVersion) != saga.Version || acceptanceVersion > sagaVersion ||
+		saga.IntentID != expected.IntentID || !exitPersistenceState(saga.State) {
+		return errors.New("authoritative exit saga is invalid")
+	}
+	acceptanceProof := uint64(acceptanceVersion) == persistence.CoordinatorVersion &&
+		persistence.CoordinatorState == "unwinding"
+	currentProof := saga.Version == persistence.CoordinatorVersion &&
+		saga.State == persistence.CoordinatorState
+	if !acceptanceProof && !currentProof {
+		return errors.New("runner exit persistence does not match authoritative saga")
+	}
+	return nil
 }
 
 func (s *PGStore) Ambiguous(ctx context.Context, dispatch Dispatch, body []byte, sha string) error {

@@ -1,0 +1,620 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Render OIDC roles and fixed KMS control plane for Robin mainnet custody
+
+Parameters:
+  RenderWorkspaceId:
+    Type: String
+    AllowedPattern: "^tea-[a-z0-9]+$"
+  RenderEnvironmentId:
+    Type: String
+    AllowedPattern: "^evm-[a-z0-9]+$"
+  LighterProvisionerServiceId:
+    Type: String
+    AllowedPattern: "^srv-[a-z0-9]+$"
+  RobinhoodProvisionerServiceId:
+    Type: String
+    AllowedPattern: "^srv-[a-z0-9]+$"
+  RobinhoodSignerServiceId:
+    Type: String
+    AllowedPattern: "^srv-[a-z0-9]+$"
+
+Resources:
+  RenderOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url:
+        Fn::Sub: "https://oidc.render.com/${RenderWorkspaceId}"
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: service
+          Value: robin-mainnet
+
+  LighterEnvelopeKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Lighter credential envelope key
+      EnableKeyRotation: true
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      MultiRegion: false
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: service
+          Value: lighter-provisioner
+
+  LighterEnvelopeAlias:
+    Type: AWS::KMS::Alias
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AliasName: alias/robin/lighter/credentials
+      TargetKeyId:
+        Ref: LighterEnvelopeKey
+
+  LighterProvisionerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Fn::Sub:
+          - |
+            {
+              "Version":"2012-10-17",
+              "Statement":[{
+                "Effect":"Allow",
+                "Principal":{"Federated":"${ProviderArn}"},
+                "Action":"sts:AssumeRoleWithWebIdentity",
+                "Condition":{"StringEquals":{
+                  "oidc.render.com/${RenderWorkspaceId}:aud":"sts.amazonaws.com",
+                  "oidc.render.com/${RenderWorkspaceId}:sub":"workspace:${RenderWorkspaceId}:environment:${RenderEnvironmentId}:service:${LighterProvisionerServiceId}"
+                }}
+              }]
+            }
+          - ProviderArn:
+              Ref: RenderOIDCProvider
+      Policies:
+        - PolicyName: lighter-envelope-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: UseLighterEnvelopeKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource:
+                  Fn::GetAtt:
+                    - LighterEnvelopeKey
+                    - Arn
+                Condition:
+                  StringEquals:
+                    kms:EncryptionAlgorithm: SYMMETRIC_DEFAULT
+                    kms:EncryptionContext:service: lighter-provisioner
+                    kms:RequestAlias: alias/robin/lighter/credentials
+                  StringLike:
+                    kms:EncryptionContext:executionAccountId: "????????-????-????-????-????????????"
+                    kms:EncryptionContext:accountIndex: "?*"
+                    kms:EncryptionContext:apiKeyIndex: "?*"
+                    kms:EncryptionContext:credentialVersion: "?*"
+                  ForAllValues:StringEquals:
+                    kms:EncryptionContextKeys:
+                      - service
+                      - executionAccountId
+                      - accountIndex
+                      - apiKeyIndex
+                      - credentialVersion
+      Tags:
+        - Key: service
+          Value: lighter-provisioner
+
+  RobinhoodKeyLedger:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: executionAccountId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: executionAccountId
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: service
+          Value: robinhood-key-control-plane
+
+  RobinhoodKeyControlPlaneRole:
+    Type: AWS::IAM::Role
+    Properties:
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: robinhood-key-control-plane
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteFunctionLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::Sub: "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/robinhood-execution-key-control-plane:*"
+              - Sid: UseProvisioningLedger
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  Fn::GetAtt:
+                    - RobinhoodKeyLedger
+                    - Arn
+              - Sid: CreateFixedExecutionKeys
+                Effect: Allow
+                Action: kms:CreateKey
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    kms:KeyOrigin: AWS_KMS
+                    kms:KeySpec: ECC_SECG_P256K1
+                    kms:KeyUsage: SIGN_VERIFY
+                  Bool:
+                    kms:BypassPolicyLockoutSafetyCheck: "true"
+                    kms:MultiRegion: "false"
+              - Sid: CreateExecutionAliases
+                Effect: Allow
+                Action: kms:CreateAlias
+                Resource:
+                  Fn::Sub: "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/robinhood/execution/*"
+              - Sid: ListExecutionAliases
+                Effect: Allow
+                Action: kms:ListAliases
+                Resource: "*"
+              - Sid: DenyKeyEscalationAndSigning
+                Effect: Deny
+                Action:
+                  - kms:CreateGrant
+                  - kms:PutKeyPolicy
+                  - kms:Sign
+                  - kms:TagResource
+                  - kms:UntagResource
+                Resource:
+                  Fn::Sub: "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+      Tags:
+        - Key: service
+          Value: robinhood-key-control-plane
+
+  RobinhoodKeyControlPlaneLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName:
+        /aws/lambda/robinhood-execution-key-control-plane
+      RetentionInDays: 90
+
+  RobinhoodKeyControlPlane:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      FunctionName: robinhood-execution-key-control-plane
+      Role:
+        Fn::GetAtt:
+          - RobinhoodKeyControlPlaneRole
+          - Arn
+      Timeout: 30
+      MemorySize: 256
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          ROBIN_ACCOUNT_ID:
+            Ref: AWS::AccountId
+          ROBIN_PARTITION:
+            Ref: AWS::Partition
+          ROBIN_KEY_LEDGER:
+            Ref: RobinhoodKeyLedger
+          ROBIN_CONTROL_ROLE_ARN:
+            Fn::GetAtt:
+              - RobinhoodKeyControlPlaneRole
+              - Arn
+          ROBIN_SIGNER_ROLE_ARN:
+            Fn::GetAtt:
+              - RobinhoodSignerRole
+              - Arn
+      Code:
+        ZipFile: |
+          import base64
+          import boto3
+          import json
+          import os
+          import uuid
+          from botocore.config import Config
+          from botocore.exceptions import ClientError
+
+          ALIAS_PREFIX = "alias/robinhood/execution/"
+          DESCRIPTION = "Robinhood Chain execution key"
+          ACCOUNT_ID = os.environ["ROBIN_ACCOUNT_ID"]
+          PARTITION = os.environ["ROBIN_PARTITION"]
+          LEDGER = os.environ["ROBIN_KEY_LEDGER"]
+          CONTROL_ROLE_ARN = os.environ["ROBIN_CONTROL_ROLE_ARN"]
+          SIGNER_ROLE_ARN = os.environ["ROBIN_SIGNER_ROLE_ARN"]
+          kms = boto3.client("kms")
+          create_kms = boto3.client(
+              "kms",
+              config=Config(retries={"total_max_attempts": 1, "mode": "standard"}),
+          )
+          ddb = boto3.client("dynamodb")
+
+          def key_policy(value):
+              return {
+                  "Id": f"robinhood-execution-key-{value}",
+                  "Version": "2012-10-17",
+                  "Statement": [
+                      {
+                          "Sid": "AccountKeyAdministration",
+                          "Effect": "Allow",
+                          "Principal": {"AWS": f"arn:{PARTITION}:iam::{ACCOUNT_ID}:root"},
+                          "Action": [
+                              "kms:CancelKeyDeletion",
+                              "kms:DescribeKey",
+                              "kms:DisableKey",
+                              "kms:EnableKey",
+                              "kms:GetKeyPolicy",
+                              "kms:GetKeyRotationStatus",
+                              "kms:ListGrants",
+                              "kms:ListKeyPolicies",
+                              "kms:ListResourceTags",
+                              "kms:PutKeyPolicy",
+                              "kms:RevokeGrant",
+                              "kms:ScheduleKeyDeletion",
+                              "kms:TagResource",
+                              "kms:UntagResource",
+                              "kms:UpdateKeyDescription",
+                          ],
+                          "Resource": "*",
+                      },
+                      {
+                          "Sid": "ControlPlaneValidation",
+                          "Effect": "Allow",
+                          "Principal": {"AWS": CONTROL_ROLE_ARN},
+                          "Action": [
+                              "kms:CreateAlias",
+                              "kms:DescribeKey",
+                              "kms:GetKeyPolicy",
+                              "kms:GetPublicKey",
+                          ],
+                          "Resource": "*",
+                      },
+                      {
+                          "Sid": "SignerPublicKey",
+                          "Effect": "Allow",
+                          "Principal": {"AWS": SIGNER_ROLE_ARN},
+                          "Action": "kms:GetPublicKey",
+                          "Resource": "*",
+                      },
+                      {
+                          "Sid": "SignerDigest",
+                          "Effect": "Allow",
+                          "Principal": {"AWS": SIGNER_ROLE_ARN},
+                          "Action": "kms:Sign",
+                          "Resource": "*",
+                          "Condition": {
+                              "StringEquals": {
+                                  "kms:MessageType": "DIGEST",
+                                  "kms:SigningAlgorithm": "ECDSA_SHA_256",
+                              },
+                          },
+                      },
+                  ],
+              }
+
+          def execution_id(event):
+              if not isinstance(event, dict) or set(event) != {"executionAccountId"}:
+                  raise ValueError("request must contain only executionAccountId")
+              raw = event["executionAccountId"]
+              if not isinstance(raw, str):
+                  raise ValueError("executionAccountId must be a UUID")
+              try:
+                  parsed = uuid.UUID(raw)
+              except ValueError as error:
+                  raise ValueError("executionAccountId must be a UUID") from error
+              if str(parsed) != raw or parsed.version != 4:
+                  raise ValueError("executionAccountId must be a canonical UUIDv4")
+              return raw
+
+          def read_ledger(value):
+              result = ddb.get_item(
+                  TableName=LEDGER,
+                  Key={"executionAccountId": {"S": value}},
+                  ConsistentRead=True,
+              )
+              item = result.get("Item")
+              if item is None:
+                  return None
+              allowed = {"executionAccountId", "state", "keyArn"}
+              if set(item) - allowed:
+                  raise RuntimeError("execution key ledger mismatch")
+              if item.get("executionAccountId", {}).get("S") != value:
+                  raise RuntimeError("execution key ledger mismatch")
+              state = item.get("state", {}).get("S")
+              key_arn = item.get("keyArn", {}).get("S")
+              if state not in {"CREATING", "ACTIVE"}:
+                  raise RuntimeError("execution key ledger mismatch")
+              if state == "ACTIVE" and not key_arn:
+                  raise RuntimeError("execution key ledger mismatch")
+              return {"state": state, "keyArn": key_arn}
+
+          def claim(value):
+              try:
+                  ddb.put_item(
+                      TableName=LEDGER,
+                      Item={
+                          "executionAccountId": {"S": value},
+                          "state": {"S": "CREATING"},
+                      },
+                      ConditionExpression="attribute_not_exists(executionAccountId)",
+                  )
+                  return True
+              except ClientError as error:
+                  if error.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                      raise
+                  return False
+
+          def record_key(value, key_arn):
+              ddb.update_item(
+                  TableName=LEDGER,
+                  Key={"executionAccountId": {"S": value}},
+                  UpdateExpression="SET keyArn = :key",
+                  ConditionExpression="#state IN (:creating, :active) AND (attribute_not_exists(keyArn) OR keyArn = :key)",
+                  ExpressionAttributeNames={"#state": "state"},
+                  ExpressionAttributeValues={
+                      ":creating": {"S": "CREATING"},
+                      ":active": {"S": "ACTIVE"},
+                      ":key": {"S": key_arn},
+                  },
+              )
+
+          def activate(value, key_arn):
+              ddb.update_item(
+                  TableName=LEDGER,
+                  Key={"executionAccountId": {"S": value}},
+                  UpdateExpression="SET #state = :active, keyArn = :key",
+                  ConditionExpression="keyArn = :key AND #state IN (:creating, :active)",
+                  ExpressionAttributeNames={"#state": "state"},
+                  ExpressionAttributeValues={
+                      ":creating": {"S": "CREATING"},
+                      ":active": {"S": "ACTIVE"},
+                      ":key": {"S": key_arn},
+                  },
+              )
+
+          def aliases_for(key_arn):
+              found = []
+              paginator = kms.get_paginator("list_aliases")
+              for page in paginator.paginate(KeyId=key_arn):
+                  found.extend(item["AliasName"] for item in page.get("Aliases", []))
+              return sorted(found)
+
+          def validate_key(key_arn, value, expected_aliases):
+              metadata = kms.describe_key(KeyId=key_arn)["KeyMetadata"]
+              expected_metadata = {
+                  "Arn": key_arn,
+                  "Description": f"{DESCRIPTION}: {value}",
+                  "KeySpec": "ECC_SECG_P256K1",
+                  "KeyUsage": "SIGN_VERIFY",
+                  "Origin": "AWS_KMS",
+                  "KeyManager": "CUSTOMER",
+                  "KeyState": "Enabled",
+                  "MultiRegion": False,
+              }
+              for field, expected in expected_metadata.items():
+                  if metadata.get(field) != expected:
+                      raise RuntimeError("execution key metadata mismatch")
+              policy = json.loads(kms.get_key_policy(KeyId=key_arn, PolicyName="default")["Policy"])
+              if policy != key_policy(value):
+                  raise RuntimeError("execution key policy mismatch")
+              if aliases_for(key_arn) != expected_aliases:
+                  raise RuntimeError("execution key alias mismatch")
+              public = kms.get_public_key(KeyId=key_arn)
+              if (
+                  public.get("KeySpec") != "ECC_SECG_P256K1"
+                  or public.get("KeyUsage") != "SIGN_VERIFY"
+                  or public.get("SigningAlgorithms") != ["ECDSA_SHA_256"]
+              ):
+                  raise RuntimeError("execution public key mismatch")
+              return base64.b64encode(public["PublicKey"]).decode("ascii")
+
+          def resolve_alias(alias):
+              try:
+                  return kms.describe_key(KeyId=alias)["KeyMetadata"]["Arn"]
+              except ClientError as error:
+                  if error.response["Error"]["Code"] == "NotFoundException":
+                      return None
+                  raise
+
+          def bind(alias, key_arn):
+              try:
+                  kms.create_alias(AliasName=alias, TargetKeyId=key_arn)
+              except ClientError as error:
+                  if error.response["Error"]["Code"] != "AlreadyExistsException":
+                      raise
+                  if resolve_alias(alias) != key_arn:
+                      raise RuntimeError("execution key alias collision") from error
+
+          def create_key(value):
+              created = create_kms.create_key(
+                  Description=f"{DESCRIPTION}: {value}",
+                  KeySpec="ECC_SECG_P256K1",
+                  KeyUsage="SIGN_VERIFY",
+                  Origin="AWS_KMS",
+                  MultiRegion=False,
+                  BypassPolicyLockoutSafetyCheck=True,
+                  Policy=json.dumps(key_policy(value), separators=(",", ":"), sort_keys=True),
+              )
+              return created["KeyMetadata"]["Arn"]
+
+          def public_binding(value, key_arn, alias):
+              public_key = validate_key(key_arn, value, [alias])
+              activate(value, key_arn)
+              return {
+                  "executionAccountId": value,
+                  "keyArn": key_arn,
+                  "alias": alias,
+                  "keySpec": "ECC_SECG_P256K1",
+                  "keyUsage": "SIGN_VERIFY",
+                  "origin": "AWS_KMS",
+                  "publicKey": public_key,
+              }
+
+          def handler(event, _context):
+              value = execution_id(event)
+              alias = ALIAS_PREFIX + value
+              ledger = read_ledger(value)
+              aliased = resolve_alias(alias)
+              if aliased:
+                  validate_key(aliased, value, [alias])
+                  if ledger is None:
+                      if not claim(value):
+                          ledger = read_ledger(value)
+                      else:
+                          ledger = {"state": "CREATING", "keyArn": None}
+                  if ledger and ledger.get("keyArn") not in {None, aliased}:
+                      raise RuntimeError("execution key ledger mismatch")
+                  record_key(value, aliased)
+                  return public_binding(value, aliased, alias)
+
+              if ledger is None:
+                  if not claim(value):
+                      ledger = read_ledger(value)
+                  else:
+                      key_arn = create_key(value)
+                      record_key(value, key_arn)
+                      bind(alias, key_arn)
+                      return public_binding(value, key_arn, alias)
+
+              ledger = ledger or read_ledger(value)
+              key_arn = ledger.get("keyArn") if ledger else None
+              if not key_arn:
+                  raise RuntimeError("execution key creation requires operator reconciliation")
+              validate_key(key_arn, value, [])
+              bind(alias, key_arn)
+              return public_binding(value, key_arn, alias)
+      Tags:
+        - Key: service
+          Value: robinhood-key-control-plane
+
+  RobinhoodKeyControlPlaneVersion:
+    Type: AWS::Lambda::Version
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: reviewed-source-sha256-cdfe17597901fd48781d002724f2a82aa7dd4f83e7e3a09480fed58ebab4581a
+      FunctionName:
+        Ref: RobinhoodKeyControlPlane
+
+  RobinhoodProvisionerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Fn::Sub:
+          - |
+            {
+              "Version":"2012-10-17",
+              "Statement":[{
+                "Effect":"Allow",
+                "Principal":{"Federated":"${ProviderArn}"},
+                "Action":"sts:AssumeRoleWithWebIdentity",
+                "Condition":{"StringEquals":{
+                  "oidc.render.com/${RenderWorkspaceId}:aud":"sts.amazonaws.com",
+                  "oidc.render.com/${RenderWorkspaceId}:sub":"workspace:${RenderWorkspaceId}:environment:${RenderEnvironmentId}:service:${RobinhoodProvisionerServiceId}"
+                }}
+              }]
+            }
+          - ProviderArn:
+              Ref: RenderOIDCProvider
+      Policies:
+        - PolicyName: invoke-robinhood-key-control-plane
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeFixedKeyControlPlane
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  Ref: RobinhoodKeyControlPlaneVersion
+      Tags:
+        - Key: service
+          Value: robinhood-provisioner
+
+  RobinhoodSignerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Fn::Sub:
+          - |
+            {
+              "Version":"2012-10-17",
+              "Statement":[{
+                "Effect":"Allow",
+                "Principal":{"Federated":"${ProviderArn}"},
+                "Action":"sts:AssumeRoleWithWebIdentity",
+                "Condition":{"StringEquals":{
+                  "oidc.render.com/${RenderWorkspaceId}:aud":"sts.amazonaws.com",
+                  "oidc.render.com/${RenderWorkspaceId}:sub":"workspace:${RenderWorkspaceId}:environment:${RenderEnvironmentId}:service:${RobinhoodSignerServiceId}"
+                }}
+              }]
+            }
+          - ProviderArn:
+              Ref: RenderOIDCProvider
+      Tags:
+        - Key: service
+          Value: robinhood-signer
+
+Outputs:
+  LighterProvisionerRoleArn:
+    Value:
+      Fn::GetAtt:
+        - LighterProvisionerRole
+        - Arn
+  LighterEnvelopeKeyAlias:
+    Value: alias/robin/lighter/credentials
+  RobinhoodKeyControlPlaneArn:
+    Value:
+      Ref: RobinhoodKeyControlPlaneVersion
+  RobinhoodProvisionerRoleArn:
+    Value:
+      Fn::GetAtt:
+        - RobinhoodProvisionerRole
+        - Arn
+  RobinhoodSignerRoleArn:
+    Value:
+      Fn::GetAtt:
+        - RobinhoodSignerRole
+        - Arn

@@ -291,7 +291,7 @@ mod tests {
             max_daily_turnover_micros: 50_000_000,
             max_leverage_ppm: 1_000_000,
             internal_audit_sha256:
-                "d271fbd0579d1e2753cf5d1e763a4973beb18552426c309994d56e3f81d8f39c".into(),
+                "2fda695a42ae8fc38ad9b5b8d51c8c3de86970f2b0bc104eb6b6712f2ec03057".into(),
             internal_audit_approved: true,
             executor_review_approved: true,
             key_review_approved: true,
@@ -362,7 +362,7 @@ mod tests {
         assert!(evidence.can_promote_to_canary());
         assert_eq!(
             evidence.calculate_hash(),
-            "7be8be449e9897075e9ab9f0e7d6fb26b9140fe5ae568adf696fca8c7bb31c2a"
+            "a1bddab41e9b969f70e9a9cc42bde1350e1b4191a19513733171bfbf671a6f09"
         );
 
         let mut out_of_scope = engineering_canary();

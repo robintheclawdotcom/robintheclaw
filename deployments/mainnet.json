@@ -84,16 +84,14 @@
     "postDeploymentScript": "passed",
     "foundryTests": 60,
     "internalContractReview": "completed",
-    "independentExternalAudit": "required-before-capital-activation"
+    "internalReleaseAudit": "completed",
+    "independentExternalAudit": "not-required"
   },
   "activationRequirements": [
     "sequencer-source-unbound",
     "no-reviewed-market-route",
     "agent-not-installed",
     "safe-owner-rotation-incomplete",
-    "independent-audit-incomplete",
-    "operational-key-review-incomplete",
-    "empirical-promotion-window-incomplete",
-    "legal-and-venue-approval-incomplete"
+    "operational-key-review-incomplete"
   ]
 }

@@ -6,6 +6,7 @@
   "maxDailyTurnoverMicros": 50000000,
   "maxLeveragePpm": 1000000,
   "maxActiveEpisodesPerAccount": 1,
+  "minimumNetEdgePolicyCommitmentSha256": "39f82d4576fbd3d1e230a9d39d1971d9e6a0e004137eefd0b4cc700934728cf9",
   "minimumMaintenanceMarginCoveragePpm": 2000000,
   "maximumAuthenticatedStateAgeMs": 5000,
   "maximumExecutableQuoteAgeMs": 5000,

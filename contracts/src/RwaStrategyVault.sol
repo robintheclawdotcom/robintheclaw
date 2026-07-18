@@ -105,6 +105,8 @@ contract RwaStrategyVault is ISpotExecution, ReentrancyGuard {
         if (recoveryFinalized) revert RecoveryFinalized();
         if (amount == 0) revert InvalidAmount();
         uint256 balanceBefore = settlementAsset.balanceOf(address(this));
+        // The only caller and transfer source are the immutable treasury.
+        // slither-disable-next-line arbitrary-send-erc20
         settlementAsset.safeTransferFrom(treasury, address(this), amount);
         uint256 balanceAfter = settlementAsset.balanceOf(address(this));
         if (balanceAfter < balanceBefore || balanceAfter - balanceBefore != amount) {

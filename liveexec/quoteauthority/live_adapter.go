@@ -56,13 +56,14 @@ type LiveAdapterConfig struct {
 }
 
 type OpenEpisode struct {
-	SchemaVersion      uint8  `json:"schema_version"`
-	ExecutionAccountID string `json:"execution_account_id"`
-	IntentID           string `json:"intent_id"`
-	Phase              string `json:"phase"`
-	SpotAmount         string `json:"spot_amount"`
-	PerpBaseAmount     uint64 `json:"perp_base_amount"`
-	ObservedAtMS       uint64 `json:"observed_at_ms"`
+	SchemaVersion                uint8  `json:"schema_version"`
+	ExecutionAccountID           string `json:"execution_account_id"`
+	IntentID                     string `json:"intent_id"`
+	TargetStrategyManifestSHA256 string `json:"target_strategy_manifest_sha256"`
+	Phase                        string `json:"phase"`
+	SpotAmount                   string `json:"spot_amount"`
+	PerpBaseAmount               uint64 `json:"perp_base_amount"`
+	ObservedAtMS                 uint64 `json:"observed_at_ms"`
 }
 
 type OpenEpisodeResolver interface {
@@ -135,9 +136,17 @@ func (c LiveAdapterConfig) validate(production bool) error {
 }
 
 func (a *LiveAdapter) Quote(ctx context.Context, request AdapterRequest) (AdapterResult, error) {
-	if !validHash(request.RequestID) || !validExecutionID(request.ExecutionAccountID) ||
+	if !validHash(request.RequestID) || !validHash(request.MarketManifest) ||
+		!validExecutionID(request.ExecutionAccountID) ||
 		(request.Action != protocol.ActionEntry && request.Action != protocol.ActionUnwind) {
 		return AdapterResult{}, errors.New("invalid live adapter request")
+	}
+	if (request.Action == protocol.ActionEntry &&
+		(request.IntentID != "" || request.TargetStrategyManifestSHA256 != "")) ||
+		(request.Action == protocol.ActionUnwind &&
+			(!validHash(request.IntentID) ||
+				!protocol.IsAllowedUnwindTargetStrategyManifest(request.TargetStrategyManifestSHA256))) {
+		return AdapterResult{}, errors.New("invalid live adapter intent binding")
 	}
 	ctx, cancel := context.WithTimeout(ctx, maximumAdapterDuration)
 	defer cancel()
@@ -308,7 +317,10 @@ func (a *LiveAdapter) fitEntry(ctx context.Context, chain chainSnapshot, lighter
 
 func validateEpisode(episode OpenEpisode, request AdapterRequest, nowMS uint64) error {
 	spot, ok := positiveDecimal(episode.SpotAmount)
-	if episode.SchemaVersion != 1 || episode.ExecutionAccountID != request.ExecutionAccountID || episode.IntentID != request.IntentID ||
+	if episode.SchemaVersion != 2 || episode.ExecutionAccountID != request.ExecutionAccountID ||
+		episode.IntentID != request.IntentID ||
+		episode.TargetStrategyManifestSHA256 != request.TargetStrategyManifestSHA256 ||
+		!protocol.IsAllowedUnwindTargetStrategyManifest(episode.TargetStrategyManifestSHA256) ||
 		!ok || spot.BitLen() > 128 || episode.ObservedAtMS > nowMS || nowMS-episode.ObservedAtMS > uint64(maximumSourceAge/time.Millisecond) {
 		return errors.New("open episode identity or state is invalid")
 	}

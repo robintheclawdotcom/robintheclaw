@@ -155,7 +155,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const result = validateRepository(resolve(here, "../.."));
-    console.log(`mainnet observability: ${result.metrics} metrics, ${result.alerts} alerts, ${result.panels} panels valid`);
+    console.log(`static observability contract: ${result.metrics} metrics, ${result.alerts} alerts, ${result.panels} panels valid; live telemetry was not evaluated`);
   } catch (error) {
     console.error(`mainnet observability: ${error.message}`);
     process.exitCode = 1;

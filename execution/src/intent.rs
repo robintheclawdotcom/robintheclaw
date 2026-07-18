@@ -9,7 +9,11 @@ pub const CANARY_DAILY_TURNOVER_CAP_MICROS: u64 = 50 * USD_SCALE;
 pub const PAIR_INTENT_VERSION: u8 = 2;
 pub const CANARY_RISK_VERSION: &str = "basis-aapl-v1";
 pub const BASIS_AAPL_V1_MANIFEST_SHA256: &str =
+    "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937";
+pub const BASIS_AAPL_V1_PREVIOUS_MANIFEST_SHA256: &str =
     "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f";
+pub const BASIS_AAPL_V1_LEGACY_MANIFEST_SHA256: &str =
+    "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a";
 const PAIR_INTENT_DOMAIN: &[u8] = b"robin.execution.pair-intent.v2\0";
 const SPOT_UNWIND_DOMAIN: &[u8] = b"robin.execution.spot-unwind.v2\0";
 const MIN_ORDER_EXPIRY_MS: u64 = 5 * 60 * 1_000;
@@ -159,6 +163,17 @@ impl PairIntent {
     }
 
     pub fn validate(&self) -> Result<(), PairIntentError> {
+        self.validate_with_manifest_policy(false)
+    }
+
+    pub fn validate_for_unwind(&self) -> Result<(), PairIntentError> {
+        self.validate_with_manifest_policy(true)
+    }
+
+    fn validate_with_manifest_policy(
+        &self,
+        allow_predecessor_manifest: bool,
+    ) -> Result<(), PairIntentError> {
         if self.version != PAIR_INTENT_VERSION {
             return Err(PairIntentError::InvalidVersion);
         }
@@ -192,7 +207,7 @@ impl PairIntent {
         }
         if self.risk_version != CANARY_RISK_VERSION
             || self.evidence.strategy_version != CANARY_RISK_VERSION
-            || self.strategy_manifest_sha256 != BASIS_AAPL_V1_MANIFEST_SHA256
+            || !valid_strategy_manifest(&self.strategy_manifest_sha256, allow_predecessor_manifest)
             || self.symbol != "AAPL"
         {
             return Err(PairIntentError::InvalidRiskPolicy);
@@ -353,6 +368,15 @@ impl PairIntent {
         let micros = numerator.checked_add(denominator.checked_sub(1)?)? / denominator;
         u64::try_from(micros).ok()
     }
+}
+
+fn valid_strategy_manifest(value: &str, allow_predecessor: bool) -> bool {
+    value == BASIS_AAPL_V1_MANIFEST_SHA256
+        || allow_predecessor
+            && matches!(
+                value,
+                BASIS_AAPL_V1_PREVIOUS_MANIFEST_SHA256 | BASIS_AAPL_V1_LEGACY_MANIFEST_SHA256
+            )
 }
 
 fn valid_bytes32(value: &str) -> bool {
@@ -524,6 +548,37 @@ mod tests {
         value.strategy_manifest_sha256 = "0".repeat(64);
         value.derive_identifiers().unwrap();
         assert_eq!(value.validate(), Err(PairIntentError::InvalidRiskPolicy));
+        assert_eq!(
+            value.validate_for_unwind(),
+            Err(PairIntentError::InvalidRiskPolicy)
+        );
+    }
+
+    #[test]
+    fn unwind_accepts_only_current_and_explicit_predecessor_manifests() {
+        for manifest in [
+            BASIS_AAPL_V1_MANIFEST_SHA256,
+            BASIS_AAPL_V1_PREVIOUS_MANIFEST_SHA256,
+            BASIS_AAPL_V1_LEGACY_MANIFEST_SHA256,
+        ] {
+            let mut value = intent();
+            value.strategy_manifest_sha256 = manifest.into();
+            value.derive_identifiers().unwrap();
+            assert_eq!(value.validate_for_unwind(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn entry_rejects_predecessor_manifests() {
+        for manifest in [
+            BASIS_AAPL_V1_PREVIOUS_MANIFEST_SHA256,
+            BASIS_AAPL_V1_LEGACY_MANIFEST_SHA256,
+        ] {
+            let mut value = intent();
+            value.strategy_manifest_sha256 = manifest.into();
+            value.derive_identifiers().unwrap();
+            assert_eq!(value.validate(), Err(PairIntentError::InvalidRiskPolicy));
+        }
     }
 
     #[test]

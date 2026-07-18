@@ -25,9 +25,11 @@ type Config struct {
 	SourceRPCURL       string
 	TransactionRPCURL  string
 	DatabaseURL        string
+	RunMigrations      bool
 	ListenAddress      string
 	FeedAddress        common.Address
 	FeedCodeHash       common.Hash
+	Dependencies       DependencyPins
 	PrivateKey         *ecdsa.PrivateKey
 	SignerAddress      common.Address
 	Interval           time.Duration
@@ -48,12 +50,13 @@ func LoadConfig() (Config, error) {
 		SourceRPCURL:       os.Getenv("SEQUENCER_SOURCE_RPC_URL"),
 		TransactionRPCURL:  os.Getenv("SEQUENCER_TRANSACTION_RPC_URL"),
 		DatabaseURL:        os.Getenv("SEQUENCER_DATABASE_URL"),
+		RunMigrations:      true,
 		ListenAddress:      envOr("SEQUENCER_LISTEN_ADDRESS", "127.0.0.1:9090"),
 		Interval:           15 * time.Second,
 		RequestTimeout:     10 * time.Second,
 		LatestMaxAge:       30 * time.Second,
-		FinalizedMaxAge:    2 * time.Minute,
-		MaxFinalizedLag:    128,
+		FinalizedMaxAge:    30 * time.Minute,
+		MaxFinalizedLag:    25_000,
 		MaxGasLimit:        150_000,
 		MaxPriorityFee:     big.NewInt(100_000_000),
 		MaxFeePerGas:       big.NewInt(10_000_000_000),
@@ -66,6 +69,11 @@ func LoadConfig() (Config, error) {
 	if config.DatabaseURL == "" {
 		return Config{}, errors.New("SEQUENCER_DATABASE_URL is required")
 	}
+	runMigrations, err := strictBoolEnv("SEQUENCER_RUN_MIGRATIONS", true)
+	if err != nil {
+		return Config{}, err
+	}
+	config.RunMigrations = runMigrations
 	if err := validateIndependentRPCs(config.SourceRPCURL, config.TransactionRPCURL); err != nil {
 		return Config{}, err
 	}
@@ -77,6 +85,11 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("SEQUENCER_FEED_CODE_HASH must be a nonzero bytes32 value")
 	}
 	config.FeedCodeHash = common.HexToHash(os.Getenv("SEQUENCER_FEED_CODE_HASH"))
+	dependencies, err := loadDependencyPins()
+	if err != nil {
+		return Config{}, err
+	}
+	config.Dependencies = dependencies
 
 	key, err := parsePrivateKey(os.Getenv("SEQUENCER_PUBLISHER_PRIVATE_KEY"))
 	if err != nil {
@@ -94,10 +107,10 @@ func LoadConfig() (Config, error) {
 	if config.LatestMaxAge, err = durationEnv("SEQUENCER_LATEST_MAX_AGE", config.LatestMaxAge, 5*time.Second, 60*time.Second); err != nil {
 		return Config{}, err
 	}
-	if config.FinalizedMaxAge, err = durationEnv("SEQUENCER_FINALIZED_MAX_AGE", config.FinalizedMaxAge, 30*time.Second, 5*time.Minute); err != nil {
+	if config.FinalizedMaxAge, err = durationEnv("SEQUENCER_FINALIZED_MAX_AGE", config.FinalizedMaxAge, 10*time.Minute, 45*time.Minute); err != nil {
 		return Config{}, err
 	}
-	if config.MaxFinalizedLag, err = uintEnv("SEQUENCER_MAX_FINALIZED_LAG", config.MaxFinalizedLag, 1, 512); err != nil {
+	if config.MaxFinalizedLag, err = uintEnv("SEQUENCER_MAX_FINALIZED_LAG", config.MaxFinalizedLag, 5_000, 50_000); err != nil {
 		return Config{}, err
 	}
 	if config.MaxGasLimit, err = uintEnv("SEQUENCER_MAX_GAS_LIMIT", config.MaxGasLimit, 50_000, 250_000); err != nil {
@@ -123,6 +136,60 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("sequencer gas and fee caps exceed transaction cost cap")
 	}
 	return config, nil
+}
+
+func strictBoolEnv(name string, fallback bool) (bool, error) {
+	switch value := os.Getenv(name); value {
+	case "":
+		return fallback, nil
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, errors.New(name + " must be true or false")
+	}
+}
+
+func loadDependencyPins() (DependencyPins, error) {
+	hashNames := []string{
+		"SEQUENCER_USDG_PROXY_CODE_HASH",
+		"SEQUENCER_USDG_IMPLEMENTATION_CODE_HASH",
+		"SEQUENCER_AAPL_PROXY_CODE_HASH",
+		"SEQUENCER_AAPL_BEACON_CODE_HASH",
+		"SEQUENCER_AAPL_IMPLEMENTATION_CODE_HASH",
+	}
+	parsed := make(map[string]common.Hash, len(hashNames))
+	for _, name := range hashNames {
+		value := os.Getenv(name)
+		if !validHash(value) {
+			return DependencyPins{}, errors.New(name + " must be a nonzero bytes32 value")
+		}
+		parsed[name] = common.HexToHash(value)
+	}
+	for _, name := range []string{
+		"SEQUENCER_USDG_IMPLEMENTATION_ADDRESS",
+		"SEQUENCER_AAPL_BEACON_ADDRESS",
+		"SEQUENCER_AAPL_IMPLEMENTATION_ADDRESS",
+	} {
+		if !validAddress(os.Getenv(name)) {
+			return DependencyPins{}, errors.New(name + " must be a nonzero address")
+		}
+	}
+	pins := DependencyPins{
+		USDGProxyCodeHash:          parsed["SEQUENCER_USDG_PROXY_CODE_HASH"],
+		USDGImplementation:         common.HexToAddress(os.Getenv("SEQUENCER_USDG_IMPLEMENTATION_ADDRESS")),
+		USDGImplementationCodeHash: parsed["SEQUENCER_USDG_IMPLEMENTATION_CODE_HASH"],
+		AAPLProxyCodeHash:          parsed["SEQUENCER_AAPL_PROXY_CODE_HASH"],
+		AAPLBeacon:                 common.HexToAddress(os.Getenv("SEQUENCER_AAPL_BEACON_ADDRESS")),
+		AAPLBeaconCodeHash:         parsed["SEQUENCER_AAPL_BEACON_CODE_HASH"],
+		AAPLImplementation:         common.HexToAddress(os.Getenv("SEQUENCER_AAPL_IMPLEMENTATION_ADDRESS")),
+		AAPLImplementationCodeHash: parsed["SEQUENCER_AAPL_IMPLEMENTATION_CODE_HASH"],
+	}
+	if err := pins.Validate(); err != nil {
+		return DependencyPins{}, err
+	}
+	return pins, nil
 }
 
 func validateIndependentRPCs(source, transaction string) error {

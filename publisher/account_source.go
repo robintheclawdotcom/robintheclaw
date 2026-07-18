@@ -228,6 +228,8 @@ func (value *PGAccountSource) registered(ctx context.Context) ([]registeredAccou
 		       market.lighter_market_index
 		FROM execution_account_registrations AS registration
 		JOIN execution_accounts AS account USING (execution_account_id)
+		JOIN execution_account_observation_candidates_v1 AS candidate
+		  USING (execution_account_id)
 		LEFT JOIN execution_account_control AS account_control USING (execution_account_id)
 		LEFT JOIN execution_account_readiness AS readiness USING (execution_account_id)
 		LEFT JOIN execution_strategy_control AS strategy USING (strategy_version)
@@ -239,10 +241,9 @@ func (value *PGAccountSource) registered(ctx context.Context) ([]registeredAccou
 			WHERE symbol = 'AAPL' AND valid_from <= now() AND valid_until > now()
 			HAVING COUNT(*) = 1
 		) AS market ON TRUE
-		WHERE account.status = 'active'
 		ORDER BY registration.execution_account_id`)
 	if err != nil {
-		return nil, errors.New("query active execution accounts")
+		return nil, errors.New("query observable execution accounts")
 	}
 	defer rows.Close()
 	var result []registeredAccount
@@ -258,7 +259,7 @@ func (value *PGAccountSource) registered(ctx context.Context) ([]registeredAccou
 			&policy.exitReady, &policy.alertingReady, &policy.rotationReady, &policy.readinessFresh,
 			&policy.lighterMarketID,
 		); err != nil {
-			return nil, errors.New("read active execution account")
+			return nil, errors.New("read observable execution account")
 		}
 		account.policyActive = policy.Active(manifest, value.marketID)
 		if !validUUID(account.id) || account.lighterIndex == 0 || account.apiKeyIndex < 4 || account.apiKeyIndex > 254 ||
@@ -268,7 +269,7 @@ func (value *PGAccountSource) registered(ctx context.Context) ([]registeredAccou
 		result = append(result, account)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, errors.New("read active execution accounts")
+		return nil, errors.New("read observable execution accounts")
 	}
 	return result, nil
 }
@@ -282,35 +283,42 @@ func (value *PGAccountSource) custodyBindings(ctx context.Context, accounts []re
 		SELECT execution_account_id::text, owner_address, signer_address,
 		       factory_address, registry_address, vault_code_hash,
 		       vault_address, risk_manager_address, spot_adapter_address,
-		       deployment_tx_hash
+		       deployment_tx_hash, authorization_tx_hash, status
 		FROM robinhood_execution_bindings
-		WHERE status = 'active' AND deployment_tx_hash IS NOT NULL
+		WHERE status IN ('active', 'blocked')
+		  AND deployment_tx_hash IS NOT NULL
+		  AND authorization_tx_hash IS NOT NULL
 		  AND execution_account_id::text = ANY($1::text[])`, ids)
 	if err != nil {
-		return nil, errors.New("query active Robinhood custody bindings")
+		return nil, errors.New("query observable Robinhood custody bindings")
 	}
 	defer rows.Close()
 	result := make(map[string]RobinhoodBinding, len(accounts))
 	for rows.Next() {
-		var id, deploymentHash string
+		var id, deploymentHash, authorizationHash, status string
 		var binding RobinhoodBinding
 		if err := rows.Scan(&id, &binding.Owner, &binding.Signer, &binding.Factory, &binding.Registry, &binding.VaultCodeHash,
-			&binding.Vault, &binding.RiskManager, &binding.SpotAdapter, &deploymentHash); err != nil {
-			return nil, errors.New("read active Robinhood custody binding")
+			&binding.Vault, &binding.RiskManager, &binding.SpotAdapter, &deploymentHash, &authorizationHash, &status); err != nil {
+			return nil, errors.New("read observable Robinhood custody binding")
 		}
-		if _, exists := result[id]; exists || !validHash(deploymentHash) {
+		if _, exists := result[id]; exists || !validHash(deploymentHash) || !validHash(authorizationHash) ||
+			strings.EqualFold(deploymentHash, authorizationHash) || !custodyObservable(status) {
 			return nil, errors.New("invalid Robinhood custody binding")
 		}
 		binding.MinimumSettlementRaw = value.minimums.settlement
 		binding.MinimumOwnerGasRaw = value.minimums.ownerGas
 		binding.MinimumSignerGasRaw = value.minimums.signerGas
-		binding.ReceiptHashes = []string{strings.ToLower(deploymentHash)}
+		binding.ReceiptHashes = []string{strings.ToLower(deploymentHash), strings.ToLower(authorizationHash)}
 		result[id] = binding
 	}
 	if err := rows.Err(); err != nil {
-		return nil, errors.New("read active Robinhood custody bindings")
+		return nil, errors.New("read observable Robinhood custody bindings")
 	}
 	return result, nil
+}
+
+func custodyObservable(status string) bool {
+	return status == "active" || status == "blocked"
 }
 
 func (value *PGAccountSource) receipts(ctx context.Context, accounts []registeredAccount, bindings map[string]RobinhoodBinding) error {

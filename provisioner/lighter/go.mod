@@ -38,6 +38,6 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/supranational/blst v0.3.16 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 )

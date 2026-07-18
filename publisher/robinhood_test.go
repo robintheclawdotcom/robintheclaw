@@ -13,10 +13,10 @@ import (
 func TestDualRPCDisagreementAndReorgFailClosed(t *testing.T) {
 	left := loadEndpointFixture(t)
 	right := loadEndpointFixture(t)
-	if !sameEndpointObservation(left, right) || !receiptsFinal(left.Receipts, left.Finalized) {
+	if !sameEndpointObservation(left, right) || !receiptsFinal(left.Receipts, left.Block) {
 		t.Fatal("identical final observations should reconcile")
 	}
-	right.Finalized.Hash = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	right.Block.Hash = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	if sameEndpointObservation(left, right) {
 		t.Fatal("RPC finalized hash disagreement must fail")
 	}
@@ -26,7 +26,7 @@ func TestDualRPCDisagreementAndReorgFailClosed(t *testing.T) {
 		t.Fatal("receipt reorg disagreement must fail")
 	}
 	left.Receipts[0].BlockNumber = "0x65"
-	if receiptsFinal(left.Receipts, left.Finalized) {
+	if receiptsFinal(left.Receipts, left.Block) {
 		t.Fatal("receipt above finalized head must fail")
 	}
 }

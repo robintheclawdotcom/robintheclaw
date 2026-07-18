@@ -17,13 +17,15 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/robin-the-claw/liveexec/protocol"
 )
 
 func TestCoordinatorClientPersistsExactIntent(t *testing.T) {
 	intent := fixtureIntent(t)
 	key := bytes.Repeat([]byte{3}, 32)
 	var received []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	server := newAuthenticatedCoordinatorServer(t, key, "strategy-runner", http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/intents" || request.Method != http.MethodPost {
 			t.Errorf("unexpected coordinator request: %s %s", request.Method, request.URL.Path)
 		}
@@ -83,11 +85,61 @@ func TestCoordinatorClientRejectsUnprovenPersistence(t *testing.T) {
 	}
 	for name, handler := range cases {
 		t.Run(name, func(t *testing.T) {
-			server := httptest.NewServer(handler)
+			server := newAuthenticatedCoordinatorServer(t, key, "strategy-runner", handler)
 			defer server.Close()
 			_, err := coordinatorClient(t, server.URL, key).SubmitIntent(context.Background(), intent)
 			if !errors.Is(err, ErrCoordinatorAmbiguous) {
 				t.Fatalf("unproven persistence did not fail ambiguous: %v", err)
+			}
+		})
+	}
+}
+
+func TestCoordinatorClientRejectsUnauthenticatedResponses(t *testing.T) {
+	key := bytes.Repeat([]byte{3}, 32)
+	body := []byte(`{"status":"persisted"}`)
+	tests := []struct {
+		name      string
+		signature func(*http.Request) string
+	}{
+		{name: "missing", signature: func(*http.Request) string { return "" }},
+		{name: "wrong key", signature: func(request *http.Request) string {
+			return hex.EncodeToString(protocol.ResponseMAC(bytes.Repeat([]byte{4}, 32), request.URL.Path,
+				"strategy-runner", request.Header.Get("X-RTC-Nonce"), http.StatusCreated, body))
+		}},
+		{name: "path substitution", signature: func(request *http.Request) string {
+			return hex.EncodeToString(protocol.ResponseMAC(key, "/v1/other", "strategy-runner",
+				request.Header.Get("X-RTC-Nonce"), http.StatusCreated, body))
+		}},
+		{name: "caller substitution", signature: func(request *http.Request) string {
+			return hex.EncodeToString(protocol.ResponseMAC(key, request.URL.Path, "other-runner",
+				request.Header.Get("X-RTC-Nonce"), http.StatusCreated, body))
+		}},
+		{name: "nonce substitution", signature: func(request *http.Request) string {
+			return hex.EncodeToString(protocol.ResponseMAC(key, request.URL.Path, "strategy-runner",
+				"substituted-nonce", http.StatusCreated, body))
+		}},
+		{name: "status substitution", signature: func(request *http.Request) string {
+			return hex.EncodeToString(protocol.ResponseMAC(key, request.URL.Path, "strategy-runner",
+				request.Header.Get("X-RTC-Nonce"), http.StatusOK, body))
+		}},
+		{name: "body substitution", signature: func(request *http.Request) string {
+			return hex.EncodeToString(protocol.ResponseMAC(key, request.URL.Path, "strategy-runner",
+				request.Header.Get("X-RTC-Nonce"), http.StatusCreated, []byte(`{}`)))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				w.Header().Set("X-RTC-Response-Signature", test.signature(request))
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write(body)
+			}))
+			defer server.Close()
+			client := coordinatorClient(t, server.URL, key)
+			_, _, err := client.post(context.Background(), "/v1/intents", []byte(`{}`), client.caller, client.key)
+			if !errors.Is(err, ErrCoordinatorAmbiguous) {
+				t.Fatalf("unauthenticated response was not ambiguous: %v", err)
 			}
 		})
 	}
@@ -120,7 +172,7 @@ func TestCoordinatorClientReconcilesCommitThenTimeoutWithoutResend(t *testing.T)
 	payloadSHA256 := hex.EncodeToString(digest[:])
 	var submissions atomic.Int32
 	var statusQueries atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	server := newAuthenticatedCoordinatorServer(t, key, "strategy-runner", http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/v1/intents":
 			submissions.Add(1)
@@ -165,7 +217,7 @@ func TestCoordinatorClientRejectsPayloadCollision(t *testing.T) {
 	encoded, _ := json.Marshal(intent)
 	digest := sha256.Sum256(encoded)
 	payloadSHA256 := hex.EncodeToString(digest[:])
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	server := newAuthenticatedCoordinatorServer(t, key, "strategy-runner", http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if request.URL.Path == "/v1/intents" {
 			w.WriteHeader(http.StatusConflict)
@@ -192,7 +244,7 @@ func TestCoordinatorClientReconcilesExitCommitTimeoutWithoutResend(t *testing.T)
 	payloadSHA256 := hex.EncodeToString(digest[:])
 	var submissions atomic.Int32
 	var statusQueries atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	server := newAuthenticatedCoordinatorServer(t, exitKey, "strategy-exit", http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/v1/exits":
 			submissions.Add(1)
@@ -292,4 +344,32 @@ func fixtureExit() ExitSubmission {
 		ReconciliationDeadlineMS:   86_502_000,
 		Reason:                     "strategy_exit",
 	}
+}
+
+func newAuthenticatedCoordinatorServer(
+	t *testing.T,
+	key []byte,
+	caller string,
+	handler http.Handler,
+) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		captured := httptest.NewRecorder()
+		handler.ServeHTTP(captured, request)
+		result := captured.Result()
+		body, err := io.ReadAll(result.Body)
+		_ = result.Body.Close()
+		if err != nil {
+			t.Errorf("read captured coordinator response: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		for name, values := range result.Header {
+			w.Header()[name] = append([]string(nil), values...)
+		}
+		signature := protocol.ResponseMAC(key, request.URL.Path, caller, request.Header.Get("X-RTC-Nonce"), result.StatusCode, body)
+		w.Header().Set("X-RTC-Response-Signature", hex.EncodeToString(signature))
+		w.WriteHeader(result.StatusCode)
+		_, _ = w.Write(body)
+	}))
 }

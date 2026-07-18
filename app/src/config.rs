@@ -192,6 +192,32 @@ impl Config {
             && !self.test_faucet_address.is_empty()
     }
 
+    pub fn mainnet_product_ready(&self) -> bool {
+        self.evm_enabled
+            && self.chain_id == 4663
+            && self.app_chain_id == 4663
+            && self.agent_strategy_version == "basis-aapl-v1"
+            && !self.rpc_url.is_empty()
+            && !self.rpc_fallback_urls.is_empty()
+            && !self.app_rpc_url.is_empty()
+            && self.database_url.is_some()
+            && self.privy_app_id.is_some()
+            && self.privy_app_secret.is_some()
+            && self.privy_verification_key.is_some()
+            && !self.vault_address.is_empty()
+            && !self.anchor_address.is_empty()
+            && !self.guard_address.is_empty()
+            && !self.lighter_provisioner_url.is_empty()
+            && !self.lighter_provisioner_hmac_key.is_empty()
+            && !self.robinhood_provisioner_url.is_empty()
+            && !self.robinhood_provisioner_hmac_key.is_empty()
+            && !self.readiness_hmac_key.is_empty()
+            && !self.coordinator_command_url.is_empty()
+            && !self.coordinator_command_hmac_key.is_empty()
+            && !self.coordinator_registration_url.is_empty()
+            && !self.coordinator_registration_hmac_key.is_empty()
+    }
+
     /// Contract addresses the indexer follows, empties dropped.
     pub fn watched_addresses(&self) -> Vec<String> {
         [
@@ -232,5 +258,36 @@ mod tests {
         let c = Config::from_env();
         assert!(c.chain_id >= 1);
         assert!(!c.rpc_url.is_empty());
+    }
+
+    #[test]
+    fn mainnet_product_readiness_requires_live_infrastructure_without_sponsorship() {
+        let mut c = cfg();
+        c.evm_enabled = true;
+        c.chain_id = 4663;
+        c.app_chain_id = 4663;
+        c.agent_strategy_version = "basis-aapl-v1".into();
+        c.rpc_url = "https://rpc-primary.example".into();
+        c.rpc_fallback_urls = vec!["https://rpc-secondary.example".into()];
+        c.app_rpc_url = "https://rpc-product.example".into();
+        c.database_url = Some("postgres://runtime".into());
+        c.privy_app_id = Some("app".into());
+        c.privy_app_secret = Some("secret".into());
+        c.privy_verification_key = Some("key".into());
+        c.anchor_address = "0xbbbb".into();
+        c.lighter_provisioner_url = "lighter:10000".into();
+        c.lighter_provisioner_hmac_key = "11".repeat(32);
+        c.robinhood_provisioner_url = "robinhood:10000".into();
+        c.robinhood_provisioner_hmac_key = "22".repeat(32);
+        c.readiness_hmac_key = "33".repeat(32);
+        c.coordinator_command_url = "coordinator:10000".into();
+        c.coordinator_command_hmac_key = "44".repeat(32);
+        c.coordinator_registration_url = "coordinator:10000".into();
+        c.coordinator_registration_hmac_key = "55".repeat(32);
+        c.alchemy_wallet_rpc_url.clear();
+        assert!(c.mainnet_product_ready());
+
+        c.rpc_fallback_urls.clear();
+        assert!(!c.mainnet_product_ready());
     }
 }

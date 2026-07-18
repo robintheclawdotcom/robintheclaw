@@ -59,7 +59,7 @@ export function parseWalletRpc(input: unknown): WalletRpcRequest {
   return request as WalletRpcRequest;
 }
 
-export function configureSponsorship(request: WalletRpcRequest, policyId?: string): WalletRpcRequest {
+export function removeSponsorship(request: WalletRpcRequest): WalletRpcRequest {
   if (request.method !== "wallet_prepareCalls" && request.method !== "wallet_sendPreparedCalls") return request;
   const first = request.params[0];
   if (!first || typeof first !== "object" || Array.isArray(first)) {
@@ -70,9 +70,7 @@ export function configureSponsorship(request: WalletRpcRequest, policyId?: strin
     ...request,
     params: [{
       ...(first as Record<string, unknown>),
-      capabilities: policyId
-        ? { ...capabilities, paymasterService: { policyId } }
-        : capabilities,
+      capabilities,
     }, ...request.params.slice(1)],
   };
 }

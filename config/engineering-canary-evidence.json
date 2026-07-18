@@ -5,7 +5,7 @@
   "max_gross_notional_micros": 50000000,
   "max_daily_turnover_micros": 50000000,
   "max_leverage_ppm": 1000000,
-  "internal_audit_sha256": "d271fbd0579d1e2753cf5d1e763a4973beb18552426c309994d56e3f81d8f39c",
+  "internal_audit_sha256": "2fda695a42ae8fc38ad9b5b8d51c8c3de86970f2b0bc104eb6b6712f2ec03057",
   "internal_audit_approved": true,
   "executor_review_approved": true,
   "key_review_approved": true,

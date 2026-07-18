@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -84,6 +85,28 @@ func signedRequest(t *testing.T, server *server, path, body, nonce string) *http
 	return request
 }
 
+func verifySignedResponse(t *testing.T, key []byte, caller, path, nonce string, response *httptest.ResponseRecorder) {
+	t.Helper()
+	provided, err := hex.DecodeString(response.Header().Get("X-RTC-Response-Signature"))
+	if err != nil {
+		t.Fatalf("decode response signature: %v", err)
+	}
+	digest := sha256.Sum256(response.Body.Bytes())
+	canonical := fmt.Sprintf(
+		"RESPONSE\n%s\n%s\n%s\n%d\n%x",
+		path,
+		caller,
+		nonce,
+		response.Code,
+		digest,
+	)
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(canonical))
+	if !hmac.Equal(provided, mac.Sum(nil)) {
+		t.Fatal("response signature did not bind the response")
+	}
+}
+
 func TestHMACNonceCannotBeReplayed(t *testing.T) {
 	server, _ := newTestServer()
 	body := `{"executionAccountId":"11111111-1111-4111-8111-111111111111"}`
@@ -93,6 +116,7 @@ func TestHMACNonceCannotBeReplayed(t *testing.T) {
 	if first.Code != http.StatusNotFound {
 		t.Fatalf("first status = %d body=%s", first.Code, first.Body.String())
 	}
+	verifySignedResponse(t, server.config.HMACKey, server.config.CallerID, "/v1/links/status", nonce, first)
 	second := httptest.NewRecorder()
 	server.handler().ServeHTTP(second, signedRequest(t, server, "/v1/links/status", body, nonce))
 	if second.Code != http.StatusUnauthorized {
@@ -116,6 +140,76 @@ func TestPrepareReturnsOnlyPublicAssociationData(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "messageToSign") || !strings.Contains(response.Body.String(), "publicKey") {
 		t.Fatalf("missing public association fields: %s", response.Body.String())
+	}
+}
+
+func TestRevocationRoutesExposeOnlyOwnerSignedTombstoneProof(t *testing.T) {
+	server, lighter := newTestServer()
+	active := activateTestCredential(t, server.service, lighter)
+	lighter.registered = active.PublicKey
+	lighter.nextNonce = 8
+	body := fmt.Sprintf(`{"executionAccountId":%q}`, testExecutionID)
+	prepared := httptest.NewRecorder()
+	server.handler().ServeHTTP(
+		prepared,
+		signedRequest(t, server, "/v1/links/revoke/prepare", body, strings.Repeat("r", 32)),
+	)
+	if prepared.Code != http.StatusCreated {
+		t.Fatalf("prepare status=%d body=%s", prepared.Code, prepared.Body.String())
+	}
+	verifySignedResponse(
+		t,
+		server.config.HMACKey,
+		server.config.CallerID,
+		"/v1/links/revoke/prepare",
+		strings.Repeat("r", 32),
+		prepared,
+	)
+	var revocation publicRevocation
+	if err := json.Unmarshal(prepared.Body.Bytes(), &revocation); err != nil {
+		t.Fatal(err)
+	}
+	if revocation.MessageToSign == "" || revocation.TombstonePublicKey == "" {
+		t.Fatalf("missing revocation signature payload: %+v", revocation)
+	}
+	lower := strings.ToLower(prepared.Body.String())
+	for _, forbidden := range []string{"generated-credential", "ciphertext", "encrypted", "kmskey", "private", "secret"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("revocation response exposed %q: %s", forbidden, prepared.Body.String())
+		}
+	}
+
+	lighter.registered = revocation.TombstonePublicKey
+	confirmBody := fmt.Sprintf(
+		`{"executionAccountId":%q,"revocationId":%q,"l1Signature":%q}`,
+		testExecutionID,
+		revocation.RevocationID,
+		validTestSignature(),
+	)
+	confirmed := httptest.NewRecorder()
+	server.handler().ServeHTTP(
+		confirmed,
+		signedRequest(t, server, "/v1/links/revoke/confirm", confirmBody, strings.Repeat("c", 32)),
+	)
+	if confirmed.Code != http.StatusOK || !strings.Contains(confirmed.Body.String(), `"status":"revoked"`) {
+		t.Fatalf("confirm status=%d body=%s", confirmed.Code, confirmed.Body.String())
+	}
+	verifySignedResponse(
+		t,
+		server.config.HMACKey,
+		server.config.CallerID,
+		"/v1/links/revoke/confirm",
+		strings.Repeat("c", 32),
+		confirmed,
+	)
+
+	status := httptest.NewRecorder()
+	server.handler().ServeHTTP(
+		status,
+		signedRequest(t, server, "/v1/links/revoke/status", body, strings.Repeat("t", 32)),
+	)
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"registeredPublicKey"`) {
+		t.Fatalf("status=%d body=%s", status.Code, status.Body.String())
 	}
 }
 

@@ -16,6 +16,7 @@ type config struct {
 	Enabled                       bool
 	ListenAddress                 string
 	DatabaseURL                   string
+	RunMigrations                 bool
 	KMSKeyID                      string
 	APIURL                        string
 	ChainID                       uint32
@@ -44,6 +45,13 @@ func loadConfig() (config, error) {
 		PublisherMaxRequestsPerMinute: 600,
 		PublisherMaxConcurrent:        16,
 		AssociationTTL:                10 * time.Minute,
+		RunMigrations:                 true,
+	}
+	if raw := os.Getenv("LIGHTER_PROVISIONER_RUN_MIGRATIONS"); raw != "" {
+		if raw != "true" && raw != "false" {
+			return config{}, errors.New("LIGHTER_PROVISIONER_RUN_MIGRATIONS must be true or false")
+		}
+		value.RunMigrations = raw == "true"
 	}
 	if !value.Enabled {
 		return value, nil
