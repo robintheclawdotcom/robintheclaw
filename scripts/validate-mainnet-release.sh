@@ -4,6 +4,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 echo "validating static mainnet release artifacts; this does not prove deployment, telemetry, funding, or account readiness"
 
+bash scripts/check-no-leaks.test.sh
 node config/validate-live-policy.mjs
 node --test scripts/validate-engineering-canary.test.mjs
 node scripts/validate-engineering-canary.mjs

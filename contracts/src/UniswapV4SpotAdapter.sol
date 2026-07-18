@@ -167,6 +167,8 @@ contract UniswapV4SpotAdapter is ISpotAdapter {
         return routes[stockToken];
     }
 
+    // Only the bound nonReentrant vault can call, so callbacks cannot reenter here.
+    // slither-disable-next-line reentrancy-balance
     function executeSpot(ISpotExecution.SpotIntent calldata intent)
         external
         returns (uint256 amountOut)

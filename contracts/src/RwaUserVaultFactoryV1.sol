@@ -64,6 +64,8 @@ contract RwaUserVaultFactoryV1 is IRwaUserVaultFactoryV1, ReentrancyGuard {
         return ownerGraphs[owner];
     }
 
+    // Pre-commit calls target immutable factory-owned deployers; registry registration follows commit.
+    // slither-disable-next-line reentrancy-no-eth
     function deploy(address owner) external nonReentrant returns (Graph memory graph) {
         if (block.chainid != CHAIN_ID) revert UnsupportedChain(block.chainid);
         IMainnetExecutionRegistry registry_ = IMainnetExecutionRegistry(registry);

@@ -142,6 +142,8 @@ contract RwaStrategyVault is ISpotExecution, ReentrancyGuard {
         emit Recovered(address(token), amount);
     }
 
+    // The detector does not model the inherited nonReentrant guard.
+    // slither-disable-next-line reentrancy-balance
     function executeSpot(SpotIntent calldata intent)
         external
         nonReentrant

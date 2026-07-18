@@ -233,15 +233,13 @@ contract RwaUserMainnetForkTest is Test {
     }
 
     function _quote(bool zeroForOne, uint128 amountIn) private returns (uint256 amountOut) {
-        (amountOut,) = IV4Quoter(QUOTER)
-            .quoteExactInputSingle(
-                IV4Quoter.QuoteExactInputSingleParams({
-                    poolKey: poolKey,
-                    zeroForOne: zeroForOne,
-                    exactAmount: amountIn,
-                    hookData: bytes("")
-                })
-            );
+        IV4Quoter.QuoteExactInputSingleParams memory params;
+        params.poolKey = poolKey;
+        params.zeroForOne = zeroForOne;
+        params.exactAmount = amountIn;
+        params.hookData = bytes("");
+
+        (amountOut,) = IV4Quoter(QUOTER).quoteExactInputSingle(params);
         assertGt(amountOut, 0);
     }
 

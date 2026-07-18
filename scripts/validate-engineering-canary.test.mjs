@@ -10,7 +10,7 @@ const policy = JSON.parse(readFileSync("config/mainnet-live-policy.json", "utf8"
 
 test("binds the enabled canary to the internal audit", () => {
   const result = validateEngineeringCanary({ evidence, audit, migration, policy });
-  assert.equal(result.evidenceHash, "a1bddab41e9b969f70e9a9cc42bde1350e1b4191a19513733171bfbf671a6f09");
+  assert.equal(result.evidenceHash, "2a6bc1f8b43d24714e83a478a4c454439bd6cebedca334bd37963924d3ab9711");
   assert.equal(calculateEvidenceHash(evidence), result.evidenceHash);
 });
 

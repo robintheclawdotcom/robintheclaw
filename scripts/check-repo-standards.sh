@@ -18,6 +18,7 @@ req=(
   .githooks/pre-push
   scripts/check-git-identity.sh
   scripts/check-no-leaks.sh
+  scripts/check-no-leaks.test.sh
   scripts/check-node-packages.sh
   scripts/check-rust-crates.sh
   scripts/generate-mainnet-operator-keys.mjs

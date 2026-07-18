@@ -62,13 +62,13 @@ INSERT INTO execution_promotion_evidence (
         'max_gross_notional_micros', 50000000,
         'max_daily_turnover_micros', 50000000,
         'max_leverage_ppm', 1000000,
-        'internal_audit_sha256', '2fda695a42ae8fc38ad9b5b8d51c8c3de86970f2b0bc104eb6b6712f2ec03057',
+        'internal_audit_sha256', '19e928337af7381e09d0a088e6df02a9b1833533b8c9d8801ed4a7e8fe30a729',
         'internal_audit_approved', TRUE,
         'executor_review_approved', TRUE,
         'key_review_approved', TRUE,
         'restore_drill_approved', TRUE
     ),
-    'a1bddab41e9b969f70e9a9cc42bde1350e1b4191a19513733171bfbf671a6f09',
+    '2a6bc1f8b43d24714e83a478a4c454439bd6cebedca334bd37963924d3ab9711',
     'internal-release-audit-2026-07-17'
 ) ON CONFLICT (strategy_version, evidence_sha256) DO NOTHING;
 
@@ -86,7 +86,7 @@ BEGIN
     IF current_state <> 'canary_eligible' THEN
         RAISE EXCEPTION 'basis-aapl-v1 must already be canary eligible, found %', current_state;
     END IF;
-    IF current_evidence = 'a1bddab41e9b969f70e9a9cc42bde1350e1b4191a19513733171bfbf671a6f09' THEN
+    IF current_evidence = '2a6bc1f8b43d24714e83a478a4c454439bd6cebedca334bd37963924d3ab9711' THEN
         RETURN;
     END IF;
 
@@ -100,7 +100,7 @@ BEGIN
         'basis-aapl-v1',
         'canary_eligible',
         'canary_eligible',
-        'a1bddab41e9b969f70e9a9cc42bde1350e1b4191a19513733171bfbf671a6f09',
+        '2a6bc1f8b43d24714e83a478a4c454439bd6cebedca334bd37963924d3ab9711',
         'internal-release-audit-2026-07-17'
     );
 END;
