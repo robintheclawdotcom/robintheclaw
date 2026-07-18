@@ -628,7 +628,7 @@ INSERT INTO live_scheduler_approvals (
     jsonb_build_object(
         'id', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         'strategy_version', 'basis-aapl-v1',
-        'strategy_manifest_sha256', '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937',
+        'strategy_manifest_sha256', '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902',
         'source_config_sha256', '59106a18758a95af45e6ac1a8257843cfbd2a45fd09b5b3c3f429d3dedb56c2a',
         'dataset_manifest', 'authority-dataset',
         'market_manifest', '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -644,7 +644,7 @@ INSERT INTO live_scheduler_approvals (
         'execution_account_id', 'singleton-mainnet-canary',
         'agent_id', 'singleton-mainnet-canary',
         'strategy_version', 'basis-aapl-v1',
-        'strategy_manifest_sha256', '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937',
+        'strategy_manifest_sha256', '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902',
         'lifecycle', 'ready',
         'global_control', 'ACTIVE',
         'strategy_control', 'ACTIVE',
@@ -663,7 +663,7 @@ INSERT INTO live_scheduler_approvals (
     jsonb_build_object(
         'execution_account_id', 'singleton-mainnet-canary',
         'agent_id', 'singleton-mainnet-canary',
-        'strategy_manifest_sha256', '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937',
+        'strategy_manifest_sha256', '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902',
         'lighter_account_index', 1,
         'lighter_api_key_index', 4,
         'lighter_market_index', 1,
@@ -935,7 +935,7 @@ INSERT INTO execution_accounts (
     '0x2222222222222222222222222222222222222222',
     repeat('1', 64),
     '0x3333333333333333333333333333333333333333',
-    '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937'
+    '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902'
 );
 INSERT INTO execution_account_control (execution_account_id, mode, reason)
 VALUES ('authority-test-account', 'HALTED', 'authority test');
@@ -948,7 +948,7 @@ INSERT INTO execution_account_registrations (
     'authority-test-agent',
     'basis-aapl-v1',
     'basis-aapl-v1-risk',
-    '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937',
+    '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902',
     901,
     4,
     '0x3333333333333333333333333333333333333333',

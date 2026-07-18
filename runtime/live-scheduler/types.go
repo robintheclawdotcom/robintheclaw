@@ -17,7 +17,7 @@ import (
 
 const (
 	StrategyVersion        = "basis-aapl-v1"
-	StrategyManifestSHA256 = "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937"
+	StrategyManifestSHA256 = "7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902"
 	SourceConfigSHA256     = "59106a18758a95af45e6ac1a8257843cfbd2a45fd09b5b3c3f429d3dedb56c2a"
 	RouteSHA256            = routeSHA256
 	OraclePolicySHA256     = oraclePolicySHA256

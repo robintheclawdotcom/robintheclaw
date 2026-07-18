@@ -179,7 +179,7 @@ async function respond(route: Route, withVault: boolean, state: MockState) {
       executionAccountId: "execution-account-id",
       agentId: liveAgent.id,
       strategyVersion: "basis-aapl-v1",
-      strategyManifestSha256: "27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937",
+      strategyManifestSha256: "7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902",
       accountStatus: status === "closed" ? "closed" : "active",
       controlMode: active ? "ACTIVE" : status === "closed" ? "HALTED" : "REDUCE_ONLY",
       active,

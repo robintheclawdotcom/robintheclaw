@@ -56,5 +56,5 @@ FROM blocked;
 
 ALTER TABLE live_scheduler_approvals
     ADD CONSTRAINT live_scheduler_manifest_v3 CHECK (
-        evaluation->>'strategy_manifest_sha256' = '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937'
+        evaluation->>'strategy_manifest_sha256' = '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902'
     ) NOT VALID;

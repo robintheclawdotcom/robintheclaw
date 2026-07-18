@@ -22,7 +22,7 @@ END;
 $$;
 
 UPDATE execution_accounts AS account
-SET strategy_manifest_sha256 = '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937',
+SET strategy_manifest_sha256 = '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902',
     updated_at = now()
 WHERE account.strategy_manifest_sha256 = 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f'
   AND NOT EXISTS (
@@ -57,7 +57,7 @@ WHERE strategy_manifest_sha256 = 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56
 
 ALTER TABLE execution_accounts
     ADD CONSTRAINT execution_accounts_strategy_manifest_v3 CHECK (
-        strategy_manifest_sha256 = '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937'
+        strategy_manifest_sha256 = '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902'
         OR (
             strategy_manifest_sha256 IN (
                 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f',
@@ -69,7 +69,7 @@ ALTER TABLE execution_accounts
 
 ALTER TABLE coordinator_account_registrations
     ADD CONSTRAINT coordinator_registrations_strategy_manifest_v3 CHECK (
-        strategy_manifest_sha256 = '27df8d5a56b45f6966f8a60d866a55cfddfc65835216def5def023126c96c937'
+        strategy_manifest_sha256 = '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902'
         OR (
             strategy_manifest_sha256 IN (
                 'da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f',
