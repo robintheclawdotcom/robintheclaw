@@ -15,7 +15,7 @@ import (
 
 const (
 	StrategyVersion                = "basis-aapl-v1"
-	StrategyManifestSHA256         = "7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902"
+	StrategyManifestSHA256         = "c413f56adcabd679b600fc5df8e660ab7684aaa372ea84db135b586cce687c32"
 	PreviousStrategyManifestSHA256 = "da181add4750de3e3bc58606f6e0c1c2686a0206cc3f56ac3f0ba0c8f5c2868f"
 	LegacyStrategyManifestSHA256   = "4d89928827e929a1991f3d47d31acf6a609ed9a9f84212b7ab780e3daecf8e0a"
 	SourceConfigSHA256             = "59106a18758a95af45e6ac1a8257843cfbd2a45fd09b5b3c3f429d3dedb56c2a"

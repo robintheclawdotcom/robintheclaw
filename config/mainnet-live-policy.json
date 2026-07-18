@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "strategyVersion": "basis-aapl-v1",
-  "strategyManifestSha256": "7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902",
+  "strategyManifestSha256": "c413f56adcabd679b600fc5df8e660ab7684aaa372ea84db135b586cce687c32",
   "chainId": 4663,
   "rolloutStage": "canary",
   "executionEnabled": true,

@@ -24,7 +24,7 @@ WHERE account.agent_id = registration.agent_id
       (
           account.status = 'active'
           AND account.strategy_manifest_sha256 =
-              '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902'
+              'c413f56adcabd679b600fc5df8e660ab7684aaa372ea84db135b586cce687c32'
           AND strategy_control.strategy_manifest_sha256 =
               account.strategy_manifest_sha256
       )
@@ -39,7 +39,7 @@ WHERE account.agent_id = registration.agent_id
           AND account_control.reason =
               'strategy release changed; reconcile and reprovision'
           AND strategy_control.strategy_manifest_sha256 =
-              '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902'
+              'c413f56adcabd679b600fc5df8e660ab7684aaa372ea84db135b586cce687c32'
       )
   );
 

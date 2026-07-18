@@ -68,9 +68,9 @@ WHERE strategy_version = 'basis-aapl-v1'
   AND status <> 'closed';
 
 UPDATE execution_strategy_control
-SET strategy_manifest_sha256 = '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902',
+SET strategy_manifest_sha256 = 'c413f56adcabd679b600fc5df8e660ab7684aaa372ea84db135b586cce687c32',
     version = version + 1,
     updated_at = now()
 WHERE strategy_version = 'basis-aapl-v1'
   AND strategy_manifest_sha256 IS DISTINCT FROM
-      '7787f323c898f08bec51028ced5ee402f18f85da891515306ee330b2171c3902';
+      'c413f56adcabd679b600fc5df8e660ab7684aaa372ea84db135b586cce687c32';
