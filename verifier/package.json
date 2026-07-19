@@ -10,7 +10,7 @@
     "verify:testnet-proof": "node src/verify-testnet-proof.mjs"
   },
   "dependencies": {
-    "viem": "^2.55.1"
+    "viem": "^2.55.4"
   },
   "engines": {
     "node": ">=20"
